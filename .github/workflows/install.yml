@@ -56,6 +56,8 @@ jobs:
           # expected here. The job fails on a crash instead: a traceback, or any exit code above 1.
           if ($output -match "Traceback") { throw "preflight crashed. Read the traceback above." }
           if ($code -gt 1) { throw "preflight exited $code. Exit 0 or 1 is expected on a runner." }
+          # A PowerShell step ends with the last native exit code, so the expected 1 must not leak out.
+          exit 0
 
       - name: Register the task with a stored password
         shell: powershell

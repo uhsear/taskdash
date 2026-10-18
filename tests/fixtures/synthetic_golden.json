@@ -1,13 +1,13 @@
 {
  "alert": {
   "APP-HOST-01": {
-   "body": "Checked 13 scheduled task(s) at <TIME> Eastern Daylight Time.\n\nFAILED: Report Mailer -- File not found.\nOVERDUE: Weekly Cleanup by 5.0 h\n\n1 other task(s) need attention:\n  STUCK: Data Archiver\n\nDashboard: https://example.invalid/dash\n",
+   "body": "Checked 13 scheduled task(s) at <TIME> <TZ>.\n\nFAILED: Report Mailer -- File not found.\nOVERDUE: Weekly Cleanup by 5.0 h\n\n1 other task(s) need attention:\n  STUCK: Data Archiver\n\nDashboard: https://example.invalid/dash\n",
    "reason": "problem",
    "send": true,
    "subject": "[TaskDash] 2 problem(s) on APP-HOST-01"
   },
   "APP-HOST-02": {
-   "body": "Checked 12 scheduled task(s) at <TIME> Eastern Daylight Time.\n\nLikely shared cause: 4 tasks have failed since <TIME> Eastern Daylight Time.\nMost of their logs point at the network or a file share. Check the file shares and the network path first.\nLog evidence: 4 tasks point at the network or a file share.\nWhile the incident is open, new failures with the same cause are batched into the next e-mail. A recovery or a different kind of problem is sent at once.\n\nFAILED: Archive Copy -- Access is denied.\nFAILED: Export Packager -- Access is denied.\nFAILED: Mirror Sync -- Access is denied.\nFAILED: Report Builder -- Access is denied.\n\nDashboard: https://example.invalid/dash\n",
+   "body": "Checked 12 scheduled task(s) at <TIME> <TZ>.\n\nLikely shared cause: 4 tasks have failed since <TIME> <TZ>.\nMost of their logs point at the network or a file share. Check the file shares and the network path first.\nLog evidence: 4 tasks point at the network or a file share.\nWhile the incident is open, new failures with the same cause are batched into the next e-mail. A recovery or a different kind of problem is sent at once.\n\nFAILED: Archive Copy -- Access is denied.\nFAILED: Export Packager -- Access is denied.\nFAILED: Mirror Sync -- Access is denied.\nFAILED: Report Builder -- Access is denied.\n\nDashboard: https://example.invalid/dash\n",
    "reason": "problem",
    "send": true,
    "subject": "[TaskDash] 4 tasks failing on APP-HOST-02 since <TIME> - likely shared cause: the network or a file share"

@@ -62,7 +62,11 @@ EVENT_LOG_NAME = collect.OPERATIONAL_LOG_NAME
 # 1 to 2 KB per event that is up to ~2 MB/day, so 64 MB holds about a month: the default
 # history.days_back window survives a collector outage of a few weeks.
 RECOMMENDED_LOG_MB = 64
-EVENT_LOG_FIX = "python taskdash_preflight.py --enable-event-log --apply"
+# Both forms: a wheel install has the taskdash command, a folder install has the scripts.
+EVENT_LOG_FIX = ("taskdash preflight --enable-event-log --apply (folder install: "
+                 "python taskdash_preflight.py --enable-event-log --apply)")
+MIGRATE_FIX = ("taskdash collect --migrate --apply (folder install: "
+               "python taskdash_publish.py --migrate --apply)")
 
 # What was run at the reference install. Beyond it TaskDash is untested, not known to fail.
 TESTED_TASK_COUNT = 29
@@ -231,7 +235,7 @@ def check_service(ctx: Context) -> Result:
         if indexes:
             problems.append(f"{name} missing unique index: {', '.join(indexes)}")
     if problems:
-        return FAIL, "; ".join(problems) + ". Run: python taskdash_publish.py --migrate --apply"
+        return FAIL, "; ".join(problems) + ". Run: " + MIGRATE_FIX
     stamp = service_schema_version(ctx.item)
     if stamp is not None and stamp > SCHEMA_VERSION:
         return FAIL, (f"service schema version {stamp} is newer than this TaskDash ({TASKDASH_VERSION}, "
@@ -280,7 +284,7 @@ def check_view(ctx: Context) -> Result:
     if bad:
         problems.append("capabilities are not Query only: " + ", ".join(bad))
     if problems:
-        return FAIL, "; ".join(problems) + ". Run: python taskdash_publish.py --migrate --apply"
+        return FAIL, "; ".join(problems) + ". Run: " + MIGRATE_FIX
     return OK, f"view {view.id} hides the private fields and allows Query only"
 
 

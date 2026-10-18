@@ -55,8 +55,9 @@ SECTION_KEYS = {
 SECTIONS = tuple(SECTION_KEYS)
 SYNTHETIC_NOW = "2026-10-16T12:00:00Z"
 SYNTHETIC_FIXTURES = ("synthetic_app_host_01.json", "synthetic_app_host_02.json")
-# The alert text carries the run's own clock; two replays must still be byte-identical. Only
-# that stamp is masked, so a date inside a log line or task field still shows as a difference.
+# The alert text carries the run's own clock and the machine's time-zone name; two replays must
+# still be byte-identical on any machine. Only those are masked, so a date inside a log line or
+# task field still shows as a difference.
 _SINCE_IN_SUBJECT = re.compile(r"since (?:[A-Z][a-z]{2} \d\d )?\d\d:\d\d")
 
 
@@ -84,7 +85,8 @@ def replay(config: Dict[str, Any], fixture: Path, prior_inventory: Sequence[Dict
         "changes": _clean(changes),
         "alert": {"send": alert["send"], "reason": alert["reason"],
                   "subject": _SINCE_IN_SUBJECT.sub("since <TIME>", alert["subject"]),
-                  "body": alert["body"].replace(f"{now.astimezone():%Y-%m-%d %H:%M}", "<TIME>")},
+                  "body": alert["body"].replace(f"{now.astimezone():%Y-%m-%d %H:%M}", "<TIME>")
+                                       .replace(f"<TIME> {now.astimezone().tzname()}", "<TIME> <TZ>")},
     }
 
 
