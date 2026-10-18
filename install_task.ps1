@@ -100,11 +100,10 @@ Write-Host "Command:           $command $arguments"
 Write-Host "Working directory: $InstallDir"
 Write-Host "Trigger:           every 1 hour from $start, no end"
 Write-Host "Limits:            2 hour run limit, no second instance, catch up a missed run"
-# Measured in a clean Windows: without the right, every start fails at logon (event 104,
-# 0x80070569) and the task never runs. By default only Administrators and Backup Operators hold it.
-if ($LogonType -eq "Password") {
-    Write-Host "Needs:             'Log on as a batch job' for $User unless it is an administrator (secpol.msc > User Rights Assignment)"
-}
+# Measured in a clean Windows: a standard account saw 170 of 229 tasks (not those other accounts
+# registered), and without 'Log on as a batch job' its every start failed at logon (event 104,
+# 0x80070569). An administrator, even at this LeastPrivilege run level, saw all of them.
+Write-Host "Needs:             $User in the local Administrators group; a standard account misses other accounts' tasks"
 
 if (-not $Apply) {
     Write-Host "CHECK MODE - nothing registered. Re-run with -Apply."
