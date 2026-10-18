@@ -132,6 +132,14 @@ def test_apply_refuses_a_partial_demo_install(real_home, faked_apply):
     assert faked_apply == []
 
 
+def test_a_failed_demo_collect_run_is_not_reported_as_published(real_home, faked_apply, monkeypatch):
+    monkeypatch.setattr(publish, "main", lambda argv: 2)
+    with pytest.raises(SystemExit, match="exited with code 2"):
+        demo.main(["--apply"])
+    with pytest.raises(SystemExit, match="exited with code 2"):
+        demo.main([])
+
+
 def test_real_publish_preflight_failure_stays_inside_the_demo_folder(real_home, monkeypatch):
     before = snapshot(real_home)
     stored = {"item_id": "d" * 32, "view_item_id": "e" * 32, "dashboard_id": "f" * 32}

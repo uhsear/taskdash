@@ -102,13 +102,20 @@ def refuse_shared_ids(demo_arcgis: Dict[str, Any], real: Dict[str, Any]) -> None
                          "TaskDash.config.json and run `taskdash demo --apply` again.")
 
 
+def run_publish(publish: Any, argv: List[str]) -> None:
+    code = publish.main(argv)
+    if code:
+        raise SystemExit(f"The demo collect run exited with code {code}. Read the newest log in "
+                         f"{common.home_dir() / 'demo' / 'Logs'}, fix the cause, then re-run `taskdash demo`.")
+
+
 def check_run(demo: Path, fixtures: List[Path]) -> None:
     import taskdash_dashboard as dashboard
     import taskdash_publish as publish
 
     config_path = demo / DEFAULT_CONFIG_FILE
     for fixture in fixtures:
-        publish.main(["--fixture", str(fixture), "--config", str(config_path)])
+        run_publish(publish, ["--fixture", str(fixture), "--config", str(config_path)])
     # Not `dashboard --offline`: it writes its definition into the real install's folder.
     layer_ids = dict(dashboard.DEFAULT_LAYER_IDS)
     config = common.load_config(config_path)
@@ -139,7 +146,7 @@ def apply_run(demo: Path, fixtures: List[Path], real: Dict[str, Any]) -> None:
         setup.main(["--config", str(config_path), "--apply", "--folder", FOLDER, "--title-prefix", TITLE_PREFIX])
         refuse_shared_ids(read_demo_arcgis(config_path), real)
     for fixture in fixtures:
-        publish.main(["--fixture", str(fixture), "--config", str(config_path), "--apply", "--target", "prod"])
+        run_publish(publish, ["--fixture", str(fixture), "--config", str(config_path), "--apply", "--target", "prod"])
 
 
 def print_apply_plan(demo: Path) -> None:

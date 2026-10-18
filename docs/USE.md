@@ -9,6 +9,14 @@ This guide assumes that the install in [INSTALL.md](INSTALL.md) works. Two other
 - [TROUBLESHOOTING.md](TROUBLESHOOTING.md) explains the error messages and how to fix them.
 - [CONFIGURE.md](CONFIGURE.md) explains every config key, such as the thresholds and the retention days.
 
+## Try the demo
+
+The demo shows a dashboard on invented data. Run the commands from the TaskDash folder.
+
+- `& $td demo` runs offline. It writes only to the `demo` folder inside the TaskDash folder.
+- `& $td demo --apply` needs a finished `taskdash setup`. It creates separate `DEMO_` items in an
+  ArcGIS Online folder named `TaskDash_Demo`. It does not change your real items.
+
 ## Open the dashboard
 
 Open the link that `taskdash setup --apply` printed after `Open:`. To find the dashboard again,

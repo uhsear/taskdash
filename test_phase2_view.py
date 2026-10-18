@@ -178,7 +178,8 @@ def test_existing_view_search_uses_the_source_owner(world):
     assert queries and "owner:service_owner" in queries[0]
 
 
-def test_failed_group_share_stops_the_run_and_names_the_group(world):
+def test_failed_group_share_stops_the_run_and_names_the_group(world, monkeypatch):
+    monkeypatch.setattr(publish.time, "sleep", lambda s: None)
     world.view.refused = True
     with pytest.raises(SystemExit, match="grp1"):
         publish.create_view(world.gis, world.item, {}, apply=True)
@@ -220,6 +221,31 @@ def test_everyone_guard_refuses_and_names_the_fix():
     assert item.shares == []
     publish.share_item(item, org=True)
     assert item.shares == [("level", "ORG")]
+
+
+def test_group_share_check_rereads_a_lagging_group_index_before_refusing(monkeypatch):
+    sleeps = []
+    monkeypatch.setattr(publish.time, "sleep", sleeps.append)
+    item = _Item("x")
+    item.refused = True
+    real_list = item.sharing._list
+    calls = []
+
+    def lagging_list():  # the org group index lists the new group only on the third read
+        calls.append(1)
+        if len(calls) == 3:
+            item.refused = False
+        return real_list()
+
+    item.sharing.groups.list = lagging_list
+    publish.share_item(item, groups=["grp9"])
+    assert len(calls) == 3 and sleeps == [5, 10]
+
+    item = _Item("y")
+    item.refused = True
+    with pytest.raises(SystemExit, match="was not shared with group"):
+        publish.share_item(item, groups=["grp9"])
+    assert sleeps[2:] == [5, 10, 15]
 
 
 # ------------------------------------------------------------------ dashboard ids

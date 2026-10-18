@@ -127,9 +127,9 @@ sent only when `alerting.heartbeat_hour` is set. The example config sets it to 7
 
 ## Release notes
 
-### 1.0.0 (unreleased)
+### 1.0.0 (2026-10-18)
 
-The first stable version. It is not tagged yet. This list will carry the release date when it is.
+The first stable version.
 
 - Collects the task definitions, the run history and the log metrics of one Windows computer.
   Publishes them every hour to five hosted tables.

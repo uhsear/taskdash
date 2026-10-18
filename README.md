@@ -23,7 +23,7 @@ Not affiliated with, endorsed by or supported by Esri.
   what is missing before the first run.
 - Writes nothing to ArcGIS Online and sends no e-mail unless you pass `--apply`.
 - Includes `taskdash demo`, which shows the dashboard on invented data before you point it at
-  real tasks.
+  real tasks. See [Try the demo](docs/USE.md#try-the-demo).
 
 ## Instructions
 
@@ -60,8 +60,12 @@ tested yet. [docs/INTRODUCTION.md](docs/INTRODUCTION.md) lists the details and a
 ## Issues
 
 This repository is private. Readers are invited users. To report a problem or ask for a change,
-contact the maintainer directly. Do not put secrets, host names or log contents in a report. For a
-security problem, follow [SECURITY.md](SECURITY.md).
+open an issue in the GitHub repository you downloaded TaskDash from. Users with access can open
+issues. For a vulnerability, do not open an issue. Follow [SECURITY.md](SECURITY.md).
+
+Follow this rule for every report. Before you send a message or a log line, remove host names,
+account names, paths and other values that identify your site. Never send a captured fixture file
+or the config file. Never include secrets.
 
 ## Licensing
 

@@ -40,7 +40,8 @@ the config first. To see the message, run `taskdash preflight --offline`. The `c
 it.
 
 If the log has the line `TaskDash failed with an uncaught exception.`, TaskDash met an error that
-this guide does not list. The lines after it show where. Send them to the TaskDash maintainer.
+this guide does not list. The lines after it show where. Remove identifying values from them, as the rule in
+[Issues](../README.md#issues) says. Then send them to the TaskDash maintainer.
 
 When you run a command in a window, it prints its message there. The `collect` command also
 writes the message to its log. The `setup`, `dashboard`, `demo` and `status` commands write no log
@@ -267,7 +268,8 @@ starts PowerShell without a profile, so a profile script is not the cause.
 the colon shows what it printed instead.
 
 **Fix.** Read the printed text. TaskDash starts PowerShell without a profile, so a profile script
-is not the cause. If you cannot find the cause, send the message to the TaskDash maintainer.
+is not the cause. If you cannot find the cause, remove identifying values from the message, as the rule in
+[Issues](../README.md#issues) says. Then send it to the TaskDash maintainer.
 
 ### An ArcGIS call failed after several tries
 
@@ -427,15 +429,17 @@ existing service.
 **Cause.** A sharing call asked for public access. No TaskDash command does this, and no flag turns
 the check off.
 
-**Fix.** If you see this message, send it to the TaskDash maintainer. Do not share the item with
-everyone.
+**Fix.** If you see this message, remove identifying values from it, as the rule in
+[Issues](../README.md#issues) says. Then send it to the TaskDash maintainer. Do not share the item
+with everyone.
 
 ### An item is not private
 
 > Item `<id>` should be private but its access is '`<access>`'. Set its sharing to Owner in ArcGIS Online, then re-run.
 
 **Cause.** TaskDash expected a private item, and the item has a wider sharing level. The message
-shows the level.
+shows the level. `taskdash preflight` fails for the editable service at any level except Owner. A
+`collect` run only warns at `org` or `shared`, and it refuses to continue at `public`.
 
 **Fix.** In ArcGIS Online, open the item and set its sharing to **Owner**. Then run the command
 again.
@@ -606,6 +610,17 @@ not empty. Setup does not change an install that already exists.
 **Fix.** Pass `--title-prefix <text>` to put text before every title. Or delete the item in
 ArcGIS Online, if nothing uses it.
 
+### Another account holds the service name
+
+> Another account in this organization already has a hosted service named '`<title>`'. Pass --title-prefix to pick other names.
+
+**Cause.** Hosted service names are unique across the whole organization. Another account owns a
+service or view with one of the planned names. Setup checks this before it creates anything.
+
+**Fix.** Pass `--title-prefix <text>` to put text before every title. If `taskdash demo --apply`
+shows this message, another account already ran the demo. Ask that person to delete the `DEMO_`
+items, or run the demo from that account.
+
 ### The viewers group already exists
 
 > A group titled '`<title>`' already exists (`<id>`). Choose another with --group-title, or delete the group.
@@ -658,15 +673,15 @@ The ID is already in the config, so do not run setup again.
 
 ### Setup ends with exit code 0
 
-The setup file ends with `raise SystemExit(main())`. That line is not an error. The exit code is 0
-when setup finished or when a dry run printed its plan. A message from this guide gives exit code 1.
+Exit code 0 is not an error. Setup gives 0 when it finished or when a dry run printed its plan. A
+message from this guide gives exit code 1.
 
 ## Preflight
 
 ### Preflight ends with exit code 1
 
-The preflight file ends with `raise SystemExit(main())`, which prints no message. The last line
-counts the problems and the warnings, such as `Preflight: 3 problem(s), 0 warning(s).` The exit
+Preflight prints no error message for this exit code. The last line counts the problems and the
+warnings, such as `Preflight: 3 problem(s), 0 warning(s).` The exit
 code is:
 
 - 0 when the count of problems is 0.
@@ -776,10 +791,10 @@ sign-in.
 
 ### The widget templates are missing
 
-> Widget templates unavailable: dashboard_templates.json is missing and source dashboard `<id>` no longer exists. Restore dashboard_templates.json from git.
+> Widget templates unavailable: dashboard_templates.json is missing and source dashboard `<id>` no longer exists. Reinstall the TaskDash wheel to restore dashboard_templates.json.
 
 ```text
-No widget templates: dashboard_templates.json is missing. Restore it from git, or pass --source-dashboard <id> of any dashboard whose widget structures to borrow.
+No widget templates: dashboard_templates.json is missing. Reinstall the TaskDash wheel to restore it, or pass --source-dashboard <id> of any dashboard whose widget structures to borrow.
 ```
 
 > dashboard_templates.json is missing required template widget(s): `<names>`
@@ -804,15 +819,17 @@ as a whole. The table lists the others.
 it holds `"server_name"` with its quotes. A dashboard with a fixed computer name would show only that
 computer.
 
-**Fix.** If you edited `dashboard_templates.json`, remove the name. Otherwise send the message to
-the TaskDash maintainer.
+**Fix.** If you edited `dashboard_templates.json`, remove the name. Otherwise remove identifying
+values from the message, as the rule in [Issues](../README.md#issues) says, and send it to the
+TaskDash maintainer.
 
 The messages below come from a defect in the widget templates or the build code. Your ArcGIS setup
 does not cause them.
 
 **Fix for every message in this table.** If you edited `dashboard_templates.json`, reinstall
-TaskDash from the full wheel. That restores the shipped copy. Otherwise send the message to the
-TaskDash maintainer.
+TaskDash from the full wheel. That restores the shipped copy. Otherwise remove identifying values
+from the message, as the rule in [Issues](../README.md#issues) says, and send it to the TaskDash
+maintainer.
 
 | Message | What it checks |
 |---|---|
@@ -847,8 +864,9 @@ The last message depends on your config.
 
 **Cause.** A `privacy` switch hides a field in the read-only view, and a widget needs that field.
 
-**Fix.** If you edited `dashboard_templates.json`, remove the read of that field. Otherwise send the
-message to the TaskDash maintainer. Turn the privacy switch off only if you accept that viewers
+**Fix.** If you edited `dashboard_templates.json`, remove the read of that field. Otherwise remove
+identifying values from the message, as the rule in [Issues](../README.md#issues) says, and send it
+to the TaskDash maintainer. Turn the privacy switch off only if you accept that viewers
 see the field.
 
 ## Demo
@@ -892,10 +910,19 @@ demo then creates its own `DEMO_` items.
 2. Delete the file that the message names. It is `TaskDash.config.json` in the `demo` folder.
 3. Run `taskdash demo --apply` again.
 
+### The demo collect run failed
+
+> The demo collect run exited with code `<code>`. Read the newest log in `<folder>`, fix the cause, then re-run `taskdash demo`.
+
+**Cause.** A collect run on the invented data did not finish. The demo stops so that it does not
+report data it never published.
+
+**Fix.** Open the newest log file in the `Logs` folder inside the `demo` folder. Look up its last
+error in this guide, fix the cause, and run the same `taskdash demo` command again.
+
 ### Demo ends with exit code 0
 
-The demo file ends with `raise SystemExit(main())`. That line is not an error. The exit code is 0
-when the check or the publish finished.
+Exit code 0 is not an error. The demo gives 0 when the check or the publish finished.
 
 ## Status
 

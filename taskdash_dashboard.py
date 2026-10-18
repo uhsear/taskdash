@@ -2812,14 +2812,14 @@ def load_templates(gis: Any, source_dashboard_id: str) -> Dict[str, Any]:
         if item is None:
             raise SystemExit(
                 f"Widget templates unavailable: {TEMPLATE_FILE} is missing and source dashboard "
-                f"{source_dashboard_id} no longer exists. Restore {TEMPLATE_FILE} from git."
+                f"{source_dashboard_id} no longer exists. Reinstall the TaskDash wheel to restore {TEMPLATE_FILE}."
             )
         data = item.get_data()
         local.write_text(json.dumps(data, indent=1), encoding="utf-8")
         emit(f"Widget templates fetched from {source_dashboard_id} and cached to {TEMPLATE_FILE}.")
     else:
         raise SystemExit(
-            f"No widget templates: {TEMPLATE_FILE} is missing. Restore it from git, or pass "
+            f"No widget templates: {TEMPLATE_FILE} is missing. Reinstall the TaskDash wheel to restore it, or pass "
             f"--source-dashboard <id> of any dashboard whose widget structures to borrow."
         )
 

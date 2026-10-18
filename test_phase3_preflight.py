@@ -417,6 +417,12 @@ def test_admin_direct_member_is_ok_by_full_or_short_name(monkeypatch, user):
     assert pf.check_admin_account(admin_ctx(user))[0] == pf.OK
 
 
+def test_admin_short_name_match_needs_an_account_without_a_domain(monkeypatch):
+    monkeypatch.setattr(pf, "read_admin_members", lambda: [("HOST\\svc-td", "User")])
+    assert pf.check_admin_account(admin_ctx("CORP\\svc-td"))[0] != pf.OK
+    assert pf.check_admin_account(admin_ctx("svc-td"))[0] == pf.OK
+
+
 def test_admin_standard_account_fails_with_the_net_localgroup_fix(monkeypatch):
     monkeypatch.setattr(pf, "read_admin_members", lambda: [("HOST\\Administrator", "User")])
     status, message = pf.check_admin_account(admin_ctx("HOST\\td_probe"))

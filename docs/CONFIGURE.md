@@ -20,6 +20,13 @@ install guide.
 
 TaskDash does not install `workflow_descriptions.json` or a rules file. You create them.
 
+In a wheel install, "its own folder" is the folder named by the `TASKDASH_HOME` environment
+variable. If `TASKDASH_HOME` is not set, it is the current folder. That folder also holds `Logs` and
+the saved state. The scheduled task from the install guide does not set `TASKDASH_HOME`. It starts in
+`C:\TaskDash`, so the task and your own commands use the same folder only when you run
+`Set-Location C:\TaskDash` first, as the install guide says. If you set `TASKDASH_HOME` for your own
+commands, set it to the folder the task starts in.
+
 Follow these rules when you edit the config:
 
 - The config is JSON. In a JSON text value, write each backslash twice. For the path
@@ -366,7 +373,9 @@ To turn on alerts:
    the install guide. The hourly
    task needs the copy of the task account. Your own `preflight` run needs your copy. For the task
    account, open a window with `runas`. In each window, run this command and type the password at
-   the prompt:
+   the prompt. This step needs the `keyring` package. If you installed the plain wheel, run
+   `C:\TaskDash\venv\Scripts\python.exe -m pip install "$whl[smtp]"` first. The `$whl` variable is
+   the wheel path from step 1 of the install guide.
 
    ```powershell
    C:\TaskDash\venv\Scripts\python.exe -m keyring set taskdash-smtp <smtp.user>
@@ -507,7 +516,10 @@ are the read-only view and the dashboard. The service that holds the data stays 
 - To share with your whole organization instead, share the view and the dashboard with the
   organization in ArcGIS Online. Never share the service.
 - TaskDash never shares an item with everyone. It refuses and stops. If the config names a view, every
-  `--apply` run also refuses to continue when the service is public.
+  `collect` run also refuses to continue when the service is public.
+- If the config names a view and the service is shared with the organization or a group, `collect`
+  prints a `WARNING` line and continues. `taskdash preflight` fails for any sharing level except
+  Owner. Set the service to **Owner** to clear both.
 
 To check that nothing answers without a sign-in, run this command. It queries every table of the
 service and the view without a token, and it reads only:
@@ -703,7 +715,7 @@ The other flags are for setup, upgrades and repair. The table below marks them.
 | `--create-service` | off | Print what the hosted service would hold. With `--apply`, create it and print its item ID. A new install does not need it, because `taskdash setup` does this. |
 | `--service-name` | `TaskDash` | Name of the service that `--create-service` creates. |
 | `--create-view` | off | Print the plan for a read-only view of the service. With `--apply`, create it and print its item ID. A new install does not need it. It stops when `arcgis.view_item_id` is set. |
-| `--capture-fixture` | none | Write the tasks and events of this computer to the JSON file you name, then exit. The file holds raw command lines and account names. Keep it private. For bug reports and tests only. |
+| `--capture-fixture` | none | Write the tasks and events of this computer to the JSON file you name, then exit. The file holds raw command lines and account names. Keep it private and never send it in a report (see [Issues](../README.md#issues)). For tests only. |
 | `--fixture` | none | Read tasks and events from a captured JSON file instead of Task Scheduler. For tests only. |
 
 ### `taskdash setup`

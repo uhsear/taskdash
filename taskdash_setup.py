@@ -94,6 +94,12 @@ def refuse_name_clashes(gis: Any, args: argparse.Namespace) -> None:
                 raise SystemExit(f"{item_type} '{title}' already exists ({item.id}). Setup never "
                                  f"reuses an item: pass --title-prefix to pick other titles, or "
                                  f"delete that item in ArcGIS Online.")
+    # Hosted service names are unique across the organization, so another account's service
+    # blocks create_service after the folder exists; the owner search above cannot see it.
+    for title in (titles["service"], titles["view"]):
+        if not gis.content.is_service_name_available(title, "featureService"):
+            raise SystemExit(f"Another account in this organization already has a hosted service named "
+                             f"'{title}'. Pass --title-prefix to pick other names.")
     for group in gis.groups.search(f'title:"{args.group_title}"'):
         if group.title == args.group_title:
             raise SystemExit(f"A group titled '{args.group_title}' already exists ({group.id}). "

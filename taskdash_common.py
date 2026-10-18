@@ -26,8 +26,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence
 
-# Shown in the dashboard's About panel. 1.0.0 is reserved for the public release.
-TASKDASH_VERSION = "0.9.0"
+# Shown in the dashboard's About panel and the wheel name; release.yml checks it against the tag.
+TASKDASH_VERSION = "1.0.0"
 # Bump when TABLE_SPECS or TABLE_INDEXES change. A service stamped with a newer number was
 # migrated by a newer TaskDash, which this one may write wrongly.
 SCHEMA_VERSION = 1

@@ -11,8 +11,9 @@ access to the repository.
    put the details in the first message.
 
 Include the TaskDash version (`taskdash --version`), the steps that show the problem and what an
-attacker gains. Do not include real passwords, tokens, host names or log contents. Use made-up
-values.
+attacker gains. Do not include real passwords or tokens. Before you include a message or a log
+line, remove host names, account names, paths and other values that identify your site. Never send a
+captured fixture file or the config file. Use made-up values.
 
 The maintainer reads reports as time allows. TaskDash has no service-level agreement.
 
@@ -33,9 +34,9 @@ These controls limit what leaves the computer and who can read it.
 - **Read-only view.** The dashboard reads `TaskDash_view`, not the hosted service. The view allows
   queries only and cannot be edited. Setup creates it with the Query capability.
 - **Owner-only service.** Setup never shares the editable service. If the service is shared with
-  everyone, TaskDash refuses to create the view. Once a view is configured, it also refuses to
-  publish, and it warns when the service is shared with the organization or a group. In both cases,
-  `taskdash preflight` fails until the service is private again.
+  everyone, TaskDash refuses to create the view. Once a view is configured, `collect` also refuses to
+  publish, and it only warns when the service is shared with the organization or a group.
+  `taskdash preflight` fails for any sharing level except Owner, until the service is private again.
 - **Private viewers group.** Setup shares the view and the dashboard only with the group
   `TaskDash viewers`. The group is private and by invitation. Setup never shares anything with
   everyone or with the organization.

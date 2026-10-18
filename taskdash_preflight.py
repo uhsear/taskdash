@@ -367,7 +367,11 @@ def check_admin_account(ctx: Context) -> Result:
         return WARN, (f"WARNING: could not list the local Administrators group ({type(exc).__name__}). "
                       f"Confirm '{user}' is a member with: net localgroup Administrators")
     short = user.split("\\")[-1].lower()
-    if any(kind.lower() == "user" and (member.lower() == user.lower() or member.split("\\")[-1].lower() == short)
+    # The short-name match is only for an account Task Scheduler reports without a domain: with
+    # one, CORP\svc must not pass on a different local PC\svc.
+    bare = "\\" not in user
+    if any(kind.lower() == "user" and (member.lower() == user.lower()
+                                       or (bare and member.split("\\")[-1].lower() == short))
            for member, kind in members):
         return OK, f"task account '{user}' is in the local Administrators group"
     groups = [member for member, kind in members if kind.lower() == "group"]

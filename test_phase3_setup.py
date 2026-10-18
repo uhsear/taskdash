@@ -48,7 +48,7 @@ class FakeItem:
 
 
 class FakeGis:
-    def __init__(self, log, writes_allowed=True, folders=(), items=(), groups=()):
+    def __init__(self, log, writes_allowed=True, folders=(), items=(), groups=(), taken=()):
         self.log, self.writes_allowed = log, writes_allowed
         self.url = "https://org.example.com"
         self.users = SimpleNamespace(me=SimpleNamespace(username="owner1"))
@@ -56,7 +56,8 @@ class FakeGis:
         self.by_id = {}
         self.content = SimpleNamespace(folders=SimpleNamespace(get=self._get_folder, create=self._create_folder),
                                        search=lambda query, **kw: list(self._items),
-                                       get=lambda item_id: self.by_id.get(item_id))
+                                       get=lambda item_id: self.by_id.get(item_id),
+                                       is_service_name_available=lambda name, kind: name not in taken)
         self.groups = SimpleNamespace(search=lambda query, **kw: list(self._groups), create=self._create_group)
 
     def _write(self, name):
@@ -185,6 +186,14 @@ def test_refuses_an_existing_item_with_a_planned_title(tmp_path, title, kind, pr
 def test_an_item_with_the_title_but_another_type_is_not_a_clash(tmp_path):
     path, args = _args(tmp_path)
     assert setup.setup(FakeGis([], items=[FakeItem("m1", "TaskDash", "Web Map")]), CONFIG, path, args) == 0
+
+
+def test_refuses_a_service_name_another_account_holds(tmp_path):
+    path, args = _args(tmp_path, apply=True)
+    log = []
+    with pytest.raises(SystemExit, match="Another account .* 'TaskDash_view'"):
+        setup.setup(FakeGis(log, taken={"TaskDash_view"}), CONFIG, path, args)
+    assert log == []
 
 
 def test_refuses_an_existing_group(tmp_path):

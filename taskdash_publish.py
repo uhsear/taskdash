@@ -1343,9 +1343,14 @@ def share_item(item: Any, *, everyone: bool = False, org: bool = False,
     for group in groups:
         item.sharing.groups.add(group)
     # groups.add() returns False both for a failed share and for a group already shared, so the
-    # item's group list is the one answer that tells the two apart.
-    have = {g.id for g in item.sharing.groups.list()}
-    not_shared = [getattr(g, "id", g) for g in groups if getattr(g, "id", g) not in have]
+    # item's group list is the one answer that tells the two apart. list() reads the org group
+    # search index, which can lag a group created seconds earlier, so a miss is re-read first.
+    for attempt in range(4):
+        have = {g.id for g in item.sharing.groups.list()}
+        not_shared = [getattr(g, "id", g) for g in groups if getattr(g, "id", g) not in have]
+        if not not_shared or attempt == 3:
+            break
+        time.sleep(5 * (attempt + 1))
     if not_shared:
         raise SystemExit(f"Item {item.id} was not shared with group(s) {', '.join(map(str, not_shared))}. "
                          f"Share it with them by hand, or add the collector account to those groups "

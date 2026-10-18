@@ -47,7 +47,6 @@ def _ids(element):
 
 def test_version_constant_has_the_major_minor_patch_format():
     assert re.fullmatch(r"\d+\.\d+\.\d+", taskdash_common.TASKDASH_VERSION)
-    assert taskdash_common.TASKDASH_VERSION != "1.0.0"  # 1.0.0 is the public release
 
 
 def test_about_panel_is_on_the_collector_tab_with_version_and_interval():

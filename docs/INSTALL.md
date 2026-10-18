@@ -80,13 +80,22 @@ hour as an administrator. The line removes those inherited permissions. It allow
 Administrators group, you and the task account. Step 4 checks the result.
 
 The `$whl` line prints the full path of the wheel. If it prints nothing, the wheel is not in
-`Downloads`. Then set the path yourself, for example `$whl = "D:\Files\taskdash-0.9.0-py3-none-any.whl"`.
+`Downloads`. Then set the path yourself, for example `$whl = "D:\Files\taskdash-1.0.0-py3-none-any.whl"`.
 Keep the original file name; pip rejects a renamed wheel, such as one with ` (1)` in its name.
+
+If you want e-mail alerts that sign in to a mail server, install the `smtp` extra instead. It adds
+the `keyring` package. Run this in place of the `pip install $whl` line:
+
+```powershell
+C:\TaskDash\venv\Scripts\python.exe -m pip install "$whl[smtp]"
+```
+
+You can also add it later by running that line again. Alerts without a mail sign-in need no extra.
 
 The install takes a few minutes. It ends with a line that starts `Successfully installed` and
 names `taskdash-<version>`. Lines that start `[notice] A new release of pip is available` are
 harmless; you do not need to upgrade pip. The last command prints `TaskDash <version>`, for example
-`TaskDash 0.9.0`.
+`TaskDash 1.0.0`.
 
 TaskDash keeps its config, logs and state in the folder it starts in. **Run these two lines in every
 new PowerShell window before you use `$td`:**
@@ -425,9 +434,10 @@ C:\TaskDash\proenv\Scripts\taskdash.exe --version
   report success. `C:\TaskDash\proenv` is short enough, and the task account can read it.
 - Use `--no-deps`. Without it, pip replaces packages that conda manages in the clone, such as
   `cffi` and `pywin32`, and the clone can break.
-- In every later step, use `C:\TaskDash\proenv\Scripts\taskdash.exe` where the guide uses
-  `C:\TaskDash\venv\Scripts\taskdash.exe`, and `C:\TaskDash\proenv\python.exe` where it uses
-  `C:\TaskDash\venv\Scripts\python.exe`. In step 7, pass the same `taskdash.exe` as `-Python`.
+- In the `$td` line of step 1, use `C:\TaskDash\proenv\Scripts\taskdash.exe` in place of
+  `C:\TaskDash\venv\Scripts\taskdash.exe`. Where a later step names
+  `C:\TaskDash\venv\Scripts\python.exe`, use `C:\TaskDash\proenv\python.exe`. The `$whl` line needs
+  no change. In step 7, pass the same `taskdash.exe` as `-Python`.
 
 ## Known limits
 
