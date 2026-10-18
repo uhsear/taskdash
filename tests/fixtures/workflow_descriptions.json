@@ -1,0 +1,15 @@
+{
+  "_notes": "Synthetic task descriptions for the test suite, in the shipped workflow_descriptions.json format.",
+  "tasks": {
+    "Server Restart Window": {
+      "description": "Restarts the application servers in the weekly maintenance window.",
+      "acknowledge_config_warnings": ["StartWhenAvailable"],
+      "acknowledge_reason": "Catch-up is off on purpose. A catch-up run could restart the servers in business hours."
+    },
+    "Geodatabase Upkeep": {
+      "description": "Reconciles, compresses and rebuilds statistics on the enterprise geodatabase.",
+      "acknowledge_config_warnings": ["StartWhenAvailable"],
+      "acknowledge_reason": "Catch-up is off on purpose. A catch-up run could start heavy database work in business hours."
+    }
+  }
+}

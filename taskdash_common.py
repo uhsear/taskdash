@@ -1,0 +1,1112 @@
+"""Shared plumbing for the TaskDash scheduled-task monitor.
+
+Driver: taskdash_publish.py (single entry point)
+Source: Windows Task Scheduler + Microsoft-Windows-TaskScheduler/Operational log + workflow log files
+Target: ArcGIS Online hosted table service (TaskInventory / TaskRuns / TaskMetrics)
+
+Config lives in TaskDash.config.json next to this file (installed from a wheel: in TASKDASH_HOME,
+else the working directory). Host identity comes from
+`host_name_override` so a machine rename is a one-line config change -- a task-server
+migration once silently forked the dataset because identity was socket.gethostname().
+"""
+
+from __future__ import annotations
+
+import builtins
+import contextlib
+import json
+import logging
+import os
+import random
+import re
+import subprocess
+import sys
+import time
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence
+
+# Shown in the dashboard's About panel. 1.0.0 is reserved for the public release.
+TASKDASH_VERSION = "0.9.0"
+# Bump when TABLE_SPECS or TABLE_INDEXES change. A service stamped with a newer number was
+# migrated by a newer TaskDash, which this one may write wrongly.
+SCHEMA_VERSION = 1
+
+DEFAULT_CONFIG_FILE = "TaskDash.config.json"
+DEFAULT_POWERSHELL_TIMEOUT_SECONDS = 180
+DEFAULT_CHUNK_SIZE = 200
+
+TABLE_INVENTORY = "TaskInventory"
+TABLE_RUNS = "TaskRuns"
+TABLE_METRICS = "TaskMetrics"
+TABLE_COLLECTOR_RUNS = "CollectorRuns"
+TABLE_TASK_CHANGES = "TaskChanges"
+
+
+# --------------------------------------------------------------------------- arcpy guard
+
+def disable_arcpy_import() -> None:
+    """Keep ArcGIS API imports from initializing an ArcPy/Pro license.
+
+    This process only edits hosted AGOL tables. Under a non-interactive scheduled task the
+    ArcGIS API probes ArcPy during import and dies before AGOL is reached if the Pro license
+    is not initialized. Raising ImportError for ArcPy makes the API pick a non-ArcPy engine.
+    """
+    if getattr(builtins, "_taskdash_arcpy_disabled", False):
+        return
+
+    os.environ.setdefault("ARCGIS_IO_ENGINE", "shapefile")
+    real_import = builtins.__import__
+
+    def guarded_import(name, globals=None, locals=None, fromlist=(), level=0):
+        if name in {"arcpy", "arcgisscripting"} or name.startswith(("arcpy.", "arcgisscripting.")):
+            raise ImportError(f"{name} disabled for AGOL-only publish")
+        return real_import(name, globals, locals, fromlist, level)
+
+    builtins._taskdash_arcpy_disabled = True
+    builtins.__import__ = guarded_import
+
+
+# --------------------------------------------------------------------------- paths & config
+
+def _folder_deploy() -> bool:
+    """True when rules/ sits beside this module: the plain-folder install, where one folder
+    holds both the shipped data and the per-install files."""
+    return (Path(__file__).resolve().parent / "rules").is_dir()
+
+
+def data_dir() -> Path:
+    """Shipped read-only data: rules/default.json, dashboard_templates.json, the example config."""
+    if _folder_deploy():
+        return Path(__file__).resolve().parent
+    return Path(sys.prefix) / "share" / "taskdash"
+
+
+def home_dir() -> Path:
+    """Per-install files: config, Logs, alert_state.json, pending files, dashboard output."""
+    if _folder_deploy():
+        return Path(__file__).resolve().parent
+    return Path(os.environ.get("TASKDASH_HOME") or Path.cwd()).resolve()
+
+
+def runtime_dir() -> Path:
+    """Where this install keeps its own files (home_dir). Callers that need shipped data use data_dir."""
+    return home_dir()
+
+
+_CONFIG_SECTION_KEYS = {"arcgis", "alerting", "scheduler", "history", "metrics", "upload",
+                       "retention", "logging", "smtp", "privacy", "rules"}
+_CONFIG_TOP_LEVEL_KEYS = _CONFIG_SECTION_KEYS | {"host_name_override", "powershell_timeout_seconds"}
+
+# Dotted key -> expected type, built from every config.get(...) call across the TaskDash .py
+# files (see taskdash_collect.py:should_include_task, taskdash_publish.py:collect_everything/
+# publish/main, taskdash_common.py:connect_agol/load_mail_settings). Keys not read anywhere
+# are deliberately absent -- validating a key the code never looks at would just be noise.
+_CONFIG_STRING_KEYS = {
+    "host_name_override", "arcgis.url", "arcgis.username", "arcgis.password",
+    "arcgis.username_env", "arcgis.password_env", "arcgis.item_id", "arcgis.test_item_id",
+    "arcgis.view_item_id", "arcgis.test_view_item_id",
+    "arcgis.dashboard_id", "alerting.mail_config_path", "scheduler.task_name_regex",
+    "scheduler.task_path_regex", "scheduler.action_regex", "scheduler.exclude_task_name_regex",
+    "scheduler.interactive_required_pattern", "alerting.healthcheck_url",
+    "scheduler.collector_task_name",
+    "arcgis.service_description", "arcgis.service_tags", "arcgis.dashboard_tags",
+    "alerting.dashboard_url",
+    "logging.log_dir", "arcgis.profile", "smtp.host", "smtp.from", "smtp.user",
+}
+_CONFIG_NUMBER_KEYS = {
+    "powershell_timeout_seconds", "alerting.heartbeat_hour", "alerting.realert_hours",
+    "alerting.shared_cause_min_tasks", "alerting.incident_digest_hours",
+    "scheduler.overdue_grace_minutes", "scheduler.collector_interval_minutes",
+    "history.max_events_per_run", "history.days_back", "history.first_run_max_events",
+    "metrics.days_back", "metrics.max_log_files_per_task", "metrics.max_lines_per_file",
+    "upload.chunk_size", "retention.runs_days", "retention.metrics_days",
+    "retention.changes_days", "logging.max_log_age_days", "smtp.port",
+}
+_CONFIG_BOOL_KEYS = {"alerting.enabled", "scheduler.exclude_microsoft_tasks",
+                    "scheduler.include_disabled", "arcgis.allow_plaintext_password",
+                    "smtp.starttls", "smtp.ssl", "smtp.allow_plaintext_auth",
+                    "privacy.hide_command_lines", "privacy.hide_sample_lines",
+                    "privacy.hide_accounts", "privacy.hide_paths"}
+_CONFIG_STRING_LIST_KEYS = {"alerting.to", "scheduler.exclude_command_target_types",
+                            "rules.profiles"}
+_CONFIG_DICT_KEYS = {"metrics.log_directory_overrides", "metrics.tasks"}
+# alerting.maintenance_windows: list of {"task": regex str, "start": ISO str, "end": ISO str,
+# "reason": str}. Only the list-of-objects shape is validated here; a malformed entry (bad
+# regex, unparseable start/end) is caught defensively at runtime by
+# taskdash_publish._active_maintenance_windows/_task_in_maintenance, which warn and skip it
+# rather than fail the whole config.
+_CONFIG_LIST_OF_DICT_KEYS = {"alerting.maintenance_windows"}
+
+_MISSING = object()
+
+
+def _section_allowed_keys() -> Dict[str, set]:
+    """Section -> its known keys, derived from the typed-key sets above (one source of truth)."""
+    allowed: Dict[str, set] = {section: set() for section in _CONFIG_SECTION_KEYS}
+    for keys in (_CONFIG_STRING_KEYS, _CONFIG_NUMBER_KEYS, _CONFIG_BOOL_KEYS,
+                 _CONFIG_STRING_LIST_KEYS, _CONFIG_DICT_KEYS, _CONFIG_LIST_OF_DICT_KEYS):
+        for dotted in keys:
+            section, _, key = dotted.partition(".")
+            if section in allowed:
+                allowed[section].add(key)
+    return allowed
+
+
+def _unknown_section_keys(config: Dict[str, Any]) -> List[tuple]:
+    """(section, key) for every unrecognised key inside a known section; '_' keys are notes."""
+    allowed = _section_allowed_keys()
+    return [(section, key) for section in sorted(allowed) if isinstance(config.get(section), dict)
+            for key in config[section] if key not in allowed[section] and not key.startswith("_")]
+
+
+def _config_path_value(config: Dict[str, Any], dotted_key: str) -> Any:
+    node: Any = config
+    for part in dotted_key.split("."):
+        if not isinstance(node, dict) or part not in node:
+            return _MISSING
+        node = node[part]
+    return node
+
+
+def _redact_config_value(dotted_key: str, value: Any) -> Any:
+    """Never echo a credential into a SystemExit message, even when its type is wrong."""
+    if "password" in dotted_key.lower() or "secret" in dotted_key.lower():
+        return "<redacted>"
+    return value
+
+
+def _validate_config(config: Dict[str, Any]) -> List[str]:
+    errors: List[str] = []
+
+    def check(dotted_key: str, value: Any, expected: str, ok: bool) -> None:
+        if not ok:
+            errors.append(f"{dotted_key} must be {expected}, got {_redact_config_value(dotted_key, value)!r}")
+
+    for section in _CONFIG_SECTION_KEYS:
+        if section in config and not isinstance(config[section], dict):
+            check(section, config[section], "an object", False)
+
+    for key in _CONFIG_STRING_KEYS:
+        value = _config_path_value(config, key)
+        # false turns the Interactive-logon rule off (a licence that is not Single Use).
+        if key == "scheduler.interactive_required_pattern" and value is False:
+            continue
+        if value is not _MISSING and value is not None:
+            check(key, value, "a string", isinstance(value, str))
+
+    for key in _CONFIG_NUMBER_KEYS:
+        value = _config_path_value(config, key)
+        if value is not _MISSING and value is not None:
+            # json accepts NaN/Infinity; int(nan) and timedelta(hours=inf) would break the run.
+            check(key, value, "a finite number", isinstance(value, (int, float))
+                  and not isinstance(value, bool) and value == value and abs(value) != float("inf"))
+
+    for key in _CONFIG_BOOL_KEYS:
+        value = _config_path_value(config, key)
+        if value is not _MISSING and value is not None:
+            check(key, value, "a boolean", isinstance(value, bool))
+
+    for key in _CONFIG_STRING_LIST_KEYS:
+        value = _config_path_value(config, key)
+        if value is not _MISSING and value is not None:
+            ok = isinstance(value, list) and all(isinstance(item, str) for item in value)
+            check(key, value, "a list of strings", ok)
+
+    for key in _CONFIG_DICT_KEYS:
+        value = _config_path_value(config, key)
+        if value is not _MISSING and value is not None:
+            check(key, value, "an object", isinstance(value, dict))
+
+    for key in _CONFIG_LIST_OF_DICT_KEYS:
+        value = _config_path_value(config, key)
+        if value is not _MISSING and value is not None:
+            ok = isinstance(value, list) and all(isinstance(item, dict) for item in value)
+            check(key, value, "a list of objects", ok)
+
+    return errors
+
+
+def load_config(config_path: Optional[Path] = None, *, defer_warnings: bool = False):
+    """Load and validate TaskDash.config.json.
+
+    Reads utf-8-sig so a BOM (PowerShell 5.1's Out-File / Set-Content and Notepad both write
+    one by default) does not fail json.loads on the leading byte. Every problem is collected
+    and reported together, not one-at-a-time, so a config with several typos is fixed in one
+    pass. Unknown top-level keys only warn, for forward compatibility with a newer config.
+
+    defer_warnings=True returns (config, warnings) instead of emit()-ing the unknown-key
+    warnings immediately, and the caller decides when to emit them. main() needs this: it calls
+    load_config() before setup_logging() (log_dir itself comes from the config), so an
+    immediate emit()'s logging.info() is silently dropped by the unconfigured root logger, and
+    its print() raises and is swallowed under pythonw/Task Scheduler where stdout is None --
+    the warning never reaches the log file, the one place a headless run's problems get read.
+    Callers that don't pass it keep the original immediate-emit return type (just the dict).
+    """
+    path = config_path or (runtime_dir() / DEFAULT_CONFIG_FILE)
+    if not path.exists():
+        raise SystemExit(f"Config not found at {path}: copy TaskDash.config.example.json to "
+                         f"{path.name} in {path.parent} and fill it in.")
+    try:
+        config = json.loads(path.read_text(encoding="utf-8-sig"))
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"Config at {path} is not valid JSON (line {exc.lineno}): {exc.msg}")
+    if not isinstance(config, dict):
+        raise SystemExit(f"Config at {path} must be a JSON object, not {type(config).__name__}.")
+
+    errors = _validate_config(config)
+    unknown_keys = _unknown_section_keys(config)
+    # A mistyped privacy key would silently leave a field published, so privacy fails closed;
+    # a typo elsewhere only loses that one setting and warns.
+    valid_privacy = ", ".join(sorted(_section_allowed_keys()["privacy"]))
+    for section, key in unknown_keys:
+        if section == "privacy":
+            errors.append(f"unknown key 'privacy.{key}' (valid privacy keys: {valid_privacy})")
+    if errors:
+        raise SystemExit(
+            f"Config at {path} has {len(errors)} problem(s) -- fix and re-run:\n  "
+            + "\n  ".join(errors)
+        )
+    # A missing rules.profiles must not fall back silently: an install that had its own rules would
+    # lose them, and --refresh-metrics --apply would then delete every row they mined.
+    if not isinstance(config.get("rules"), dict) or "profiles" not in config["rules"]:
+        raise SystemExit(
+            f"Config at {path} has no rules.profiles. Add \"rules\": {{\"profiles\": []}} to use only "
+            f"rules/default.json, or list your rules files, e.g. {{\"profiles\": [\"rules/<org>.json\"]}}."
+        )
+    # The rules files and metrics.tasks are checked here too, so a bad regex stops the run before
+    # any work. Imported late: taskdash_metrics imports this module.
+    import taskdash_metrics
+    taskdash_metrics.configure_rules(config)
+
+    warnings = []
+    for key in config:
+        # "_notes"-style keys are the config's own documentation, not settings.
+        if key not in _CONFIG_TOP_LEVEL_KEYS and not key.startswith("_"):
+            message = f"WARNING: unknown config key '{key}' in {path} -- ignored (check for a typo)."
+            if defer_warnings:
+                warnings.append(message)
+            else:
+                emit(message)
+
+    for section, key in unknown_keys:
+        if section == "privacy":
+            continue
+        message = f"WARNING: unknown config key '{section}.{key}' in {path} -- ignored (check for a typo)."
+        if defer_warnings:
+            warnings.append(message)
+        else:
+            emit(message)
+
+    return (config, warnings) if defer_warnings else config
+
+
+def get_host_name(config: Dict[str, Any]) -> str:
+    """Stable logical host identity. Override wins so a rename never forks the dataset.
+
+    The override is what survives a machine rename, but it also means running this from the
+    wrong box would file that box's tasks under the configured host. Warn loudly rather than
+    block: after a genuine rename the mismatch is expected and correct.
+    """
+    import socket
+
+    actual = socket.gethostname()
+    override = normalize_text(config.get("host_name_override"))
+    if override and override.lower() != actual.lower():
+        emit(f"WARNING: host_name_override is '{override}' but this machine is '{actual}'. "
+             f"Collected data describes '{actual}' and will be published as '{override}'. "
+             f"Correct after a rename; wrong if you meant to run this on '{override}'.")
+    return override or actual
+
+
+# --------------------------------------------------------------------------- logging
+
+def setup_logging(log_dir: Path, prefix: str = "taskdash") -> Path:
+    log_dir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_path = log_dir / f"{prefix}_{stamp}.log"
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(levelname)s - %(message)s",
+        handlers=[logging.FileHandler(log_path, encoding="utf-8")],
+        force=True,
+    )
+    return log_path
+
+
+def emit(message: str) -> None:
+    """Log and print. Under pythonw/Task Scheduler stdout is None, so the file is the record."""
+    logging.info(message)
+    try:
+        print(message, flush=True)
+    except (ValueError, OSError, AttributeError):
+        pass
+
+
+# setup_logging's own "{prefix}_{stamp}.log", the bootstrap*.log files written directly by
+# run_taskdash.cmd (its stdout/stderr redirect, before setup_logging ever runs), and the
+# --preview-alert output.
+TASKDASH_LOG_GLOBS = ("taskdash_*.log", "bootstrap*.log", "alert_preview_*.txt")
+
+
+def cleanup_old_logs(log_dir: Path, max_age_days: int) -> None:
+    """Delete TaskDash's own aged logs only.
+
+    Globbing every *.log in log_dir would delete a shared or misconfigured log_dir's other
+    programs' logs too; restricting to TaskDash's own names keeps this safe even if log_dir
+    is ever pointed somewhere it should not be.
+    """
+    if max_age_days <= 0 or not log_dir.exists():
+        return
+    cutoff = datetime.now().timestamp() - (max_age_days * 86400)
+    for pattern in TASKDASH_LOG_GLOBS:
+        for path in log_dir.glob(pattern):
+            try:
+                if path.stat().st_mtime < cutoff:
+                    path.unlink()
+            except OSError as exc:
+                logging.warning("Could not remove old log %s: %s", path, exc)
+
+
+# --------------------------------------------------------------------------- process control
+
+class RunLockHeld(Exception):
+    """Another TaskDash run already holds the single-instance lock.
+
+    held_since is the holder's own recorded start time (best-effort; None if the lock file's
+    metadata is missing or unreadable), so a caller can tell a normal hourly overlap from a run
+    that has been stuck holding the lock for hours -- see STALE_LOCK_HOURS.
+    """
+
+    def __init__(self, message: str, held_since: Optional[datetime] = None):
+        super().__init__(message)
+        self.held_since = held_since
+
+
+STALE_LOCK_HOURS = 2  # a run stuck this long is treated as dead, not a normal overlap
+
+
+def _lock_metadata(lock_path: Path) -> str:
+    """Read the holder's pid/start-time text without touching the locked byte at offset 0.
+
+    msvcrt.locking(LK_NBLCK) locks exactly 1 byte at offset 0. Reading that byte from a second
+    handle while it is locked raises PermissionError on Windows (verified); metadata is written
+    starting at offset 1 by the lock holder below specifically so a contending process can still
+    read it.
+    """
+    try:
+        with open(lock_path, "rb") as fh:
+            fh.seek(1)
+            return fh.read().decode("utf-8", errors="replace").strip()
+    except OSError:
+        return ""
+
+
+def _lock_started(metadata: str) -> Optional[datetime]:
+    match = re.search(r"started=(\S+)", metadata)
+    return parse_iso_datetime(match.group(1)) if match else None
+
+
+@contextlib.contextmanager
+def run_lock(log_dir: Path, name: str = "taskdash.lock"):
+    """Single-instance lock for the process lifetime; raises RunLockHeld on contention.
+
+    msvcrt.locking(LK_NBLCK) fails immediately instead of blocking: a slow hourly pass still
+    running when the next one starts must be skipped, not queued, or two processes would race
+    the same adds/purges against AGOL. msvcrt is Windows-only and imported lazily so importing
+    this module does not require it. The lock byte itself (offset 0) never carries data; the
+    holder's pid and UTC start time are written from offset 1 onward so RunLockHeld.held_since
+    can be read on contention without touching the locked byte. Caller pattern:
+
+        try:
+            with run_lock(log_dir):
+                ...
+        except RunLockHeld as exc:
+            emit("Another TaskDash run is in progress; exiting.")
+            raise SystemExit(0)
+    """
+    import msvcrt
+
+    log_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = log_dir / name
+    handle = open(lock_path, "a+b")
+    try:
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+    except OSError as exc:
+        handle.close()
+        metadata = _lock_metadata(lock_path)
+        detail = f" ({metadata})" if metadata else ""
+        raise RunLockHeld(f"Run lock at {lock_path} is held by another process{detail}.",
+                          held_since=_lock_started(metadata)) from exc
+    try:
+        handle.seek(1)
+        handle.truncate()
+        handle.write(f"pid={os.getpid()} started={utc_now().isoformat()}".encode("utf-8"))
+        handle.flush()
+        yield lock_path
+    finally:
+        try:
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        finally:
+            handle.close()
+
+
+def atomic_write_json(path: Path, data: Any) -> None:
+    """Write JSON via a same-directory temp file + os.replace.
+
+    os.replace is atomic on the same volume, so a crash mid-write cannot leave alert_state.json
+    truncated -- a truncated state file would make every alert type look never-sent and re-fire
+    every heartbeat/failure alert on the next run.
+    """
+    path = Path(path)
+    tmp = path.with_name(f".{path.name}.tmp{os.getpid()}")
+    try:
+        tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        # On Windows, a virus scanner or the search indexer can hold the target open for a moment,
+        # and os.replace then fails with WinError 5 (seen 2026-10-17 in 1 of 50 suite runs). A lost
+        # alert state re-sends the last e-mail, so retry briefly before giving up.
+        for attempt in range(5):
+            try:
+                os.replace(tmp, path)
+                break
+            except PermissionError:
+                if attempt == 4:
+                    raise
+                time.sleep(0.05 * 2 ** attempt)
+    except Exception:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
+# --------------------------------------------------------------------------- text / number helpers
+
+def normalize_text(value: Any) -> str:
+    if value is None:
+        return ""
+    return str(value).replace("\x00", "").strip()
+
+
+def safe_int(value: Any) -> Optional[int]:
+    if value is None or value == "":
+        return None
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def safe_float(value: Any) -> Optional[float]:
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def escape_sql_string(value: str) -> str:
+    return str(value).replace("'", "''")
+
+
+def parse_iso_datetime(value: Any) -> Optional[datetime]:
+    text = normalize_text(value)
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    # .NET round-trip format can carry 7 fractional digits; Python accepts at most 6.
+    text = re.sub(r"(\.\d{6})\d+", r"\1", text)
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def to_epoch_millis(value: Any) -> Optional[int]:
+    parsed = value if isinstance(value, datetime) else parse_iso_datetime(value)
+    if parsed is None:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return int(parsed.timestamp() * 1000)
+
+
+def utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def round_hours(value: float) -> float:
+    return round(value, 2)
+
+
+def short_duration(seconds: float) -> str:
+    """One unit style for every reason and e-mail line: "45 s", "12 min", "3.2 h".
+
+    The dashboard's fmtDur uses the same unit words, so a value reads alike in both places.
+    """
+    if seconds < 120:
+        return f"{seconds:.0f} s"
+    if seconds < 7200:
+        return f"{seconds / 60.0:.0f} min"
+    return f"{seconds / 3600.0:.1f} h"
+
+
+# --------------------------------------------------------------------------- powershell
+
+def run_powershell_json(script: str, timeout_seconds: int = DEFAULT_POWERSHELL_TIMEOUT_SECONDS) -> List[Dict[str, Any]]:
+    """Run a PowerShell snippet that ends in ConvertTo-Json and return a list of dicts.
+
+    Output is decoded as UTF-8 explicitly. The old wrapper piped PowerShell's default
+    UTF-16 through a text log and produced unreadable spaced-out characters.
+    """
+    completed = subprocess.run(
+        [
+            "powershell.exe",
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy", "Bypass",
+            "-OutputFormat", "Text",
+            "-Command", script,
+        ],
+        capture_output=True,
+        timeout=timeout_seconds,
+        check=False,
+    )
+    stdout = completed.stdout.decode("utf-8", errors="replace").strip()
+    stderr = completed.stderr.decode("utf-8", errors="replace").strip()
+
+    if completed.returncode != 0:
+        raise SystemExit(f"PowerShell collection failed (exit {completed.returncode}): {stderr[:500]}")
+    if not stdout:
+        return []
+
+    try:
+        payload = json.loads(stdout)
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"PowerShell returned non-JSON output ({exc.msg}): {stdout[:300]}")
+
+    if isinstance(payload, dict):
+        return [payload]
+    if isinstance(payload, list):
+        return [row for row in payload if isinstance(row, dict)]
+    return []
+
+
+# --------------------------------------------------------------------------- retry
+
+RETRYABLE_STATUS_CODES = {429, 498, 499, 500, 502, 503, 504}
+_ERROR_CODE_RE = re.compile(r"\(Error Code:\s*(\d+)\)")
+_HTTP_ERROR_RE = re.compile(r"\b(\d{3})\s+(?:Server|Client) Error\b")
+_JSON_CODE_RE = re.compile(r"'code':\s*(\d+)")
+
+
+def _retryable_status(exc: BaseException) -> Optional[int]:
+    """Best-effort HTTP/Esri status code for an arcgis-raised exception.
+
+    arcgis/gis/_impl/_con/_connection.py re-raises most failures as a bare Exception built
+    from a formatted string -- data['error']['message'] plus "(Error Code: N)" for a JSON
+    error body (_handle_json_error), or "Http Error: <requests message>" for an HTTP error --
+    and drops the original response object, so the status has to come back out of the message
+    when `.response` was not preserved on the exception. Query._process_query_result instead
+    raises ValueError(result) with the raw error dict still attached as exc.args[0], so a
+    query failure (query_all_rows, max_field_value, fetch_keys, purge_older_than's count) never
+    matches _ERROR_CODE_RE/_HTTP_ERROR_RE and must be read off the dict or its str() directly.
+    """
+    response = getattr(exc, "response", None)
+    status = getattr(response, "status_code", None) if response is not None else None
+    if status:
+        return int(status)
+    payload = exc.args[0] if getattr(exc, "args", None) else None
+    if isinstance(payload, dict):
+        code = payload.get("error", {}).get("code") if isinstance(payload.get("error"), dict) else None
+        if code is not None:
+            return int(code)
+    text = str(exc)
+    match = _ERROR_CODE_RE.search(text) or _HTTP_ERROR_RE.search(text) or _JSON_CODE_RE.search(text)
+    return int(match.group(1)) if match else None
+
+
+def _retry_after_seconds(exc: BaseException) -> Optional[float]:
+    response = getattr(exc, "response", None)
+    headers = getattr(response, "headers", None) if response is not None else None
+    return safe_float(headers.get("Retry-After")) if headers else None
+
+
+def with_retry(
+    func: Callable[[], Any],
+    *,
+    label: str,
+    attempts: int = 4,
+    base_delay: float = 1.0,
+    sleep: Optional[Callable[[float], None]] = None,
+    before_retry: Optional[Callable[[], None]] = None,
+) -> Any:
+    """Call func() with retry on transient AGOL failures.
+
+    Retries HTTP/Esri 429, 498, 499, 500, 502, 503, 504 and connection/timeout errors, honouring
+    a Retry-After header on 429 when the response survived on the exception. Any other failure
+    (bad request, schema mismatch, a real auth failure) is raised immediately -- retrying a
+    permanent error only delays the actionable SystemExit. Exponential backoff with jitter;
+    `sleep` is injectable so tests do not wait. `before_retry`, if given, runs once per caught
+    failure before the delay -- apply_edits_chunked and sync_inventory use it to re-query
+    existing keys before resending an ambiguous add (e.g. after a 504 whose write may already
+    have committed), so a retried write cannot duplicate rows.
+
+    This is on top of, not instead of, transport-level retry: arcgis 2.4.3 builds its session as
+    EsriSession(retries=5) (gis/_impl/_con/_connection.py), which mounts a urllib3 Retry(total=5,
+    status_forcelist=(413,429,500,502,503,504)) with POST allowed (arcgis/auth/api.py) -- a real
+    HTTP-level 429/5xx on applyEdits is already retried up to 5 times inside `requests` before
+    this function, or a dedupe hook, ever sees an exception. What reaches here for those codes is
+    only what survived all 5 transport attempts. What this function's own retry mainly recovers
+    is an Esri error embedded in a 200 OK JSON body (`Query._process_query_result` raises
+    ValueError with the code inside the body), which urllib3's status-code-based Retry never
+    sees at all -- that path, and 498/499 (Esri token expiry, not a real HTTP status), are what
+    this loop and its dedupe hooks actually exist for.
+    """
+    import requests
+
+    sleep_fn = sleep or time.sleep
+    last_exc: Optional[BaseException] = None
+    for attempt in range(1, attempts + 1):
+        try:
+            return func()
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout,
+                ConnectionError, TimeoutError) as exc:
+            last_exc, retry_after = exc, None
+        except Exception as exc:
+            status = _retryable_status(exc)
+            if status not in RETRYABLE_STATUS_CODES:
+                raise
+            last_exc = exc
+            retry_after = _retry_after_seconds(exc) if status == 429 else None
+
+        if attempt == attempts:
+            break
+        if before_retry is not None:
+            before_retry()
+        if retry_after is not None:
+            delay = retry_after  # server-specified; honour it exactly, no jitter added
+        else:
+            delay = base_delay * (2 ** (attempt - 1))
+            delay += random.uniform(0, delay * 0.25)
+        emit(f"WARNING: {label} failed (attempt {attempt}/{attempts}): {last_exc}. "
+            f"Retrying in {delay:.1f}s.")
+        sleep_fn(delay)
+
+    raise SystemExit(f"{label} failed after {attempts} attempts: {last_exc}")
+
+
+# --------------------------------------------------------------------------- AGOL
+
+def make_field(
+    name: str,
+    field_type: str,
+    alias: str,
+    *,
+    length: Optional[int] = None,
+    nullable: bool = True,
+    editable: bool = True,
+) -> Dict[str, Any]:
+    field: Dict[str, Any] = {
+        "name": name,
+        "type": field_type,
+        "alias": alias,
+        "nullable": nullable,
+        "editable": editable,
+        "domain": None,
+        "defaultValue": None,
+    }
+    if length is not None:
+        field["length"] = length
+    return field
+
+
+def connect_agol(config: Dict[str, Any]) -> Any:
+    """Connect using config credentials, or env vars when *_env names are supplied."""
+    disable_arcpy_import()
+    from arcgis.gis import GIS
+
+    agol = config.get("arcgis", {})
+    url = normalize_text(agol.get("url")) or "https://www.arcgis.com"
+
+    # A profile keeps the password in the OS credential store, so none is read from the config.
+    profile = normalize_text(agol.get("profile"))
+    if profile:
+        if agol.get("password"):
+            emit("WARNING: arcgis.password is unused with arcgis.profile; delete it from the config.")
+        gis = GIS(url, profile=profile)
+        if gis.users.me is None:
+            raise SystemExit(
+                f"arcgis.profile '{profile}' did not sign in. Store it once with "
+                f"GIS(url, user, password, profile='{profile}') as the account the scheduled task runs under.")
+        emit(f"Connected to ArcGIS portal as: {gis.users.me.username}")
+        return gis
+
+    user_env = normalize_text(agol.get("username_env"))
+    pass_env = normalize_text(agol.get("password_env"))
+    username = os.environ.get(user_env) if user_env else normalize_text(agol.get("username"))
+    password = os.environ.get(pass_env) if pass_env else agol.get("password")
+
+    if not username or not password:
+        raise SystemExit(
+            "No ArcGIS credentials resolved. Set arcgis.username/password in the config, "
+            "or set arcgis.username_env/password_env to environment variable names."
+        )
+
+    if agol.get("password") and not pass_env and agol.get("allow_plaintext_password") is not True:
+        raise SystemExit(
+            "arcgis.password is stored in plaintext in the config. Store a profile once, as the "
+            "account the scheduled task runs under: GIS(url, user, password, profile=\"name\"), "
+            "then set arcgis.profile to that name and delete arcgis.password. To accept the "
+            "risk instead, set arcgis.allow_plaintext_password to true.")
+
+    gis = GIS(url, username, password)
+    emit(f"Connected to ArcGIS portal as: {gis.users.me.username}")
+    return gis
+
+
+def get_tables(item: Any) -> Dict[str, Any]:
+    """Map table name -> layer object for a hosted table service."""
+    from arcgis.features import FeatureLayerCollection
+
+    flc = FeatureLayerCollection.fromitem(item)
+    return {t.properties.name: t for t in list(flc.layers) + list(flc.tables)}
+
+
+def object_id_field(table: Any) -> str:
+    """The table's real OID field name. AGOL tables are usually OBJECTID but not guaranteed."""
+    try:
+        value = normalize_text(getattr(table.properties, "objectIdField", None))
+    except AttributeError:
+        value = ""
+    return value or "OBJECTID"
+
+
+def _server_page_size(table: Any, fallback: int = 2000) -> int:
+    """The table's own maxRecordCount, so our page size can never exceed what the server
+    actually returns per request. Requesting more than that made a page the server capped
+    below our size look like the final (short) page and silently dropped every row past it
+    (audit publish-10)."""
+    try:
+        value = safe_int(getattr(table.properties, "maxRecordCount", None))
+    except AttributeError:
+        value = None
+    return value if value and value > 0 else fallback
+
+
+def max_field_value(table: Any, field: str, where: str = "1=1") -> Optional[float]:
+    """Single-request max. The old code paginated one row per HTTP call and took 5.5 min."""
+    result = with_retry(
+        lambda: table.query(
+            where=where,
+            out_statistics=[{
+                "statisticType": "max",
+                "onStatisticField": field,
+                "outStatisticFieldName": "max_value",
+            }],
+            return_geometry=False,
+        ),
+        label="max_field_value query",
+    )
+    features = getattr(result, "features", []) or []
+    if not features:
+        return None
+    return safe_float(features[0].attributes.get("max_value"))
+
+
+def query_all_rows(table: Any, *, where: str = "1=1", out_fields: str = "*",
+                   page: Optional[int] = None) -> List[Dict[str, Any]]:
+    """Page through every row matching `where`.
+
+    Pages at the table's own maxRecordCount (fallback 2000 if unreadable), not a hardcoded
+    guess -- see _server_page_size. A page shorter than the requested size is the reliable
+    end-of-data signal only when the requested size matches what the server actually enforces.
+    """
+    page_size = page or _server_page_size(table)
+    rows: List[Dict[str, Any]] = []
+    offset = 0
+    while True:
+        result = with_retry(
+            lambda offset=offset: table.query(
+                where=where,
+                out_fields=out_fields,
+                return_geometry=False,
+                result_offset=offset,
+                result_record_count=page_size,
+            ),
+            label="query_all_rows",
+        )
+        features = list(getattr(result, "features", []) or [])
+        if not features:
+            break
+        rows.extend(dict(f.attributes) for f in features)
+        if len(features) < page_size:
+            break
+        offset += len(features)
+    return rows
+
+
+def chunked(items: Sequence[Any], size: int) -> Iterable[Sequence[Any]]:
+    size = max(1, size)
+    for start in range(0, len(items), size):
+        yield items[start:start + size]
+
+
+def apply_edits_chunked(
+    table: Any,
+    *,
+    adds: Optional[List[Dict[str, Any]]] = None,
+    updates: Optional[List[Dict[str, Any]]] = None,
+    deletes: Optional[List[int]] = None,
+    chunk_size: int = DEFAULT_CHUNK_SIZE,
+    label: str = "",
+    dedupe_adds: Optional[Callable[[List[Dict[str, Any]]], List[Dict[str, Any]]]] = None,
+) -> Dict[str, int]:
+    """Apply edits in chunks, retrying transient failures. Raises on any per-feature failure.
+
+    dedupe_adds contract: called with an adds chunk's row dicts (not the {"attributes": ...}
+    wrapper) right before with_retry resends it, and must return the subset that still needs
+    to be added. publish.py implements it by re-querying the table for the chunk's key fields
+    and dropping rows that already landed, so a retry after an ambiguous failure (e.g. a 504
+    whose write may already have committed) cannot duplicate rows.
+    """
+    counts = {"added": 0, "updated": 0, "deleted": 0}
+
+    for kind, payload in (("adds", adds or []), ("updates", updates or [])):
+        rows = list(payload)
+        for index, row_chunk in enumerate(chunked(rows, chunk_size), start=1):
+            total = (len(rows) + chunk_size - 1) // chunk_size
+            emit(f"  {label} {kind} chunk {index}/{total} ({len(row_chunk)} rows)")
+            state = {"rows": list(row_chunk)}
+
+            def send(kind=kind, state=state):
+                result = table.edit_features(**{kind: [{"attributes": r} for r in state["rows"]]})
+                raise_on_edit_failure(result, kind, label)
+                return result
+
+            def before_retry(kind=kind, state=state):
+                if kind != "adds" or dedupe_adds is None:
+                    return
+                before = len(state["rows"])
+                state["rows"] = dedupe_adds(state["rows"])
+                emit(f"  {label} adds retry: {len(state['rows'])}/{before} row(s) still "
+                    f"missing after re-query.")
+
+            with_retry(send, label=f"{label} {kind} chunk {index}/{total}",
+                      before_retry=before_retry)
+            counts["added" if kind == "adds" else "updated"] += len(row_chunk)
+
+    if deletes:
+        counts["deleted"] = _delete_chunked(table, deletes, chunk_size, label)
+    return counts
+
+
+def _present_oids(table: Any, oid_field: str, oids: List[Any]) -> set:
+    where = f"{oid_field} IN ({','.join(str(o) for o in oids)})"
+    return {safe_int(r.get(oid_field)) for r in query_all_rows(table, where=where, out_fields=oid_field)}
+
+
+def _delete_chunked(table: Any, deletes: List[int], chunk_size: int, label: str) -> int:
+    """Delete by OID in chunks. A delete that committed before an ambiguous failure (a 504) is
+    reported as a missing object when resent, which used to fail the whole run. Two layers can
+    resend: with_retry, whose before_retry re-queries the chunk and resends only the rows still
+    present, and urllib3's transport Retry (see with_retry), which resends a real HTTP 504 unseen
+    and hands back a 200 with per-row "may not exist" failures. send() therefore re-queries any
+    failed row and fails only for rows that are still there."""
+    oid_field = object_id_field(table)
+    deleted = 0
+    for chunk in chunked(deletes, chunk_size):
+        state = {"oids": list(chunk)}
+
+        def send(state=state):
+            if not state["oids"]:
+                return {}  # the ambiguous attempt already deleted every row
+            result = table.edit_features(deletes=",".join(str(oid) for oid in state["oids"]))
+            entries = (result or {}).get("deleteResults", []) or []
+            failed = [safe_int(e.get("objectId")) for e in entries if not e.get("success", True)]
+            if failed and None not in failed:
+                present = _present_oids(table, oid_field, failed)
+                result = {"deleteResults": [e for e in entries if e.get("success", True)
+                                            or safe_int(e.get("objectId")) in present]}
+            raise_on_edit_failure(result, "deletes", label)
+            return result
+
+        def before_retry(state=state):
+            left = _present_oids(table, oid_field, state["oids"])
+            before = len(state["oids"])
+            state["oids"] = [o for o in state["oids"] if safe_int(o) in left]
+            emit(f"  {label} deletes retry: {len(state['oids'])}/{before} row(s) still "
+                f"present after re-query.")
+
+        with_retry(send, label=f"{label} deletes", before_retry=before_retry)
+        deleted += len(chunk)
+    return deleted
+
+
+def raise_on_edit_failure(result: Any, kind: str, label: str) -> None:
+    key = {"adds": "addResults", "updates": "updateResults", "deletes": "deleteResults"}[kind]
+    for entry in (result or {}).get(key, []) or []:
+        if not entry.get("success", True):
+            error = entry.get("error", {})
+            text = normalize_text(error.get("description") or error)
+            hint = ("-- a row with this key already exists (unique index). The next run matches "
+                    "it and updates it instead; if this repeats, look for a key written twice."
+                    if "duplicate key" in text.lower()
+                    else "-- check field lengths and types against the table schema.")
+            raise SystemExit(f"{label} {kind} failed: {text} {hint}")
+
+
+def purge_older_than(table: Any, time_field: str, retention_days: int, label: str = "") -> int:
+    """Delete rows older than the retention window.
+
+    Keyed on age only. The old purge filtered `server_name = <current host>`, which made the
+    5,773 pre-migration rows unreachable by every retention path.
+    """
+    if retention_days <= 0:
+        return 0
+    cutoff = utc_now() - timedelta(days=retention_days)
+    where = f"{time_field} < TIMESTAMP '{cutoff.strftime('%Y-%m-%d %H:%M:%S')}'"
+    count = with_retry(lambda: table.query(where=where, return_count_only=True),
+                       label=f"purge_older_than {label} count")
+    if not count:
+        return 0
+    result = with_retry(lambda: table.delete_features(where=where),
+                        label=f"purge_older_than {label} delete")
+    raise_on_edit_failure(result, "deletes", f"purge_older_than {label}")
+    emit(f"Purged {count} {label} row(s) older than {retention_days} day(s).")
+    return int(count)
+
+
+# --------------------------------------------------------------------------- alerting
+
+SMTP_KEYRING_SERVICE = "taskdash-smtp"
+
+
+def _smtp_block_settings(smtp: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Translate the config's smtp block into the dict shape send_email reads.
+
+    The password lives in keyring under (SMTP_KEYRING_SERVICE, smtp.user), never in the config.
+    """
+    host = normalize_text(smtp.get("host"))
+    sender = normalize_text(smtp.get("from"))
+    if not host or not sender:
+        emit("WARNING: smtp block needs host and from; alerting disabled for this run.")
+        return None
+    port = smtp.get("port", 587)
+    use_ssl = smtp["ssl"] if "ssl" in smtp else port == 465
+    mail: Dict[str, Any] = {
+        "smtp server": host, "from address": sender,
+        "smtp port": port, "use tls": smtp.get("starttls", True), "use ssl": use_ssl,
+        "strict tls": True,
+    }
+    user = normalize_text(smtp.get("user"))
+    if user and not (use_ssl or mail["use tls"]) and smtp.get("allow_plaintext_auth") is not True:
+        emit("WARNING: smtp.user is set but the connection is unencrypted (smtp.starttls and "
+             "smtp.ssl are both off); refusing to send the password. Enable smtp.starttls or "
+             "smtp.ssl, or set smtp.allow_plaintext_auth to true to accept the risk. "
+             "Alerting disabled for this run.")
+        return None
+    if user:
+        try:
+            import keyring
+            password = keyring.get_password(SMTP_KEYRING_SERVICE, user)
+        except Exception as exc:  # noqa: BLE001 - a broken keyring backend must not fail the publish
+            emit(f"WARNING: could not read the SMTP password from keyring ({type(exc).__name__}); "
+                 "alerting disabled for this run.")
+            return None
+        if not password:
+            emit(f"WARNING: no SMTP password in keyring for service '{SMTP_KEYRING_SERVICE}', "
+                 f"user '{user}'. Store one as the account the scheduled task runs under: "
+                 f"python -m keyring set {SMTP_KEYRING_SERVICE} {user}. "
+                 "Alerting disabled for this run.")
+            return None
+        mail["smtp username"] = user
+        mail["smtp password"] = password
+        mail["allow plaintext auth"] = smtp.get("allow_plaintext_auth") is True
+    return mail
+
+
+def load_mail_settings(config: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Read SMTP settings from the organization's existing mail-service config.
+
+    Deliberately NOT copied into TaskDash.config.json: that would put the same mail password
+    in a second plaintext file. One source of truth, and it is already on this server.
+    """
+    if config.get("smtp"):
+        return _smtp_block_settings(config["smtp"])
+    alerting = config.get("alerting", {})
+    configured = normalize_text(alerting.get("mail_config_path"))
+    if not configured:
+        emit("WARNING: no smtp block and no alerting.mail_config_path in the config; "
+             "alerting disabled for this run. Set one of them to enable e-mail.")
+        return None
+    path = Path(configured)
+    if not path.exists():
+        emit(f"WARNING: mail config not found at {path}; alerting disabled for this run.")
+        return None
+    try:
+        mail = json.loads(path.read_text(encoding="utf-8-sig")).get("email settings", {})
+    except (OSError, ValueError) as exc:
+        emit(f"WARNING: could not read mail config ({exc}); alerting disabled for this run.")
+        return None
+    if not mail.get("smtp server") or not mail.get("from address"):
+        emit("WARNING: mail config has no smtp server/from address; alerting disabled.")
+        return None
+    return mail
+
+
+def send_email(mail: Dict[str, Any], recipients: List[str], subject: str, body: str) -> bool:
+    """Send a plain-text alert. Returns True on success; never raises into the caller.
+
+    A failed alert must not fail the publish -- the data write already succeeded and losing it
+    over a mail outage would be worse than the missed notification.
+    """
+    import smtplib
+    import ssl
+    from email.message import EmailMessage
+
+    try:
+        msg = EmailMessage()
+        msg["Subject"] = subject
+        msg["From"] = mail["from address"]
+        msg["To"] = ", ".join(recipients)
+        if mail.get("reply to"):
+            msg["Reply-To"] = mail["reply to"]
+        msg.set_content(body)
+
+        # A default context verifies the server certificate and hostname; a bare starttls() does not.
+        # Only the smtp block is strict. The legacy mail_config_path file keeps its old behaviour:
+        # its relay's certificate was never checked, and verifying it now could silently stop the
+        # alerts of an install that works today.
+        strict = mail.get("strict tls", False)
+        tls_context = ssl.create_default_context() if strict else None
+        port = int(mail.get("smtp port", 587))
+        # The legacy file never had an SSL switch; honouring a stray "use ssl" there could move a
+        # working relay to SMTP_SSL and stop its alerts.
+        use_ssl = strict and mail.get("use ssl", False)
+        use_tls = mail.get("use tls", True)
+        has_login = bool(mail.get("smtp username") and mail.get("smtp password"))
+        if strict and has_login and not (use_ssl or use_tls) and not mail.get("allow plaintext auth"):
+            raise ValueError("refusing to send the SMTP password over an unencrypted connection; "
+                             "enable TLS or set smtp.allow_plaintext_auth to true")
+
+        if use_ssl:
+            connection = smtplib.SMTP_SSL(mail["smtp server"], port, timeout=30, context=tls_context)
+        else:
+            connection = smtplib.SMTP(mail["smtp server"], port, timeout=30)
+        with connection as smtp:
+            if use_tls and not use_ssl:
+                smtp.starttls(context=tls_context)
+            if has_login:
+                smtp.login(mail["smtp username"], mail["smtp password"])
+            smtp.send_message(msg)
+        emit(f"Alert e-mailed to {', '.join(recipients)}: {subject}")
+        return True
+    except Exception as exc:  # noqa: BLE001 - alerting must never break the publish
+        emit(f"WARNING: could not send alert e-mail: {type(exc).__name__}: {exc}")
+        return False

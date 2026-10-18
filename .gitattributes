@@ -1,0 +1,2 @@
+# The fixture is compared byte-for-byte with the generator's output, which writes LF.
+tests/fixtures/** text eol=lf

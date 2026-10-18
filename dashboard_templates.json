@@ -1,0 +1,265 @@
+{
+ "desktopView": {
+  "widgets": [
+   {
+    "showLastUpdate": true,
+    "editColumnPlacement": "end",
+    "editingEnabled": false,
+    "iconInfos": [],
+    "tableSettings": {
+     "layout": "fit-columns",
+     "scale": "small",
+     "hoverText": true,
+     "rowStriping": true,
+     "selectionMode": "single",
+     "verticalGrid": {
+      "thickness": 1
+     },
+     "horizontalGrid": {
+      "thickness": 1
+     },
+     "headerSettings": {
+      "rule": {
+       "thickness": 2
+      }
+     }
+    },
+    "type": "tableWidget",
+    "id": "table-template",
+    "name": "Task Inventory",
+    "noDataState": {
+     "verticalAlignment": "middle",
+     "showTopCaption": true,
+     "showBottomCaption": true
+    },
+    "noFilterState": {
+     "verticalAlignment": "middle",
+     "showTopCaption": true,
+     "showBottomCaption": true
+    }
+   },
+   {
+    "textColor": "#00304d",
+    "showLastUpdate": true,
+    "type": "listWidget",
+    "selectionMode": "single",
+    "iconType": "symbol",
+    "itemTextColor": "#4c4c4c",
+    "selectionColor": "#00304d",
+    "selectionTextColor": "#ffffff",
+    "showFilter": true,
+    "id": "list-template",
+    "name": "Recent Runs",
+    "title": "Recent Runs",
+    "noDataState": {
+     "verticalAlignment": "middle",
+     "showTopCaption": true,
+     "showBottomCaption": true
+    },
+    "noFilterState": {
+     "verticalAlignment": "middle",
+     "showTopCaption": true,
+     "showBottomCaption": true
+    }
+   },
+   {
+    "id": "chart-template",
+    "name": "Schedule Mix",
+    "type": "serialChartWidget",
+    "chartConfig": {
+     "version": "25.0.0",
+     "type": "chart",
+     "orderOptions": {},
+     "colorMatch": false,
+     "chartRenderer": {
+      "type": "uniqueValue",
+      "uniqueValueInfos": []
+     },
+     "axes": [
+      {
+       "type": "chartAxis",
+       "visible": true,
+       "title": {
+        "type": "chartText",
+        "visible": false,
+        "content": {
+         "type": "esriTS",
+         "angle": 0,
+         "font": {
+          "family": "inherit",
+          "style": "normal",
+          "weight": "bold"
+         },
+         "text": ""
+        }
+       },
+       "valueFormat": {
+        "type": "category",
+        "characterLimit": 11
+       },
+       "lineSymbol": {
+        "type": "esriSLS",
+        "style": "esriSLSSolid",
+        "width": 1
+       },
+       "labels": {
+        "type": "chartText",
+        "visible": true,
+        "content": {
+         "type": "esriTS",
+         "angle": 0,
+         "font": {
+          "family": "inherit",
+          "style": "normal",
+          "weight": "normal"
+         }
+        }
+       },
+       "grid": {
+        "type": "esriSLS",
+        "style": "esriSLSSolid",
+        "color": [
+         140,
+         140,
+         140,
+         80
+        ],
+        "width": 1
+       },
+       "guides": [],
+       "scrollbar": {
+        "visible": false,
+        "width": 15,
+        "gripSize": 22
+       }
+      },
+      {
+       "type": "chartAxis",
+       "visible": true,
+       "title": {
+        "type": "chartText",
+        "visible": false,
+        "content": {
+         "type": "esriTS",
+         "angle": 0,
+         "font": {
+          "family": "inherit",
+          "style": "normal",
+          "weight": "bold"
+         }
+        }
+       },
+       "valueFormat": {
+        "type": "number",
+        "intlOptions": {
+         "style": "decimal",
+         "notation": "standard",
+         "minimumFractionDigits": 0,
+         "maximumFractionDigits": 0
+        }
+       },
+       "lineSymbol": {
+        "type": "esriSLS",
+        "style": "esriSLSSolid",
+        "width": 1
+       },
+       "labels": {
+        "type": "chartText",
+        "visible": true,
+        "content": {
+         "type": "esriTS",
+         "angle": 0,
+         "font": {
+          "family": "inherit",
+          "style": "normal",
+          "weight": "normal"
+         }
+        }
+       },
+       "grid": {
+        "type": "esriSLS",
+        "style": "esriSLSSolid",
+        "color": [
+         140,
+         140,
+         140,
+         80
+        ],
+        "width": 1
+       },
+       "guides": [],
+       "buffer": true
+      }
+     ],
+     "series": [
+      {
+       "type": "barSeries",
+       "id": "main",
+       "name": "main",
+       "x": "schedule_bucket",
+       "dataLabels": {
+        "type": "chartText",
+        "visible": true,
+        "content": {
+         "type": "esriTS",
+         "angle": 0,
+         "font": {
+          "family": "inherit",
+          "size": 11,
+          "style": "normal",
+          "weight": "normal"
+         }
+        }
+       },
+       "dataTooltipVisible": true,
+       "dataTooltipReverseColor": true,
+       "y": "COUNT_OBJECTID",
+       "fillSymbol": {
+        "type": "esriSFS",
+        "style": "esriSFSSolid",
+        "color": [
+         27,
+         127,
+         92,
+         255
+        ],
+        "outline": {
+         "type": "esriSLS",
+         "style": "esriSLSSolid",
+         "color": [
+          27,
+          127,
+          92,
+          255
+         ],
+         "width": 1
+        }
+       }
+      }
+     ],
+     "legend": {
+      "type": "chartLegend",
+      "visible": false,
+      "body": {
+       "type": "esriTS",
+       "angle": 0,
+       "font": {
+        "family": "inherit",
+        "size": 11,
+        "style": "normal",
+        "weight": "normal"
+       }
+      },
+      "position": "bottom"
+     },
+     "horizontalAxisLabelsBehavior": "hide",
+     "rotated": true,
+     "cursorCrosshair": {
+      "type": "cursorCrosshair"
+     },
+     "stackedType": "sideBySide"
+    }
+   }
+  ]
+ }
+}

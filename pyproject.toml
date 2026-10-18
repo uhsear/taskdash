@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "taskdash"
+dynamic = ["version"]
+description = "Windows scheduled-task monitor that publishes to ArcGIS Online hosted tables and a dashboard."
+# removesuffix (3.9) is the newest language feature the code uses; ArcGIS Pro's own env is newer.
+requires-python = ">=3.9"
+# Ranges, not pins: Pro ships its own arcgis and a pin would fight it. requests comes with arcgis.
+dependencies = ["arcgis>=2.4,<3"]
+
+[project.optional-dependencies]
+# Only read when smtp.user is set: the mail password comes from the Windows keyring.
+smtp = ["keyring>=23"]
+
+[project.scripts]
+taskdash = "taskdash_cli:main"
+
+[tool.setuptools]
+# Flat layout on purpose: a folder deploy and the wheel run the same files.
+py-modules = [
+    "taskdash_cli",
+    "taskdash_collect",
+    "taskdash_common",
+    "taskdash_dashboard",
+    "taskdash_metrics",
+    "taskdash_preflight",
+    "taskdash_publish",
+    "taskdash_setup",
+]
+
+[tool.setuptools.dynamic]
+version = {attr = "taskdash_common.TASKDASH_VERSION"}
+
+# Read-only data that taskdash_common.data_dir() finds under <sys.prefix>/share/taskdash.
+# An organization's own rules/<org>.json profile is its private file and is never listed.
+[tool.setuptools.data-files]
+"share/taskdash" = [
+    "dashboard_templates.json",
+    "TaskDash.config.example.json",
+    "taskdash_task.xml",
+    "install_task.ps1",
+]
+"share/taskdash/rules" = ["rules/default.json"]

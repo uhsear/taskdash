@@ -1,0 +1,515 @@
+{
+  "_notes": {
+    "display_names": [
+      "metrics_tab-07/wording-07/wording-08/metrics_tab-04: plain-English overrides for keys that read",
+      "as jargon straight off the sentence-cased key, or that need a unit the generic rule can't add.",
+      "Each name is derived from the log line that actually produces the key (see truth2/logs):",
+      "  cf_change_count               <- \"Found 3 CF changes\" (Parcel Diff; CF = confidentiality)",
+      "  adds_pts_feature_count        <- \"Extracted ADDS_PTS to <path> (356813 features)\"",
+      "  responseareas_feature_count   <- \"Extracted RESPONSEAREAS to <path> (159 features)\"",
+      "  scratchpad_911_feature_count  <- \"Extracted SCRATCHPAD_911 to <path> (47342 features)\"",
+      "  ra_mcso_feature_count         <- \"Extracted RA_MCSO to <path> (56 features)\"",
+      "  ap_x_geo_unmatched_point_count/ap_x_zip_unmatched_point_count",
+      "                                 <- \"Joining AP x Geo/Zip (...)...\" then \"N unmatched points,",
+      "                                    running CLOSEST fallback...\"",
+      "  ap_x_geo_updated_record_count/ap_x_zip_updated_record_count",
+      "                                 <- same join sections, then \"Updated N records\" (records the",
+      "                                    join actually changed, not the count matched -- metrics_tab-03/",
+      "                                    wording-04: 53,939 of 356,791 direction matches needed a write)",
+      "  ap_exported                   <- \"AP exported: 356817 records\" (Animal Services)",
+      "  dbf_exported                  <- \"Animal.dbf exported: 356817 records\"",
+      "  billing_parcels               <- \"billing parcels    : 51723\" (Customer Base Parcels)",
+      "  blank_code_parcels            <- \"blank-code parcels : 0\"",
+      "  parcels_permit_built             <- \"Parcels_Permit built: 288,237 rows, ...\"",
+      "  total_datasets_to_analyze     <- \"Total datasets to analyze: 850\" (Geodatabase Upkeep)",
+      "  duration_seconds              <- every task's own run timer; not every table renders it",
+      "                                    through fmtDur (Metric range shows the raw number).",
+      "                                    metrics_tab-01: named \"Script-reported\" because on AP/Street",
+      "                                    Updates it is only the field-update phase, not the whole run",
+      "  reloaded_record_count         <- \"inserted 47342 rows in 0:01:20\" (Streets OpenData full",
+      "                                    refresh); metrics_tab-05: kept apart from inserted_record_count",
+      "                                    (the differential's \"inserts=N\"), which means new rows only",
+      "  failure_count                 <- \"... with failures (4/552)\"; distinct from a failed run.",
+      "                                    wording-r3regress-metric-name-failed-items: named by what",
+      "                                    the line counts, not by task -- any task can log the same",
+      "                                    \"with failures (N/M)\" completion summary",
+      "  replica_over_warning_count    <- \"27 over the warning threshold (gap > 3)\" (Replica Monitor);",
+      "                                    since the 08:10 fix this counts only anchored replicas",
+      "  replica_family_over_critical_count",
+      "                                 <- \"0 over the critical threshold (chain > 20)\"",
+      "  replica_item_count            <- \"312 replica items parsed\" (\"312 live replica items parsed\"",
+      "                                    in logs before the 08:10 fix); counts dead registrations too",
+      "  anchored_replica_count        <- \"15 with a SYNC anchor\" (Replica Monitor, since 08:10)",
+      "  stale_replica_registration_count",
+      "                                 <- \"Not flagged: 26 registration(s) with a gap but no SYNC",
+      "                                    anchor\" (Replica Monitor, since 08:10)",
+      "  replica_family_count          <- \"15 replica families\"",
+      "  idle_replica_count            <- \"touched 1 idle replica(s)\" (Keep-Alive, --apply run only)",
+      "  segments_pending_retirement_count <- \"Found 1 segments to check for retirement\"",
+      "  target_record_count_before/after  <- \"target rows before/after\" (Streets OpenData) and",
+      "                                    \"Target record count before/after sync\" (OFR Hydrant)",
+      "  feature_record_count          <- \"Total records in feature class\" / \"Processed N records\"",
+      "  sde_parcels_(epl_(crosswalk_))before_truncate",
+      "                                 <- \"SDE Parcels(_EPL(_Crosswalk)) before truncate: N\", the",
+      "                                    previous day's count read just before the nightly reload",
+      "  today_parcel_count/yesterday_parcel_count/common_parcel_count",
+      "                                 <- \"Loaded N today/yesterday parcels\" / \"... N common parcels\"",
+      "                                    (Parcel Diff)",
+      "  acme_storm_*_deleted_record_count/acme_storm_*_hosted_record_count/",
+      "  acme_storm_*_exported_record_count",
+      "                                 <- metrics_tab-02: per-layer \"Total deleted: N\" / \"Verification:",
+      "                                    N features in hosted layer\" / \"Total records exported: N\"",
+      "                                    (Stormwater Dataset Upload)"
+    ]
+  },
+  "section_pattern": "^(?:Processing|Joining)\\b:?\\s*(?P<name>[A-Za-z]\\w*(?:\\s+x\\s+[A-Za-z]\\w*)?)\\s*(?:\\(|\\.\\.\\.|$)",
+  "prose_count_rules": [
+    {
+      "order": 10,
+      "pattern": "\\b(\\d[\\d,]*) unmatched points?\\b",
+      "key": "unmatched_point_count"
+    },
+    {
+      "order": 20,
+      "pattern": "\\b(\\d[\\d,]*) (?:live )?replica items\\b",
+      "key": "replica_item_count",
+      "_note": "metrics_tab-live-replicas-stops-parsing: the 08:10 fix dropped 'live' from the CHECK 2 line; the old wording still shows up in older logs inside the scan window."
+    },
+    {
+      "order": 30,
+      "pattern": "\\b(\\d[\\d,]*) with a SYNC anchor\\b",
+      "key": "anchored_replica_count"
+    },
+    {
+      "order": 40,
+      "pattern": "\\bNot flagged:\\s*(\\d[\\d,]*) registration",
+      "key": "stale_replica_registration_count"
+    },
+    {
+      "order": 50,
+      "pattern": "\\b(\\d[\\d,]*) over the warning threshold\\b",
+      "key": "replica_over_warning_count"
+    },
+    {
+      "order": 60,
+      "pattern": "\\b(\\d[\\d,]*) replica families\\b",
+      "key": "replica_family_count"
+    },
+    {
+      "order": 70,
+      "pattern": "\\b(\\d[\\d,]*) over the critical threshold\\b",
+      "key": "replica_family_over_critical_count"
+    },
+    {
+      "order": 80,
+      "pattern": "\\btouched (\\d[\\d,]*) idle replica",
+      "key": "idle_replica_count",
+      "_note": "metrics_tab-10: 'would touch N idle replica(s)' is a dry run; only 'touched' is a real result."
+    },
+    {
+      "order": 90,
+      "pattern": "\\bwith failures \\((\\d+)/\\d+\\)",
+      "key": "failure_count"
+    }
+  ],
+  "fixed_value_rules": [
+    {
+      "order": 10,
+      "pattern": "\\bno updates needed\\b",
+      "keys": [
+        "updated_record_count",
+        "null_values_replaced_count"
+      ],
+      "value": 0,
+      "_note": "critic-02: AP and Street Updates log these counts only on a night that changed something; a quiet night's own line records the real 0."
+    },
+    {
+      "order": 20,
+      "pattern": "\\ball locators rebuilt successfully\\b",
+      "keys": [
+        "failure_count"
+      ],
+      "value": 0,
+      "_note": "metrics_tab-08: failure_count is logged only on a failing run, so a clean run's summary line must reset it."
+    }
+  ],
+  "canonical_metric_rules": [
+    {
+      "order": 10,
+      "pattern": "^updated_in(?:_\\d+)?$",
+      "key": "updated_record_count"
+    },
+    {
+      "order": 20,
+      "pattern": "^copied_records_in(?:_\\d+)?$",
+      "key": "copied_record_count"
+    },
+    {
+      "order": 30,
+      "pattern": "^added_new_segments_in(?:_\\d+)?$",
+      "key": "new_segment_count"
+    },
+    {
+      "order": 80,
+      "pattern": "^am_elapsed_time$",
+      "key": "duration_seconds"
+    },
+    {
+      "order": 100,
+      "pattern": "^loaded_source_records$",
+      "key": "source_record_count"
+    },
+    {
+      "order": 160,
+      "pattern": "^processed_records$",
+      "key": "feature_record_count",
+      "_note": "M12: AP and Street Updates print 'Processed N records' for every record in the feature class."
+    },
+    {
+      "order": 170,
+      "pattern": "^found_new_parcels$",
+      "key": "new_parcel_count"
+    },
+    {
+      "order": 180,
+      "pattern": "^found_removed_parcels$",
+      "key": "removed_parcel_count"
+    },
+    {
+      "order": 190,
+      "pattern": "^found_common_parcels$",
+      "key": "common_parcel_count"
+    },
+    {
+      "order": 200,
+      "pattern": "^found_cf_changes$",
+      "key": "cf_change_count"
+    },
+    {
+      "order": 210,
+      "pattern": "^found_new_segments_to_add$",
+      "key": "new_segment_count"
+    },
+    {
+      "order": 220,
+      "pattern": "^retired_segments$",
+      "key": "retired_segment_count"
+    },
+    {
+      "order": 230,
+      "pattern": "^found_segments_to_check_for_retirement$",
+      "key": "segments_pending_retirement_count"
+    },
+    {
+      "order": 240,
+      "pattern": "^null_values_replaced$",
+      "key": "null_values_replaced_count"
+    },
+    {
+      "order": 250,
+      "pattern": "^total_records_exported$",
+      "key": "exported_record_count"
+    },
+    {
+      "order": 260,
+      "pattern": "^total_records_to_download$",
+      "key": "source_record_count",
+      "_note": "M12: OFR Hydrant's download total and its 'Source record count' are one fact."
+    },
+    {
+      "order": 270,
+      "pattern": "^download_complete$",
+      "key": "source_record_count"
+    },
+    {
+      "order": 280,
+      "pattern": "^verification$",
+      "key": "hosted_record_count"
+    },
+    {
+      "order": 290,
+      "pattern": "^source_rows$",
+      "key": "source_record_count",
+      "_note": "M2/M10: Streets OpenData full-refresh and differential phrasings."
+    },
+    {
+      "order": 300,
+      "pattern": "^target_rows(?:_before)?$",
+      "key": "target_record_count_before"
+    },
+    {
+      "order": 310,
+      "pattern": "^(?:target_rows_after|row_count_verified)$",
+      "key": "target_record_count_after"
+    },
+    {
+      "order": 320,
+      "pattern": "^target_record_count_before_sync$",
+      "key": "target_record_count_before",
+      "_note": "metrics_tab-08: OFR Hydrant's label for the same fact as Streets OpenData's 'target rows before'."
+    },
+    {
+      "order": 330,
+      "pattern": "^target_record_count_after_sync$",
+      "key": "target_record_count_after"
+    },
+    {
+      "order": 350,
+      "pattern": "^inserted_rows(?:_in)?$",
+      "key": "reloaded_record_count",
+      "_note": "metrics_tab-05: a full reload's whole-table row count (Streets OpenData full refresh)."
+    },
+    {
+      "order": 390,
+      "pattern": "^matched_distinct$",
+      "key": "matched_parcel_count",
+      "_note": "M6: Utility Account Parcels join summary."
+    },
+    {
+      "order": 400,
+      "pattern": "^unmatched$",
+      "key": "unmatched_parcel_count"
+    },
+    {
+      "order": 410,
+      "pattern": "^output_polygons$",
+      "key": "output_polygon_count"
+    },
+    {
+      "order": 420,
+      "pattern": "^output_points$",
+      "key": "output_point_count"
+    },
+    {
+      "order": 430,
+      "pattern": "^features$",
+      "key": "output_feature_count"
+    },
+    {
+      "order": 440,
+      "pattern": "^exported_features_to_temp_fgdb$",
+      "key": "exported_record_count",
+      "_note": "'features' and 'records' name the same rows here, so one concept keeps one series."
+    },
+    {
+      "order": 520,
+      "pattern": "^appended_features_to_.*$",
+      "key": "appended_feature_count"
+    },
+    {
+      "order": 530,
+      "pattern": "^created_individual_buffers$",
+      "key": "buffer_count"
+    },
+    {
+      "order": 540,
+      "pattern": "^loaded_today_parcels$",
+      "key": "today_parcel_count"
+    },
+    {
+      "order": 550,
+      "pattern": "^loaded_yesterday_parcels$",
+      "key": "yesterday_parcel_count"
+    },
+    {
+      "order": 560,
+      "pattern": "^found_leaf_versions_to_delete$",
+      "key": "versions_to_delete_count"
+    },
+    {
+      "order": 570,
+      "pattern": "^total_records_in_feature_class$",
+      "key": "feature_record_count"
+    },
+    {
+      "order": 580,
+      "pattern": "^city_values_swapped_county_replaced$",
+      "key": "city_values_swapped_count"
+    },
+    {
+      "order": 590,
+      "pattern": "^zip_values_swapped_99999_replaced$",
+      "key": "zip_values_swapped_count"
+    }
+  ],
+  "noise_metric_key_patterns": [
+    {
+      "order": 60,
+      "pattern": "^cpp$"
+    },
+    {
+      "order": 70,
+      "pattern": "^s_features$"
+    },
+    {
+      "order": 80,
+      "pattern": "^pass_\\d+_complete$"
+    },
+    {
+      "order": 90,
+      "pattern": "^starting_field_updates_batch_size$"
+    },
+    {
+      "order": 100,
+      "pattern": "^downloaded_policies_and_verified_successfully$"
+    },
+    {
+      "order": 110,
+      "pattern": "^next_retry_timer_scheduled_to_fire_at$"
+    },
+    {
+      "order": 120,
+      "pattern": "^new_changed_actualconfig_policy_instance_s$"
+    },
+    {
+      "order": 130,
+      "pattern": "^total_requestedconfig_policy_instance_s$"
+    },
+    {
+      "order": 180,
+      "pattern": "^service_max_record_count$",
+      "_note": "M4 deny list: a service setting, not a result."
+    },
+    {
+      "order": 190,
+      "pattern": "^(?:.*_)?(?:attr|geom)_changed$",
+      "_note": "Streets OpenData: attribute/geometry split of the update count -- detail, not a series."
+    },
+    {
+      "order": 200,
+      "pattern": "^exceptions_written$",
+      "_note": "metrics_tab-09: always equals unmatched_parcel_count -- a restated fact, not its own series."
+    },
+    {
+      "order": 210,
+      "pattern": "^buffer_count$",
+      "_note": "metrics_tab-02: Utility Buffer logs this every run at the same constant value."
+    },
+    {
+      "order": 220,
+      "pattern": "^output_feature_count$",
+      "_note": "metrics_tab-02: Utility Buffer logs this every run at the same constant value."
+    }
+  ],
+  "meaningful_metric_tokens": [
+    {
+      "order": 40,
+      "token": "parcel"
+    },
+    {
+      "order": 50,
+      "token": "segment"
+    },
+    {
+      "order": 70,
+      "token": "version"
+    },
+    {
+      "order": 250,
+      "token": "buffer"
+    },
+    {
+      "order": 310,
+      "token": "replica"
+    }
+  ],
+  "metric_change_lower_is_better": [
+    {
+      "order": 40,
+      "token": "unmatched"
+    },
+    {
+      "order": 70,
+      "token": "blank"
+    }
+  ],
+  "display_acronyms": [
+    "ap",
+    "cf",
+    "csc",
+    "epl",
+    "mcfr",
+    "mcso",
+    "ofr",
+    "pa",
+    "ra",
+    "sde"
+  ],
+  "display_names": {
+    "cf_change_count": "Confidentiality changes",
+    "adds_pts_feature_count": "Address points extracted",
+    "responseareas_feature_count": "Response areas extracted",
+    "scratchpad_911_feature_count": "Streets extracted",
+    "ra_mcso_feature_count": "MCSO response areas extracted",
+    "ap_x_geo_unmatched_point_count": "Address points outside a direction area",
+    "ap_x_geo_updated_record_count": "Address points updated by the direction join",
+    "ap_x_zip_unmatched_point_count": "Address points outside a jurisdiction area",
+    "ap_x_zip_updated_record_count": "Address points updated by the jurisdiction join",
+    "ap_exported": "Address points exported",
+    "dbf_exported": "Records exported to DBF",
+    "billing_parcels": "Parcels billed for service",
+    "blank_code_parcels": "Parcels with no service code",
+    "parcels_permit_built": "EPL parcels built (rows)",
+    "duration_seconds": "Script-reported time (seconds)",
+    "reloaded_record_count": "Rows reloaded (full refresh)",
+    "failure_count": "Items that failed",
+    "replica_over_warning_count": "Replicas flagged for a watermark gap over 3",
+    "replica_family_over_critical_count": "Replica families with a sync chain over 20",
+    "replica_item_count": "Replica registrations",
+    "anchored_replica_count": "Replicas with a sync anchor",
+    "stale_replica_registration_count": "Unanchored registrations with a watermark gap over 3 (not flagged)",
+    "replica_family_count": "Replica families",
+    "idle_replica_count": "Idle replicas touched",
+    "segments_pending_retirement_count": "Segments checked for retirement",
+    "target_record_count_before": "Target records before sync",
+    "target_record_count_after": "Target records after sync",
+    "feature_record_count": "Records in the layer",
+    "sde_parcels_before_truncate": "SDE parcels before reload",
+    "sde_parcels_permit_before_truncate": "SDE parcels EPL before reload",
+    "sde_parcels_permit_crosswalk_before_truncate": "SDE parcels EPL crosswalk before reload",
+    "parcels_row_count": "SDE parcels after reload",
+    "sde_parcels_permit_row_count": "SDE parcels EPL after reload",
+    "sde_parcels_permit_crosswalk_row_count": "SDE parcels EPL crosswalk after reload",
+    "staged_row_count": "Parcels staged for reload",
+    "centroids_row_count": "SDE parcel centroids after reload",
+    "total_datasets_to_analyze": "Datasets queued for statistics update",
+    "city_values_swapped_count": "City COUNTY values replaced",
+    "zip_values_swapped_count": "ZIP 99999 values replaced",
+    "today_parcel_count": "Parcels today",
+    "yesterday_parcel_count": "Parcels yesterday",
+    "common_parcel_count": "Parcels in both today's and yesterday's copy",
+    "acme_storm_basins_deleted_record_count": "Acme storm basins rows removed before reload",
+    "acme_storm_pipe_deleted_record_count": "Acme storm pipe rows removed before reload",
+    "acme_storm_structure_deleted_record_count": "Acme storm structure rows removed before reload",
+    "acme_storm_basins_hosted_record_count": "Acme storm basins rows in hosted layer",
+    "acme_storm_pipe_hosted_record_count": "Acme storm pipe rows in hosted layer",
+    "acme_storm_structure_hosted_record_count": "Acme storm structure rows in hosted layer",
+    "acme_storm_basins_exported_record_count": "Acme storm basins rows exported for upload",
+    "acme_storm_pipe_exported_record_count": "Acme storm pipe rows exported for upload",
+    "acme_storm_structure_exported_record_count": "Acme storm structure rows exported for upload",
+    "exported_hosted_has": "Exported rows when the hosted count differs",
+    "found_record": "Records found to process",
+    "history_rows_to_update_with_an_earlier_qa_decision": "History rows to update (earlier QA decision)",
+    "review_fields_to_the_qacycle_row": "Review fields planned for the QA cycle row"
+  },
+  "cause_patterns": [
+    {
+      "order": 25,
+      "cause": "database",
+      "pattern": "(?i)tempdb|sde workspace",
+      "_note": "Checked before the network group, as the SQL client errors are."
+    },
+    {
+      "order": 55,
+      "cause": "database",
+      "pattern": "(?i)\\.\u0073de\\b|sde workspace|odbc|sql server|login failed for user|tempdb|dbms|error 000(?:732|187|837)|does not exist or is not supported|parameters are not valid|source feature class not found|missing source fc|not found in workspace|not found through the default connection|source not found|workspace .{0,200}does not exist",
+      "_note": "ERROR 000732 / 'Parameters are not valid' mean arcpy could not open an input, so they are data-source evidence (the 2026-10-02 storage stall)."
+    }
+  ],
+  "cause_text": {
+    "database": [
+      "the database or data source (SDE/SQL)",
+      "Check the database server first: connections, tempdb and its disks."
+    ]
+  }
+}

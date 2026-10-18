@@ -1,0 +1,112 @@
+# Proves a clean install works on a stock Windows runner: wheel, console script, offline preflight,
+# real task registration with a stored password, a fixture dry run and an offline dashboard build.
+# No secret is used. Nothing here signs in to ArcGIS Online: preflight and dashboard run --offline,
+# and collect without --apply never connects.
+name: install
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  install:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Build the wheel
+        shell: powershell
+        run: |
+          python -m pip install build
+          python -m build --wheel
+
+      - name: Install the wheel into a fresh venv
+        shell: powershell
+        run: |
+          python -m venv "$env:RUNNER_TEMP\venv"
+          $wheel = (Get-ChildItem dist\*.whl | Select-Object -First 1).FullName
+          & "$env:RUNNER_TEMP\venv\Scripts\python.exe" -m pip install $wheel
+          "TASKDASH_HOME=$env:RUNNER_TEMP\home" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "TASKDASH_EXE=$env:RUNNER_TEMP\venv\Scripts\taskdash.exe" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: taskdash --version
+        shell: powershell
+        run: |
+          & $env:TASKDASH_EXE --version
+          if ($LASTEXITCODE -ne 0) { throw "taskdash --version exited $LASTEXITCODE." }
+
+      - name: Offline preflight on the example config
+        shell: powershell
+        run: |
+          New-Item -ItemType Directory -Force $env:TASKDASH_HOME | Out-Null
+          $config = Join-Path $env:TASKDASH_HOME "TaskDash.config.json"
+          Copy-Item TaskDash.config.example.json $config
+          $output = & $env:TASKDASH_EXE preflight --offline --config $config 2>&1 | Out-String
+          $code = $LASTEXITCODE
+          Write-Host $output
+          # A runner has no metric log folders, no scheduled tasks to monitor and no ArcGIS Online
+          # profile, so preflight reports [!!] for those environment checks and exits 1. That is
+          # expected here. The job fails on a crash instead: a traceback, or any exit code above 1.
+          if ($output -match "Traceback") { throw "preflight crashed. Read the traceback above." }
+          if ($code -gt 1) { throw "preflight exited $code. Exit 0 or 1 is expected on a runner." }
+
+      - name: Register the task with a stored password
+        shell: powershell
+        run: |
+          # A throw-away local user with a random password that exists only on this runner. The
+          # password is masked, held as a SecureString and passed in memory; it is never a secret
+          # from the repository.
+          $bytes = New-Object byte[] 24
+          [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
+          $plain = [Convert]::ToBase64String($bytes) + "aA1!"
+          Write-Host "::add-mask::$plain"
+          $secure = ConvertTo-SecureString $plain -AsPlainText -Force
+          $name = "ci_taskdash"
+          New-LocalUser -Name $name -Password $secure -AccountNeverExpires | Out-Null
+          $credential = New-Object System.Management.Automation.PSCredential("$env:COMPUTERNAME\$name", $secure)
+          .\install_task.ps1 -TaskName TaskDashCI -InstallDir $env:TASKDASH_HOME -Python $env:TASKDASH_EXE -Credential $credential -LogonType Password -Apply
+          if ($LASTEXITCODE) { throw "install_task.ps1 exited $LASTEXITCODE." }
+          $actual = (Get-ScheduledTask -TaskName TaskDashCI).Principal.LogonType
+          if ("$actual" -ne "Password") { throw "Registered logon type is '$actual', expected 'Password'." }
+
+      - name: Remove the throw-away task and user
+        if: always()
+        shell: powershell
+        run: |
+          Unregister-ScheduledTask -TaskName TaskDashCI -Confirm:$false -ErrorAction SilentlyContinue
+          Remove-LocalUser -Name ci_taskdash -ErrorAction SilentlyContinue
+
+      - name: Collect from a synthetic fixture (dry run, no sign-in)
+        shell: powershell
+        run: |
+          & $env:TASKDASH_EXE collect --fixture tests/fixtures/synthetic_app_host_01.json --config (Join-Path $env:TASKDASH_HOME "TaskDash.config.json")
+          if ($LASTEXITCODE -ne 0) { throw "collect --fixture exited $LASTEXITCODE." }
+
+      - name: Build the dashboard offline
+        shell: powershell
+        run: |
+          & $env:TASKDASH_EXE dashboard --offline
+          if ($LASTEXITCODE -ne 0) { throw "dashboard --offline exited $LASTEXITCODE." }
+
+  tests:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # The tests import arcgis but replace its network calls with fakes.
+      - name: Install test dependencies
+        run: python -m pip install arcgis pytest
+
+      - name: Run the full suite
+        run: python -m pytest -q -p no:cacheprovider

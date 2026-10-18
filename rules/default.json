@@ -1,0 +1,370 @@
+{
+  "_notes": "Generic rules any organization can use. Config rules.profiles adds profile files on top; taskdash_metrics.py (rules as data) describes the format.",
+  "log_preamble": {
+    "timestamp": "^\\s*\\[?\\d{4}-\\d{2}-\\d{2}[ T]\\d{2}:\\d{2}:\\d{2}(?:[.,]\\d+)?\\]?",
+    "separator": "\\s*(?:[-|:\\[]+\\s*)?",
+    "levels": [
+      "DEBUG",
+      "INFO",
+      "WARNING",
+      "WARN",
+      "ERROR",
+      "CRITICAL"
+    ]
+  },
+  "section_pattern": "^Processing\\b:?\\s*(?P<name>[A-Za-z]\\w*)\\s*(?:\\(|\\.\\.\\.|$)",
+  "canonical_metric_rules": [
+    {
+      "order": 40,
+      "pattern": "^total_execution_time$",
+      "key": "duration_seconds"
+    },
+    {
+      "order": 50,
+      "pattern": "^processing_time$",
+      "key": "duration_seconds"
+    },
+    {
+      "order": 60,
+      "pattern": "^duration$",
+      "key": "duration_seconds"
+    },
+    {
+      "order": 70,
+      "pattern": "^elapsed_time$",
+      "key": "duration_seconds"
+    },
+    {
+      "order": 90,
+      "pattern": "^total_time$",
+      "key": "duration_seconds"
+    },
+    {
+      "order": 110,
+      "pattern": "^records_checked$",
+      "key": "checked_record_count"
+    },
+    {
+      "order": 120,
+      "pattern": "^records_unchanged$",
+      "key": "unchanged_record_count"
+    },
+    {
+      "order": 130,
+      "pattern": "^records_updated$",
+      "key": "updated_record_count"
+    },
+    {
+      "order": 140,
+      "pattern": "^updated_records$",
+      "key": "updated_record_count"
+    },
+    {
+      "order": 150,
+      "pattern": "^updated_total$",
+      "key": "updated_record_count"
+    },
+    {
+      "order": 340,
+      "pattern": "^(?:inserts|inserted)$",
+      "key": "inserted_record_count",
+      "_note": "metrics_tab-05: keep a differential insert count apart from a full reload's row count."
+    },
+    {
+      "order": 360,
+      "pattern": "^(?:updates|updated)$",
+      "key": "updated_record_count"
+    },
+    {
+      "order": 370,
+      "pattern": "^deletes$",
+      "key": "deleted_record_count"
+    },
+    {
+      "order": 380,
+      "pattern": "^unchanged$",
+      "key": "unchanged_record_count"
+    },
+    {
+      "order": 450,
+      "pattern": "^deleted_features$",
+      "key": "deleted_record_count"
+    },
+    {
+      "order": 460,
+      "pattern": "^total_deleted$",
+      "key": "deleted_record_count"
+    },
+    {
+      "order": 470,
+      "pattern": "^deleted$",
+      "key": "deleted_record_count"
+    },
+    {
+      "order": 480,
+      "pattern": "^updated_count$",
+      "key": "updated_record_count"
+    },
+    {
+      "order": 490,
+      "pattern": "^deleted_count$",
+      "key": "deleted_record_count"
+    },
+    {
+      "order": 500,
+      "pattern": "^source_count$",
+      "key": "source_record_count"
+    },
+    {
+      "order": 510,
+      "pattern": "^target_count$",
+      "key": "target_record_count"
+    }
+  ],
+  "noise_metric_key_patterns": [
+    {
+      "order": 10,
+      "pattern": "^start_time$"
+    },
+    {
+      "order": 20,
+      "pattern": "^time$"
+    },
+    {
+      "order": 30,
+      "pattern": "^finished$"
+    },
+    {
+      "order": 40,
+      "pattern": "^failed$"
+    },
+    {
+      "order": 50,
+      "pattern": "^runtimeerror$"
+    },
+    {
+      "order": 140,
+      "pattern": "^[a-f0-9_]{16,}$"
+    },
+    {
+      "order": 150,
+      "pattern": "^(?:.*_)?(?:object|replica|global|item)?ids?$",
+      "_note": "M4: identifiers and timestamps are labels, never counts."
+    },
+    {
+      "order": 160,
+      "pattern": "^(?:.*_)?oid$"
+    },
+    {
+      "order": 170,
+      "pattern": "^(?:.*_)?timestamp$"
+    }
+  ],
+  "meaningful_metric_tokens": [
+    {
+      "order": 10,
+      "token": "count"
+    },
+    {
+      "order": 20,
+      "token": "record"
+    },
+    {
+      "order": 30,
+      "token": "row"
+    },
+    {
+      "order": 60,
+      "token": "feature"
+    },
+    {
+      "order": 80,
+      "token": "duration"
+    },
+    {
+      "order": 90,
+      "token": "second"
+    },
+    {
+      "order": 100,
+      "token": "minute"
+    },
+    {
+      "order": 110,
+      "token": "updated"
+    },
+    {
+      "order": 120,
+      "token": "deleted"
+    },
+    {
+      "order": 130,
+      "token": "removed"
+    },
+    {
+      "order": 140,
+      "token": "added"
+    },
+    {
+      "order": 150,
+      "token": "appended"
+    },
+    {
+      "order": 160,
+      "token": "exported"
+    },
+    {
+      "order": 170,
+      "token": "download"
+    },
+    {
+      "order": 180,
+      "token": "processed"
+    },
+    {
+      "order": 190,
+      "token": "checked"
+    },
+    {
+      "order": 200,
+      "token": "created"
+    },
+    {
+      "order": 210,
+      "token": "retired"
+    },
+    {
+      "order": 220,
+      "token": "reconciled"
+    },
+    {
+      "order": 230,
+      "token": "change"
+    },
+    {
+      "order": 240,
+      "token": "null"
+    },
+    {
+      "order": 260,
+      "token": "match"
+    },
+    {
+      "order": 270,
+      "token": "polygon"
+    },
+    {
+      "order": 280,
+      "token": "point"
+    },
+    {
+      "order": 290,
+      "token": "exception"
+    },
+    {
+      "order": 300,
+      "token": "dataset"
+    },
+    {
+      "order": 320,
+      "token": "failure"
+    }
+  ],
+  "metric_change_lower_is_better": [
+    {
+      "order": 10,
+      "token": "over_"
+    },
+    {
+      "order": 20,
+      "token": "stale"
+    },
+    {
+      "order": 30,
+      "token": "fail"
+    },
+    {
+      "order": 50,
+      "token": "error"
+    },
+    {
+      "order": 60,
+      "token": "exception"
+    },
+    {
+      "order": 80,
+      "token": "missing"
+    },
+    {
+      "order": 90,
+      "token": "orphan"
+    },
+    {
+      "order": 100,
+      "token": "duplicate"
+    },
+    {
+      "order": 110,
+      "token": "skipped"
+    }
+  ],
+  "display_acronyms": [
+    "db",
+    "dbf",
+    "fgdb",
+    "gis",
+    "id",
+    "oid",
+    "zip"
+  ],
+  "cause_patterns": [
+    {
+      "order": 10,
+      "cause": "licence",
+      "pattern": "(?i)product license|not licensed|licen[cs]e (?:has not|is not|not)"
+    },
+    {
+      "order": 20,
+      "cause": "database",
+      "pattern": "(?i)odbc|sql server|login failed for user",
+      "_note": "SQL client errors first: pyodbc's 'TCP Provider: The specified network name is no longer available' is the usual line when SQL Server drops a session, not a file-share problem."
+    },
+    {
+      "order": 30,
+      "cause": "network",
+      "pattern": "(?i)network path|network name|winerror 5[3]|winerror 67|access is denied|could not find a part of the path"
+    },
+    {
+      "order": 40,
+      "cause": "arcgis",
+      "pattern": "(?i)generatetoken|get_token|invalid token|token required|http error 5\\d\\d|\\bportal\\b.{0,80}(?:error|unavailable|fail|denied)"
+    },
+    {
+      "order": 50,
+      "cause": "database",
+      "pattern": "(?i)dbms"
+    }
+  ],
+  "cause_text": {
+    "licence": [
+      "the ArcGIS licence",
+      "Check the ArcGIS Pro licence on the host first."
+    ],
+    "network": [
+      "the network or a file share",
+      "Check the file shares and the network path first."
+    ],
+    "arcgis": [
+      "ArcGIS Server or the portal",
+      "Check ArcGIS Server and its token endpoint first."
+    ],
+    "": [
+      "no single cause",
+      "Check the database server, the network and the ArcGIS licence first."
+    ],
+    "database": [
+      "the database or data source",
+      "Check the database server first: its connections and disks."
+    ]
+  }
+}

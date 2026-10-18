@@ -1,0 +1,26 @@
+# Real config holds credentials and org names; the example file is the template.
+TaskDash.config.json
+TaskDash.config.json.*
+*.config.json.bak*
+*.sde
+
+# Runtime state written by the collector.
+alert_state.json
+collector_runs_pending_*.json
+dashboard_taskdash.json
+Logs/
+archive/
+*.log
+
+# Backups.
+*.bak
+*.bak_*
+
+# Python and tooling.
+__pycache__/
+*.pyc
+.pytest_cache/
+.coverage
+
+# Per-machine Claude Code settings.
+.claude/settings.local.json
