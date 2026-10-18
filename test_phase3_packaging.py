@@ -37,6 +37,15 @@ def installed(monkeypatch, tmp_path):
     return tmp_path
 
 
+def test_an_unrelated_rules_package_beside_the_module_is_not_a_folder_deploy(tmp_path, monkeypatch):
+    (tmp_path / "rules").mkdir()
+    (tmp_path / "rules" / "__init__.py").write_text("", encoding="utf-8")
+    monkeypatch.setattr(common, "__file__", str(tmp_path / "taskdash_common.py"))
+    assert common._folder_deploy() is False
+    (tmp_path / "rules" / "default.json").write_text("{}", encoding="utf-8")
+    assert common._folder_deploy() is True
+
+
 def test_installed_mode_reads_data_from_share_and_keeps_files_in_home(installed, monkeypatch):
     home = installed / "home"
     home.mkdir()

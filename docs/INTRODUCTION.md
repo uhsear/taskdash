@@ -127,6 +127,12 @@ sent only when `alerting.heartbeat_hour` is set. The example config sets it to 7
 
 ## Release notes
 
+### 1.0.1 (2026-10-18)
+
+Fixes from the release audit. Setup keeps the view in the setup folder and lists a half-made view
+for the undo. The demo explains that it signs in only through a profile. The release checksum file
+works with `sha256sum -c`. See [CHANGELOG.md](../CHANGELOG.md) for the full list.
+
 ### 1.0.0 (2026-10-18)
 
 The first stable version.

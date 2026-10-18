@@ -878,10 +878,11 @@ folder in ArcGIS Online.
 
 ### The demo needs a real sign-in
 
-> --apply needs the real config's arcgis.url and arcgis.profile to sign in. Run `taskdash setup` first, then re-run `taskdash demo --apply`.
+> --apply signs in only through the real config's arcgis.url and arcgis.profile, and one of them is empty. A username or password is never copied to the demo. Store a profile as INSTALL.md step 3 describes, set arcgis.profile, then re-run `taskdash demo --apply`.
 
 **Cause.** The demo signs in with `arcgis.url` and `arcgis.profile` from the real config. One of them
-is empty, or the real config does not exist.
+is empty, or the real config does not exist. A config that signs in with `arcgis.username` and a
+password also gets this message, because the demo never copies a password.
 
 **Fix.** Set both keys as steps 2 and 3 of [INSTALL.md](INSTALL.md) describe. Then run
 `taskdash demo --apply` again.

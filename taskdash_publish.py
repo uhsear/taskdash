@@ -1506,8 +1506,10 @@ def check_source_sharing(item: Any, config: Dict[str, Any], target: str) -> None
 
 
 def create_view(gis: Any, item: Any, config: Dict[str, Any], apply: bool,
-                target: str = "prod") -> Optional[Any]:
-    """Plan (default) or create the read-only view of the service, then print its item id."""
+                target: str = "prod", folder: Optional[str] = None,
+                on_create: Optional[Callable[[Any], None]] = None) -> Optional[Any]:
+    """Plan (default) or create the read-only view of the service, then print its item id.
+    on_create gets the view as soon as it exists, so a caller can record it before a later step fails."""
     from arcgis.features import FeatureLayerCollection
 
     name = f"{item.title}_view"
@@ -1534,7 +1536,10 @@ def create_view(gis: Any, item: Any, config: Dict[str, Any], apply: bool,
                              f"hidden. Delete it in ArcGIS Online and re-run; do not set "
                              f"arcgis.{view_key(target)} to it.")
     # updateable=False: the library default makes an updatable view, one setting from an edit path.
-    view = FeatureLayerCollection.fromitem(item).manager.create_view(name=name, updateable=False)
+    extra = {"folder": folder} if folder else {}
+    view = FeatureLayerCollection.fromitem(item).manager.create_view(name=name, updateable=False, **extra)
+    if on_create:
+        on_create(view)
     # The item create_view returns lists no tables (seen on ArcGIS Online, 2026-10-17); a fresh
     # get of the same id does, once the new service has finished provisioning.
     view_tables = {}

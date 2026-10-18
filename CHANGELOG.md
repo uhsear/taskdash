@@ -4,6 +4,19 @@ All notable changes to TaskDash are listed here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). The version numbers follow
 [Semantic Versioning](https://semver.org/).
 
+## [1.0.1] - 2026-10-18
+
+### Fixed
+
+- `taskdash setup` creates the view in the setup folder, not the account's root folder. A view that
+  fails after it exists is now in the "Created by this run" list, so the undo steps remove it.
+- The `taskdash demo --apply` refusal says that the demo signs in only through a profile. It no
+  longer tells an install that signs in with a username to run setup again.
+- TaskDash treats its folder as a plain-folder install only when `rules/default.json` is beside the
+  modules. An unrelated `rules` package in the same site-packages no longer changes where it reads
+  its data.
+- `SHA256SUMS.txt` in a release uses LF line endings, so `sha256sum -c` works on Linux.
+
 ## [1.0.0] - 2026-10-18
 
 The first stable version.

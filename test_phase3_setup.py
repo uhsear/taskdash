@@ -97,10 +97,14 @@ def _patch_publish_and_dashboard(monkeypatch, gis, path, log, fail_view=False):
         log.append(("create_service", title, folder))
         return svc
 
-    def create_view(g, item, config, apply, target="prod"):
+    def create_view(g, item, config, apply, target="prod", folder=None, on_create=None):
         log.append(("create_view", item.id, json.loads(path.read_text())["arcgis"]["item_id"]))
+        log.append(("view.folder", folder))
+        if fail_view == "after create":
+            on_create(view)
         if fail_view:
             raise SystemExit("view failed. fix it.")
+        on_create(view)
         return view
 
     def share_item(item, **kw):
@@ -222,12 +226,13 @@ def test_apply_runs_in_order_and_shares_with_the_group_only(tmp_path, monkeypatc
     _patch_publish_and_dashboard(monkeypatch, gis, path, log)
     assert setup.setup(gis, json.loads(path.read_text()), path, args) == 0
     names = [c[0] for c in log]
-    assert names == ["folder.create", "create_service", "apply_migration", "create_view", "group.create",
+    assert names == ["folder.create", "create_service", "apply_migration", "create_view", "view.folder", "group.create",
                      "group.kw", "share", "load_templates", "layer_ids", "validate", "post_dashboard",
                      "move", "share", "anonymous"]
     assert ("create_service", "TaskDash", "TaskDash") in log
     # item_id was already in the config when the view was created.
     assert ("create_view", "svc1", "svc1") in log
+    assert ("view.folder", "TaskDash") in log
     assert ("group.kw", "private", True) in log
     assert ("layer_ids", "view1", "prod") in log and ("validate", "view1") in log
     assert [c for c in log if c[0] == "post_dashboard"][0][2:] == (None, {"read": "view1"})
@@ -259,6 +264,17 @@ def test_config_write_back_keeps_other_keys_and_order_and_backs_up(tmp_path, mon
     backups = list(tmp_path.glob("TaskDash.config.json.bak_setup_*"))
     assert len(backups) == 1
     assert json.loads(backups[0].read_text(encoding="utf-8-sig")) == json.loads(original)
+
+
+def test_a_view_that_fails_after_it_exists_is_listed_for_the_undo(tmp_path, monkeypatch, capsys):
+    log = []
+    path, args = _args(tmp_path, apply=True)
+    gis = FakeGis(log)
+    _patch_publish_and_dashboard(monkeypatch, gis, path, log, fail_view="after create")
+    with pytest.raises(SystemExit, match="view failed"):
+        setup.setup(gis, json.loads(path.read_text()), path, args)
+    out = capsys.readouterr().out
+    assert "Created by this run" in out and "view1" in out
 
 
 def test_failure_mid_run_prints_what_was_created_and_keeps_the_ids(tmp_path, monkeypatch, capsys):

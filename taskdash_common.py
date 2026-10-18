@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence
 
 # Shown in the dashboard's About panel and the wheel name; release.yml checks it against the tag.
-TASKDASH_VERSION = "1.0.0"
+TASKDASH_VERSION = "1.0.1"
 # Bump when TABLE_SPECS or TABLE_INDEXES change. A service stamped with a newer number was
 # migrated by a newer TaskDash, which this one may write wrongly.
 SCHEMA_VERSION = 1
@@ -70,9 +70,10 @@ def disable_arcpy_import() -> None:
 # --------------------------------------------------------------------------- paths & config
 
 def _folder_deploy() -> bool:
-    """True when rules/ sits beside this module: the plain-folder install, where one folder
-    holds both the shipped data and the per-install files."""
-    return (Path(__file__).resolve().parent / "rules").is_dir()
+    """True when rules/default.json sits beside this module: the plain-folder install, where one
+    folder holds both the shipped data and the per-install files. The file, not just a rules/
+    folder, because a wheel's modules share site-packages with any package named rules."""
+    return (Path(__file__).resolve().parent / "rules" / "default.json").is_file()
 
 
 def data_dir() -> Path:

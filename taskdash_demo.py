@@ -133,8 +133,10 @@ def apply_run(demo: Path, fixtures: List[Path], real: Dict[str, Any]) -> None:
 
     config_path = demo / DEFAULT_CONFIG_FILE
     if not (real.get("url") and real.get("profile")):
-        raise SystemExit("--apply needs the real config's arcgis.url and arcgis.profile to sign in. "
-                         "Run `taskdash setup` first, then re-run `taskdash demo --apply`.")
+        raise SystemExit("--apply signs in only through the real config's arcgis.url and arcgis.profile, "
+                         "and one of them is empty. A username or password is never copied to the demo. "
+                         "Store a profile as INSTALL.md step 3 describes, set arcgis.profile, then re-run "
+                         "`taskdash demo --apply`.")
     refuse_shared_ids(read_demo_arcgis(config_path), real)
     stored = read_demo_arcgis(config_path)
     missing = [key for key in setup.INSTALL_KEYS if not normalize_text(stored.get(key))]

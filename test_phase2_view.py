@@ -142,6 +142,19 @@ def test_apply_creates_hides_resends_capabilities_and_never_shares_everyone(worl
     assert world.view.shares == [("level", "ORG"), ("group", "grp1")]
 
 
+def test_apply_puts_the_view_in_the_folder_and_reports_it_before_the_table_wait(world, monkeypatch):
+    def stuck(_s):
+        raise SystemExit("stopped in the table wait")
+
+    monkeypatch.setattr(publish.time, "sleep", stuck)
+    monkeypatch.setattr(publish, "get_tables", lambda item: {})
+    seen = []
+    with pytest.raises(SystemExit, match="table wait"):
+        publish.create_view(world.gis, world.item, {}, apply=True, folder="TaskDash", on_create=seen.append)
+    assert world.log[0] == ("create_view", {"name": "TaskDash_view", "updateable": False, "folder": "TaskDash"})
+    assert seen == [world.view]
+
+
 def test_apply_refetches_the_view_until_its_tables_appear(world, monkeypatch):
     # The item create_view returns lists no tables; a later get of the same id does.
     answers = iter([{}, {}, world.tables])

@@ -30,7 +30,8 @@ jobs:
           python -m build --wheel
           $wheel = Get-ChildItem dist\*.whl | Select-Object -First 1
           $hash = (Get-FileHash $wheel.FullName -Algorithm SHA256).Hash.ToLower()
-          "$hash  $($wheel.Name)" | Out-File -FilePath "dist\SHA256SUMS.txt" -Encoding ascii
+          # LF, not the CRLF Out-File writes: `sha256sum -c` on Linux reads the CR into the file name.
+          [IO.File]::WriteAllText("$PWD\dist\SHA256SUMS.txt", "$hash  $($wheel.Name)`n")
 
       - name: Check that the tag matches the package version
         shell: powershell

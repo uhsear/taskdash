@@ -161,9 +161,11 @@ def create_service_item(gis: Any, config: Dict[str, Any], path: Path, args: argp
 
 
 def create_view_item(gis: Any, item: Any, config: Dict[str, Any], path: Path,
-                     created: Created) -> Any:
-    view = publish.create_view(gis, item, config, apply=True, target="prod")
-    created.append((view.title, FEATURE_SERVICE, view.id))
+                     args: argparse.Namespace, created: Created) -> Any:
+    # Recorded the moment it exists: a later wait, field hide or share can still fail, and the
+    # "Created by this run" list must name the view for the undo.
+    view = publish.create_view(gis, item, config, apply=True, target="prod", folder=args.folder,
+                               on_create=lambda v: created.append((v.title, FEATURE_SERVICE, v.id)))
     write_config_key(path, config, "view_item_id", view.id)
     return view
 
@@ -214,7 +216,7 @@ def apply_setup(gis: Any, config: Dict[str, Any], path: Path, args: argparse.Nam
     folder = gis.content.folders.create(args.folder)
     created.append((args.folder, "Folder", (folder.properties or {}).get("id", "")))
     item = create_service_item(gis, config, path, args, created)
-    view = create_view_item(gis, item, config, path, created)
+    view = create_view_item(gis, item, config, path, args, created)
     group = create_group(gis, args, created)
     # The Group object, not its id: the old Item.share() looked an id up in the search index, which
     # did not list a group created seconds ago ("Cannot find group with id", first TDI_ run).
