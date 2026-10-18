@@ -404,6 +404,47 @@ def test_logon_without_task_list_fails():
     assert pf.check_logon_type(make_ctx())[0] == pf.FAIL
 
 
+# --------------------------------------------------------------------------- 10b collector account
+
+def admin_ctx(user):
+    return make_ctx(tasks=[task("Task Dash", "Password", run_as_user=user)])
+
+
+@pytest.mark.parametrize("user", ["DOMAIN\\svc-td", "svc-td", "SVC-TD"])
+def test_admin_direct_member_is_ok_by_full_or_short_name(monkeypatch, user):
+    monkeypatch.setattr(pf, "read_admin_members", lambda: [("DOMAIN\\svc-td", "User"), ("HOST\\Administrator", "User")])
+    assert pf.check_admin_account(admin_ctx(user))[0] == pf.OK
+
+
+def test_admin_standard_account_fails_with_the_net_localgroup_fix(monkeypatch):
+    monkeypatch.setattr(pf, "read_admin_members", lambda: [("HOST\\Administrator", "User")])
+    status, message = pf.check_admin_account(admin_ctx("HOST\\td_probe"))
+    assert status == pf.FAIL and "misses other accounts' tasks" in message
+    assert "net localgroup Administrators HOST\\td_probe /add" in message
+
+
+def test_admin_possible_group_membership_only_warns(monkeypatch):
+    monkeypatch.setattr(pf, "read_admin_members", lambda: [("DOMAIN\\Domain Admins", "Group")])
+    status, message = pf.check_admin_account(admin_ctx("DOMAIN\\svc-td"))
+    assert status == pf.WARN and message.startswith("WARNING:") and "DOMAIN\\Domain Admins" in message
+
+
+def test_admin_unreadable_group_warns_instead_of_failing(monkeypatch):
+    def broken():
+        raise SystemExit("PowerShell collection failed (exit 1): Failed to compare two elements")
+    monkeypatch.setattr(pf, "read_admin_members", broken)
+    status, message = pf.check_admin_account(admin_ctx("DOMAIN\\svc-td"))
+    assert status == pf.WARN and "net localgroup Administrators" in message
+
+
+def test_admin_system_task_and_unregistered_task_need_no_group_read(monkeypatch):
+    monkeypatch.setattr(pf, "read_admin_members", lambda: pytest.fail("must not read the group"))
+    assert pf.check_admin_account(admin_ctx("SYSTEM"))[0] == pf.OK
+    assert pf.check_admin_account(admin_ctx(""))[0] == pf.WARN
+    assert pf.check_admin_account(make_ctx(tasks=[task("Other", "Password")]))[0] == pf.SKIP
+    assert pf.check_admin_account(make_ctx())[0] == pf.FAIL
+
+
 # --------------------------------------------------------------------------- 11 scale
 
 def test_scale_within_tested_ok():
@@ -444,7 +485,9 @@ def test_warnings_do_not_set_exit_one(tmp_path, monkeypatch, capsys):
 def local_fakes(monkeypatch, tasks=None):
     fake_wevtutil(monkeypatch)
     monkeypatch.setattr(taskdash_collect, "collect_tasks",
-                        lambda timeout: tasks if tasks is not None else [task("Task Dash", "Password")])
+                        lambda timeout: tasks if tasks is not None
+                        else [task("Task Dash", "Password", run_as_user="HOST\\svc-td")])
+    monkeypatch.setattr(pf, "read_admin_members", lambda: [("HOST\\svc-td", "User")])
 
 
 def test_offline_makes_no_network_call(tmp_path, monkeypatch, capsys):
@@ -476,7 +519,7 @@ def test_full_run_with_fakes_makes_no_write(tmp_path, monkeypatch, capsys):
     local_fakes(monkeypatch)
     assert pf.main(["--config", config_path]) == 0
     out = capsys.readouterr().out
-    assert "[!!]" not in out and out.count("[ok]") == 10 and "[--] smtp" in out
+    assert "[!!]" not in out and out.count("[ok]") == 11 and "[--] smtp" in out
     assert "Preflight: 0 problem(s), 0 warning(s)." in out
 
 

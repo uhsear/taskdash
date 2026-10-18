@@ -198,7 +198,8 @@ these three lines are expected, because steps 6 and 7 have not run yet:
 - `[!!] sharing: the service was not read ...`
 - `[!!] collector logon type: collector task 'TaskDash Collector' not found. ...`
 
-`[--] view: no arcgis.view_item_id configured ...` is also expected.
+`[--] view: no arcgis.view_item_id configured ...` and
+`[--] collector account: collector task 'TaskDash Collector' is not registered yet` are also expected.
 
 A `tested scale` line that starts with `WARNING` is not a problem. It says that this computer has
 more tasks than the tested install, or tasks that repeat more often than hourly.
@@ -360,7 +361,10 @@ Local: taskdash_20261017_202547.log: <time> - INFO - TaskDash publish complete.
 Service: last collector run started 2026-10-17 20:25:47 UTC, exit_status success
 ```
 
-Preflight now shows `[ok]` for the service, the view, sharing and the collector logon type.
+Preflight now shows `[ok]` for the service, the view, sharing, the collector logon type and the
+collector account. The collector account line checks that the task account is in the local
+Administrators group. If that line starts `[!!] collector account: WARNING:`, the account is not a
+direct member, and preflight names the groups that may include it. Confirm that one of them does.
 
 If the collector logon type line still says `collector task 'TaskDash Collector' not found`, your
 normal window may not be allowed to see a task that runs as another account. Run
@@ -398,6 +402,28 @@ The undo leaves three changes in place, because other software may use them:
 - The larger, enabled Task Scheduler event log from step 5. It is harmless to keep.
 - The task account's membership of the Administrators group. Remove it if nothing else needs it.
 - Python. Uninstall it in **Settings > Apps** if nothing else needs it.
+
+## Use a cloned ArcGIS Pro environment instead
+
+If the computer has ArcGIS Pro, you can install TaskDash into a clone of Pro's Python environment
+instead of the virtual environment of step 1. Pro already contains `arcgis` and `keyring`. In
+step 1, run these commands in place of the `py -3.11 -m venv` and `pip install` lines. The clone
+takes a few minutes and about 2 GB.
+
+```powershell
+& "C:\Program Files\ArcGIS\Pro\bin\Python\Scripts\conda.exe" create --clone arcgispro-py3 -p C:\TaskDash\proenv --yes
+Test-Path C:\TaskDash\proenv\python.exe
+C:\TaskDash\proenv\python.exe -m pip install --no-deps $whl
+C:\TaskDash\proenv\Scripts\taskdash.exe --version
+```
+
+- `Test-Path` must print `True`. A clone into a deep folder path can stop partway and still
+  report success. `C:\TaskDash\proenv` is short enough, and the task account can read it.
+- Use `--no-deps`. Without it, pip replaces packages that conda manages in the clone, such as
+  `cffi` and `pywin32`, and the clone can break.
+- In every later step, use `C:\TaskDash\proenv\Scripts\taskdash.exe` where the guide uses
+  `C:\TaskDash\venv\Scripts\taskdash.exe`, and `C:\TaskDash\proenv\python.exe` where it uses
+  `C:\TaskDash\venv\Scripts\python.exe`. In step 7, pass the same `taskdash.exe` as `-Python`.
 
 ## Known limits
 

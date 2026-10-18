@@ -39,6 +39,7 @@ from taskdash_common import (
     load_config,
     load_mail_settings,
     normalize_text,
+    run_powershell_json,
 )
 from taskdash_dashboard import DEFAULT_COLLECTOR_TASK_NAME
 from taskdash_publish import (
@@ -315,11 +316,16 @@ def _uses_stored_credentials(config: Dict[str, Any]) -> Optional[str]:
     return None
 
 
+def _collector_task(ctx: Context) -> Tuple[str, Optional[Dict[str, Any]]]:
+    name = normalize_text(ctx.config.get("scheduler", {}).get("collector_task_name")) or DEFAULT_COLLECTOR_TASK_NAME
+    task = next((t for t in ctx.tasks or [] if normalize_text(t.get("task_name")).lower() == name.lower()), None)
+    return name, task
+
+
 def check_logon_type(ctx: Context) -> Result:
     if ctx.tasks is None:
         return FAIL, "task definitions were not read (see the task check above), so the logon type is unknown."
-    name = normalize_text(ctx.config.get("scheduler", {}).get("collector_task_name")) or DEFAULT_COLLECTOR_TASK_NAME
-    task = next((t for t in ctx.tasks if normalize_text(t.get("task_name")).lower() == name.lower()), None)
+    name, task = _collector_task(ctx)
     if task is None:
         return FAIL, (f"collector task '{name}' not found. Register it with install_task.ps1, or set "
                       "scheduler.collector_task_name to its real name.")
@@ -329,6 +335,48 @@ def check_logon_type(ctx: Context) -> Result:
                       "credentials (Windows gives S4U no access to encrypted files). Re-register the "
                       "task with the Password logon type.")
     return OK, f"task '{name}' logs on as {logon or 'unknown'}"
+
+
+def read_admin_members() -> List[Tuple[str, str]]:
+    """(name, object class) of each local Administrators member. Reading a group needs no elevation."""
+    rows = run_powershell_json("@(Get-LocalGroupMember -SID S-1-5-32-544 | "
+                               "Select-Object @{n='name';e={[string]$_.Name}}, "
+                               "@{n='kind';e={[string]$_.ObjectClass}}) | ConvertTo-Json -Compress", 60)
+    return [(normalize_text(r.get("name")), normalize_text(r.get("kind"))) for r in rows]
+
+
+def check_admin_account(ctx: Context) -> Result:
+    # Measured in a clean Windows: a standard account saw 170 of 229 tasks (none registered by
+    # other accounts) and, without "Log on as a batch job", never started. Neither shows anywhere
+    # else, so this is the only line that can catch it.
+    if ctx.tasks is None:
+        return FAIL, "task definitions were not read (see the task check above), so the account is unknown."
+    name, task = _collector_task(ctx)
+    if task is None:
+        return SKIP, f"collector task '{name}' is not registered yet"
+    user = normalize_text(task.get("run_as_user"))
+    if not user:
+        return WARN, (f"WARNING: Task Scheduler did not report the account task '{name}' runs as. Confirm it "
+                      "is in the local Administrators group with: net localgroup Administrators")
+    if user.lower() in {"system", "nt authority\\system", "s-1-5-18"}:
+        return OK, f"task '{name}' runs as SYSTEM"
+    fix = f"From an elevated prompt run: net localgroup Administrators {user} /add"
+    try:
+        members = read_admin_members()
+    except (OSError, SystemExit, subprocess.SubprocessError) as exc:
+        return WARN, (f"WARNING: could not list the local Administrators group ({type(exc).__name__}). "
+                      f"Confirm '{user}' is a member with: net localgroup Administrators")
+    short = user.split("\\")[-1].lower()
+    if any(kind.lower() == "user" and (member.lower() == user.lower() or member.split("\\")[-1].lower() == short)
+           for member, kind in members):
+        return OK, f"task account '{user}' is in the local Administrators group"
+    groups = [member for member, kind in members if kind.lower() == "group"]
+    if groups:
+        return WARN, (f"WARNING: task account '{user}' is not a direct member of the local Administrators "
+                      f"group; confirm it belongs through {', '.join(groups[:5])}. A standard account misses "
+                      f"other accounts' tasks. {fix}")
+    return FAIL, (f"task account '{user}' is not in the local Administrators group, so it misses other "
+                  f"accounts' tasks and cannot log on as a batch job. {fix}")
 
 
 def check_scale(ctx: Context) -> Result:
@@ -358,6 +406,7 @@ CHECKS: Sequence[Tuple[str, bool, Callable[[Context], Result]]] = (
     ("view", True, check_view),
     ("sharing", True, check_sharing),
     ("collector logon type", False, check_logon_type),
+    ("collector account", False, check_admin_account),
     ("tested scale", False, check_scale),
 )
 
