@@ -33,7 +33,7 @@ EXPECTED_DIGESTS = {
     "prose": "9477835367c01968e08cf3666d4281c529e2e4818e3e27a9da829526058440b5",
     "canonical": "27178dc5ae8da3b38dbea1723b33389f04580fea464c86b16323c3c141aa1e55",
     "noise": "c42168271f83defdec7dc2c2df9d9b593b962a8c4ead365de037ff128d84aa30",
-    "tokens": "1116d9b4c00f31740c6558abf034943b1e81aa602381d584ad594e9e213bf1a3",
+    "tokens": "1116d9b4c00f31740c6558abf034943b1e81aa602381d584ad594e9e213bf1a3",  # gitleaks:allow (sha256 digest)
     "acronyms": "70fb6a1bf49be49ebe6cf8d0bbefdf4927f9c5f2629c7f499da28458a43b6ca8",
     # The synthetic reference profile renames tasks, so only this digest differs from the real profile's.
     "display_names": "67eaa1a2072dadf0b61d165bd17f7950060a7be3e63c76927ca42dde4583cf24",

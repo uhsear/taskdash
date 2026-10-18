@@ -84,7 +84,7 @@ SECRET_CASES = [
     (f"plink -pw {DUMMY} host", "-pw <redacted> host"),
     (f"pscp -pw {DUMMY} f host:", "-pw <redacted> f host:"),
     (f"mysql -uroot -p{DUMMY}", "mysql -uroot -p<redacted>"),
-    (f"curl -u admin:{DUMMY} https://h", "-u admin:<redacted> https://h"),
+    (f"curl -u admin:{DUMMY} https://h", "-u admin:<redacted> https://h"),  # gitleaks:allow (DUMMY is a placeholder)
     (rf"net use Z: \\srv\share {DUMMY} /user:DOM\u", r"\\srv\share <redacted> /user:DOM\u"),
     (f"tool /p:{DUMMY}", "/p:<redacted>"),
     (f"tool /password:{DUMMY}", "/password:<redacted>"),
@@ -749,8 +749,8 @@ BYPASS_CASES = [
     (f"bcp db.t out f.csv -S s -U u -P{DUMMY}", "-P<redacted>"),
     (f"7z a -p{DUMMY} x.7z", "7z a -p<redacted> x.7z"),
     (f"7za.exe x -p{DUMMY} x.7z", "-p<redacted> x.7z"),
-    (f"curl --user=u:{DUMMY} https://h", "--user=u:<redacted> https://h"),
-    (f"curl -uu:{DUMMY} https://h", "-uu:<redacted> https://h"),
+    (f"curl --user=u:{DUMMY} https://h", "--user=u:<redacted> https://h"),  # gitleaks:allow (DUMMY is a placeholder)
+    (f"curl -uu:{DUMMY} https://h", "-uu:<redacted> https://h"),  # gitleaks:allow (DUMMY is a placeholder)
     (rf"net use Z: \\s\sh /user:D\u {DUMMY}", r"/user:D\u <redacted>"),
     (rf'net use Z: "\\s\sh" {DUMMY} /persistent:no', r'"\\s\sh" <redacted> /persistent:no'),
     (f"powershell.exe -EncodedCommand {DUMMY}QQBCAA== -NoProfile", "-EncodedCommand <redacted> -NoProfile"),

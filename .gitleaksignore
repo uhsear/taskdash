@@ -1,0 +1,6 @@
+# Synthetic test values flagged in the CI history before they carried inline gitleaks:allow
+# comments: three curl lines built from the DUMMY placeholder and one sha256 rule digest.
+70b148275eb0cbc33eb3d8ccb313a3329fb3aa6b:test_phase2_rules.py:generic-api-key:36
+70b148275eb0cbc33eb3d8ccb313a3329fb3aa6b:test_phase25_publish.py:curl-auth-user:84
+70b148275eb0cbc33eb3d8ccb313a3329fb3aa6b:test_phase25_publish.py:curl-auth-user:748
+70b148275eb0cbc33eb3d8ccb313a3329fb3aa6b:test_phase25_publish.py:curl-auth-user:749
