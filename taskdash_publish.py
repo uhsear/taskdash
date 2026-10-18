@@ -1244,8 +1244,9 @@ def ensure_service(gis: Any, config: Dict[str, Any], target: str) -> Any:
     item_id = normalize_text(agol.get(key))
     if not item_id:
         raise SystemExit(
-            f"No arcgis.{key} in the config. Create the service first with --create-service, "
-            f"then paste the returned item id into the config."
+            f"No arcgis.{key} in the config. A new install runs `taskdash setup --apply`, which "
+            f"creates the service and fills the id in. To add a service to an existing install, "
+            f"run --create-service, then paste the returned item id into the config."
         )
     item = gis.content.get(item_id)
     if item is None:

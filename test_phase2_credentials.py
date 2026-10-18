@@ -126,6 +126,17 @@ def test_profile_that_does_not_sign_in_is_an_actionable_exit(monkeypatch, messag
         common.connect_agol({"arcgis": {"profile": "p1"}})
 
 
+def test_unreachable_url_is_an_actionable_exit(monkeypatch, messages):
+    import requests
+
+    def unreachable(*args, **kwargs):
+        raise requests.exceptions.ConnectionError("Failed to resolve 'your-org.example.com'")
+
+    monkeypatch.setattr(arcgis.gis, "GIS", unreachable)
+    with pytest.raises(SystemExit, match=r"Cannot reach arcgis.url 'https://your-org.example.com/portal'"):
+        common.connect_agol({"arcgis": {"url": "https://your-org.example.com/portal", "profile": "p1"}})
+
+
 def test_missing_keyring_package_disables_alerting_instead_of_raising(monkeypatch, messages):
     monkeypatch.setitem(__import__("sys").modules, "keyring", None)
     mail = common.load_mail_settings({"smtp": {

@@ -726,10 +726,22 @@ def make_field(
     return field
 
 
+def _open_gis(url: str, *args: Any, **kwargs: Any) -> Any:
+    import requests
+    from arcgis.gis import GIS
+
+    try:
+        return GIS(url, *args, **kwargs)
+    except requests.exceptions.ConnectionError as exc:
+        raise SystemExit(
+            f"Cannot reach arcgis.url '{url}'. Check the URL in the config (ArcGIS Online is "
+            f"https://www.arcgis.com or https://<org>.maps.arcgis.com), the network and any proxy. "
+            f"Detail: {type(exc).__name__}: {str(exc)[:200]}") from exc
+
+
 def connect_agol(config: Dict[str, Any]) -> Any:
     """Connect using config credentials, or env vars when *_env names are supplied."""
     disable_arcpy_import()
-    from arcgis.gis import GIS
 
     agol = config.get("arcgis", {})
     url = normalize_text(agol.get("url")) or "https://www.arcgis.com"
@@ -739,7 +751,7 @@ def connect_agol(config: Dict[str, Any]) -> Any:
     if profile:
         if agol.get("password"):
             emit("WARNING: arcgis.password is unused with arcgis.profile; delete it from the config.")
-        gis = GIS(url, profile=profile)
+        gis = _open_gis(url, profile=profile)
         if gis.users.me is None:
             raise SystemExit(
                 f"arcgis.profile '{profile}' did not sign in. Store it once with "
@@ -765,7 +777,7 @@ def connect_agol(config: Dict[str, Any]) -> Any:
             "then set arcgis.profile to that name and delete arcgis.password. To accept the "
             "risk instead, set arcgis.allow_plaintext_password to true.")
 
-    gis = GIS(url, username, password)
+    gis = _open_gis(url, username, password)
     emit(f"Connected to ArcGIS portal as: {gis.users.me.username}")
     return gis
 
