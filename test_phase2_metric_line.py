@@ -61,7 +61,7 @@ def test_logs_without_marker_unchanged(tmp_path):
 
 
 def test_no_existing_fixture_uses_the_marker():
-    own = {"test_phase2_metric_line.py", "taskdash_metrics.py"}
+    own = {"test_phase2_metric_line.py", "taskdash_metrics.py", "taskdash_synthetic.py"}
     offenders = [p.name for p in HERE.glob("*.py") if p.name not in own and MARKER in p.read_text(encoding="utf-8", errors="ignore")]
     assert offenders == []
 

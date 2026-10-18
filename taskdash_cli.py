@@ -6,6 +6,7 @@ Target: the subcommand's own main(); this module writes nothing
 
     taskdash collect --apply --target prod     # taskdash_publish.main
     taskdash setup | preflight | dashboard     # taskdash_setup / taskdash_preflight / taskdash_dashboard
+    taskdash demo [--apply]                    # taskdash_demo: synthetic data in its own folder
     taskdash status [--offline]                # last local run result + newest CollectorRuns row
 
 Every subcommand receives the rest of argv unchanged. Subcommand modules are imported only
@@ -29,10 +30,11 @@ SUBCOMMAND_MODULES: Dict[str, str] = {
     "setup": "taskdash_setup",
     "preflight": "taskdash_preflight",
     "dashboard": "taskdash_dashboard",
+    "demo": "taskdash_demo",
 }
 USAGE = (
     "usage: taskdash [--version] <command> [args...]\n"
-    "commands: collect, setup, preflight, dashboard, status\n"
+    "commands: collect, setup, preflight, dashboard, demo, status\n"
     "Run `taskdash <command> --help` for a command's own options."
 )
 

@@ -34,7 +34,7 @@
     "scheduler.exclude_task_name_regex": "Tasks whose name matches this regex are skipped.",
     "scheduler.exclude_microsoft_tasks": "Skip the built-in Microsoft tasks.",
     "scheduler.include_disabled": "Keep disabled tasks in the inventory.",
-    "scheduler.exclude_command_target_types": "File types, such as .vbs, whose tasks are skipped.",
+    "scheduler.exclude_command_target_types": "Command target type names, such as VBScript or PowerShellScript (not file extensions such as .vbs), whose tasks are skipped. Names are not case-sensitive.",
     "scheduler.interactive_required_pattern": "Text (not a regex) found in commands that need a signed-in session, such as ArcGIS Pro's Python under a Single Use licence; empty keeps that default, false turns the check off.",
     "scheduler.collector_task_name": "Full name of the task that runs this collector, used to judge a late collector. Must match install_task.ps1 -TaskName (default TaskDash Collector).",
     "scheduler.collector_interval_minutes": "Minutes between collector runs.",

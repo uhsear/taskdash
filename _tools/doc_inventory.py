@@ -29,8 +29,13 @@ KEY_SETS = ("_CONFIG_STRING_KEYS", "_CONFIG_NUMBER_KEYS", "_CONFIG_BOOL_KEYS",
             "_CONFIG_STRING_LIST_KEYS", "_CONFIG_DICT_KEYS", "_CONFIG_LIST_OF_DICT_KEYS")
 
 
+# taskdash_synthetic.py ships only so `taskdash demo` can build data; its own command line is a
+# developer tool for the test fixtures, not a user command.
+DEV_MODULES = {"taskdash_synthetic.py"}
+
+
 def _modules():
-    return sorted(ROOT.glob("taskdash_*.py"))
+    return sorted(p for p in ROOT.glob("taskdash_*.py") if p.name not in DEV_MODULES)
 
 
 def _string_set(node):
@@ -97,6 +102,9 @@ def exit_messages(short=None):
         for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
             if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
                     and node.func.id == "SystemExit" and node.args):
+                arg = node.args[0]
+                if isinstance(arg, ast.Call) and getattr(arg.func, "id", None) == "main":
+                    continue  # `raise SystemExit(main())` passes an exit code, not a message
                 key = message_key(node.args[0])
                 site = f"{path.name}:{node.lineno}"
                 if len(key) >= 12:  # shorter runs cannot be found reliably in prose

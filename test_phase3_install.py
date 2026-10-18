@@ -186,6 +186,20 @@ def test_export_selection_drops_every_listed_path_and_keeps_the_rest():
     assert len(kept) + len(dropped) == len(FAKE_TRACKED)
 
 
+def test_export_allows_the_holder_name_only_on_the_exact_copyright_lines(tmp_path):
+    holder = "As" + "ir"  # assembled: the name is on the private deny list
+    private = tmp_path / "private.txt"
+    private.write_text(holder + "\n", encoding="utf-8")
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "NOTICE").write_text(f"TaskDash\n{export_public.ALLOWED_LINES['NOTICE']}\n", encoding="utf-8")
+    (out / "README.md").write_text(f"{export_public.ALLOWED_LINES['README.md']}\nThanks, {holder}.\n",
+                                   encoding="utf-8")
+    (out / "docs.md").write_text(export_public.ALLOWED_LINES["NOTICE"] + "\n", encoding="utf-8")
+    hits = {Path(k).name: v for k, v in export_public.deny_hits(out, str(private)).items()}
+    assert hits == {"README.md": 1, "docs.md": 1}
+
+
 def test_export_writes_a_fake_tree_without_the_excluded_files(tmp_path, monkeypatch):
     source = tmp_path / "src"
     for name in FAKE_TRACKED:

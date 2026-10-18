@@ -1,11 +1,14 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "taskdash"
 dynamic = ["version"]
 description = "Windows scheduled-task monitor that publishes to ArcGIS Online hosted tables and a dashboard."
+readme = "README.md"
+# An SPDX expression needs setuptools 77 or later; LICENSE and NOTICE ship in the wheel by default.
+license = "Apache-2.0"
 # removesuffix (3.9) is the newest language feature the code uses; ArcGIS Pro's own env is newer.
 requires-python = ">=3.9"
 # Ranges, not pins: Pro ships its own arcgis and a pin would fight it. requests comes with arcgis.
@@ -25,10 +28,12 @@ py-modules = [
     "taskdash_collect",
     "taskdash_common",
     "taskdash_dashboard",
+    "taskdash_demo",
     "taskdash_metrics",
     "taskdash_preflight",
     "taskdash_publish",
     "taskdash_setup",
+    "taskdash_synthetic",
 ]
 
 [tool.setuptools.dynamic]

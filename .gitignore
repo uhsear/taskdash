@@ -8,6 +8,7 @@ TaskDash.config.json.*
 alert_state.json
 collector_runs_pending_*.json
 dashboard_taskdash.json
+demo/
 Logs/
 archive/
 *.log

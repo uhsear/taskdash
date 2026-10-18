@@ -39,6 +39,11 @@ EXCLUDED_DIRS = ("archive/", "Logs/")
 EXCLUDED_SUFFIXES = (".sd" + "e",)
 # deny_scan.py holds the generic list, so it is the one file the scan skips (as the Phase 2 gate does).
 SCAN_SKIP = {"_tools/deny_scan.py"}
+# The copyright holder's name is on the private list, which keeps it out of every other line.
+# Only these exact lines may carry it (owner decision, 2026-10-18). The name is assembled so this
+# file does not hit the list itself.
+_HOLDER = "Copyright 2026 " + "As" + "ir Khan"
+ALLOWED_LINES = {"NOTICE": _HOLDER, "README.md": _HOLDER + "."}
 
 
 def select_files(paths: Sequence[str]) -> Tuple[List[str], List[str]]:
@@ -84,6 +89,15 @@ def write_export(paths: Sequence[str], out: Path) -> None:
         target.write_bytes(blob.stdout)
 
 
+def allowed_line(out: Path, path: Path, line_no: int) -> bool:
+    """True when the hit is on one of ALLOWED_LINES, matched exactly, so no other term can ride along."""
+    allowed = ALLOWED_LINES.get(path.relative_to(out).as_posix())
+    if allowed is None:
+        return False
+    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    return 0 < line_no <= len(lines) and lines[line_no - 1].strip() == allowed
+
+
 def deny_hits(out: Path, private_list: str) -> dict:
     terms = deny_scan.load_terms(private_list)
     files = [str(p) for p in sorted(out.rglob("*")) if p.is_file()
@@ -91,8 +105,10 @@ def deny_hits(out: Path, private_list: str) -> dict:
     counts: dict = {}
     for hit in deny_scan.scan(files, terms):
         # A hit is "<path>:<line>: <terms>"; the path itself can hold a drive-letter colon.
-        match = re.match(r"(.*?):\d+: (.*)", hit)
-        name, labels = match.group(1), match.group(2)
+        match = re.match(r"(.*?):(\d+): (.*)", hit)
+        name, line_no, labels = match.group(1), int(match.group(2)), match.group(3)
+        if allowed_line(out, Path(name), line_no):
+            continue
         # .gitignore must carry the SDE pattern; only a private-list hit in it counts.
         if Path(name).name == ".gitignore" and labels == ".sd" + "e":
             continue

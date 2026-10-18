@@ -432,6 +432,6 @@ C:\TaskDash\proenv\Scripts\taskdash.exe --version
 ## Known limits
 
 - One computer per install is recommended.
-- The dashboard shows times in the collector computer's time zone.
+- The dashboard shows run times in the time zone of the viewer's device.
 - ArcGIS Online only. ArcGIS Enterprise is not tested.
 - Scrubbing secrets from command lines and log samples is best effort. Keep the privacy switches on.
