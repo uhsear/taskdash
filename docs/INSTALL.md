@@ -11,24 +11,32 @@ saved sign-in, and TaskDash fails with "A specified logon session does not exist
 ## Requirements
 
 - **Windows:** Windows 10, Windows 11 or Windows Server 2016 or later.
-- **Your Windows account:** sign in with the account you use every day. Steps 2, 3, 6 and the
-  checks run in a normal PowerShell window as this account. You also need administrator rights on
+- **Your Windows account:** sign in with the account you use every day. Steps 1 to 6 and the
+  checks in step 8 run in a normal PowerShell window as this account. You also need administrator rights on
   the computer, for the event-log fix in step 5, steps 7 and 8, and Undo step 1. If your
   administrator rights come from a separate admin account, use it only where the guide says
   "as administrator".
 - **Python:** 64-bit Python 3.11 from python.org, the tested version, **installed for all users**.
+  The last 3.11 release with a Windows installer is 3.11.9.
   In the installer, select **Customize installation**, keep **py launcher** selected, and on the
   next page select **Install Python 3.11 for all users**. The task account runs this Python, and it
   cannot run a Python installed in your own user profile. To check, run `py -0p`. The path for 3.11
   must be under `C:\Program Files`, not under `C:\Users`.
 - **Internet access** from the computer over HTTPS:
   - to `pypi.org` and `files.pythonhosted.org`, for step 1;
-  - to `github.com`, to download the wheel;
-  - to `www.arcgis.com`, your organization's `<org>.maps.arcgis.com`, and `*.arcgis.com`, every hour.
+  - to `www.arcgis.com`, your organization's `<org>.maps.arcgis.com`, and `*.arcgis.com`, in steps
+    3 to 8 and every hour after that.
 
-  If the computer reaches the internet through a proxy, add `--proxy http://<proxy>:<port>` to the
-  `pip install` command in step 1. For the hourly task, set the `HTTPS_PROXY` environment variable at
-  machine scope to the same address.
+  If the computer reaches the internet through a proxy, run this once in an administrator window
+  before step 1, with your proxy's address:
+
+  ```powershell
+  [Environment]::SetEnvironmentVariable("HTTPS_PROXY", "http://<proxy>:<port>", "Machine")
+  ```
+
+  Then close every PowerShell window and open new ones, because an open window does not see the
+  new value. If the first run in step 8 still cannot reach ArcGIS Online, restart the computer, so
+  that Task Scheduler sees the new value too.
 - **ArcGIS Online:** a built-in ArcGIS account (a user name and a password) without multifactor
   authentication. It must be able to create items, create groups, share to groups and edit features.
   A Creator user type has these privileges, and step 5 checks them. An account that signs in only
@@ -40,23 +48,32 @@ saved sign-in, and TaskDash fails with "A specified logon session does not exist
   local account, write `COMPUTERNAME\name`, for example `TASKHOST1\svc-taskdash`.
 - **The TaskDash wheel:** from <https://github.com/uhsear/taskdash/releases/latest>, download the
   file `taskdash-<version>-py3-none-any.whl` into your `Downloads` folder. Keep only one TaskDash
-  wheel in that folder.
+  wheel in that folder. If this computer cannot reach GitHub, download the file on another computer
+  and copy it into `Downloads`.
 
 TaskDash is tested on one computer with 29 tasks that run at most hourly. Larger installs may work.
 
 ## 1. Install TaskDash
 
-Open PowerShell. Run these commands. They create `C:\TaskDash`, make a Python virtual environment
-inside it, and install the wheel from your `Downloads` folder.
+Open a normal PowerShell window as your daily account. Run these commands. They create
+`C:\TaskDash`, lock its permissions, make a Python virtual environment inside it, and install the
+wheel from your `Downloads` folder. In the `icacls` line, replace `DOMAIN\svc-taskdash` with the
+task account.
 
 ```powershell
 New-Item -ItemType Directory -Force C:\TaskDash | Out-Null
+icacls C:\TaskDash /inheritance:r /grant:r "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F" "${env:USERDOMAIN}\${env:USERNAME}:(OI)(CI)F" "DOMAIN\svc-taskdash:(OI)(CI)M"
 py -3.11 -m venv C:\TaskDash\venv
 $whl = (Get-ChildItem "$env:USERPROFILE\Downloads\taskdash-*.whl" | Select-Object -First 1).FullName
 $whl
 C:\TaskDash\venv\Scripts\python.exe -m pip install $whl
 C:\TaskDash\venv\Scripts\taskdash.exe --version
 ```
+
+The `icacls` line prints `Successfully processed 1 files; Failed processing 0 files`. A new folder
+under `C:\` lets every signed-in user change its files, and TaskDash runs from this folder every
+hour as an administrator. The line removes those inherited permissions. It allows only SYSTEM, the
+Administrators group, you and the task account. Step 4 checks the result.
 
 The `$whl` line prints the full path of the wheel. If it prints nothing, the wheel is not in
 `Downloads`. Then set the path yourself, for example `$whl = "D:\Files\taskdash-0.9.0-py3-none-any.whl"`.
@@ -140,20 +157,25 @@ runas /user:DOMAIN\svc-taskdash powershell.exe
 ```
 
 In the new window, run the create command and the check command above. If `runas` says the account
-cannot log on here, the account lacks the "Allow log on locally" right on this computer. Ask your
-administrator to add it, or sign in to Windows as the task account and run the commands there.
+cannot log on here, the account lacks the "Allow log on locally" right on this computer, or a Group
+Policy sets "Deny log on locally" for it. A "Deny" setting always wins over "Allow". Run
+`gpresult /h C:\gp.html` and look under **User Rights Assignment** to see which applies. Ask your
+domain administrator for a temporary exception for the task account while you run the two commands.
 Close the window when you are done.
 
-## 4. Give the task account the folder
+## 4. Check the folder permissions
 
-The task writes logs and state into `C:\TaskDash`. Give the task account Modify rights on it:
+The task writes logs and state into `C:\TaskDash`, and runs the code in it. In your normal window,
+run:
 
 ```powershell
-icacls C:\TaskDash /grant "DOMAIN\svc-taskdash:(OI)(CI)M"
+icacls C:\TaskDash
 ```
 
-Replace `DOMAIN\svc-taskdash` with your task account, and keep the `:(OI)(CI)M` part. The command
-prints `Successfully processed 1 files; Failed processing 0 files`.
+The output must list exactly four entries, each with `(OI)(CI)`: your account and
+`NT AUTHORITY\SYSTEM` and `BUILTIN\Administrators` with `(F)`, and the task account with `(M)`.
+If it lists `Users` or `Authenticated Users`, or the task account is missing, run the `icacls` line
+from step 1 again with the right task account name.
 
 ## 5. Check the computer
 
@@ -314,6 +336,10 @@ What `LastTaskResult` means:
   its last line.
 - `267011` (0x41303): the task never started. See "Why the task account must be an
   administrator" in step 7.
+- `2147943726` (0x8007052E): Windows rejected the task account's password. Delete the task with
+  `Unregister-ScheduledTask -TaskName "TaskDash Collector" -Confirm:$false`, then run step 7 with
+  `-Apply` again and type the right password.
+- Any other value: read the task's **History** tab in Task Scheduler, as described below.
 
 If the state is still `Running` after 10 minutes, open the newest log file in `C:\TaskDash\Logs`
 and read its last lines. If no log file has today's time, TaskDash did not start. Then open Task
@@ -335,6 +361,11 @@ Service: last collector run started 2026-10-17 20:25:47 UTC, exit_status success
 ```
 
 Preflight now shows `[ok]` for the service, the view, sharing and the collector logon type.
+
+If the collector logon type line still says `collector task 'TaskDash Collector' not found`, your
+normal window may not be allowed to see a task that runs as another account. Run
+`& $td preflight --offline` in the administrator window. That line must be
+`[ok] collector logon type: task 'TaskDash Collector' logs on as Password`.
 
 ## 9. Open the dashboard and add viewers
 
