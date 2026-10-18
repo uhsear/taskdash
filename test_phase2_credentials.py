@@ -29,14 +29,15 @@ def messages(monkeypatch):
 
 
 def test_profile_signs_in_without_username_or_password(gis_calls, messages):
+    # trust_env=True on every sign-in: without it arcgis ignores HTTPS_PROXY and goes direct.
     common.connect_agol({"arcgis": {"url": "https://portal.example.test", "profile": "p1"}})
-    assert gis_calls == [(("https://portal.example.test",), {"profile": "p1"})]
+    assert gis_calls == [(("https://portal.example.test",), {"profile": "p1", "trust_env": True})]
 
 
 def test_legacy_path_passes_username_and_password(gis_calls, messages):
     common.connect_agol({"arcgis": {"username": "u", "password": "s3cret",
                                     "allow_plaintext_password": True}})
-    assert gis_calls == [(("https://www.arcgis.com", "u", "s3cret"), {})]
+    assert gis_calls == [(("https://www.arcgis.com", "u", "s3cret"), {"trust_env": True})]
 
 
 def test_plaintext_password_without_opt_in_exits_without_leaking_it(gis_calls, messages):
@@ -135,6 +136,7 @@ def test_unreachable_url_is_an_actionable_exit(monkeypatch, messages):
     monkeypatch.setattr(arcgis.gis, "GIS", unreachable)
     with pytest.raises(SystemExit, match=r"Cannot reach arcgis.url 'https://your-org.example.com/portal'"):
         common.connect_agol({"arcgis": {"url": "https://your-org.example.com/portal", "profile": "p1"}})
+
 
 
 def test_missing_keyring_package_disables_alerting_instead_of_raising(monkeypatch, messages):

@@ -61,8 +61,9 @@ class FakeItem:
     def update(self, *a, **k):
         raise AssertionError("preflight wrote to an item")
 
-    def share(self, *a, **k):
-        raise AssertionError("preflight shared an item")
+    @property
+    def sharing(self):
+        raise AssertionError("preflight read or changed an item's sharing")
 
     def delete(self, *a, **k):
         raise AssertionError("preflight deleted an item")

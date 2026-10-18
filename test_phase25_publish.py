@@ -33,7 +33,10 @@ HERE = Path(__file__).parent
 class _Item:
     def __init__(self, access="private", shared=None, item_id="svc1"):
         self.id, self.title, self.access = item_id, "TaskDash", access
-        self.shared_with = shared or {"everyone": access == "public", "org": access == "org", "groups": []}
+        shared = shared or {"everyone": access == "public", "org": access == "org", "groups": []}
+        level = "EVERYONE" if shared["everyone"] else "ORG" if shared["org"] else "PRIVATE"
+        self.sharing = SimpleNamespace(shared_with={"groups": shared["groups"],
+                                                    "level": SimpleNamespace(name=level)})
 
 
 # ------------------------------------------------------------------ 1. source sharing
@@ -351,7 +354,8 @@ def test_create_view_warns_when_the_source_stays_shared(flc, monkeypatch, capsys
     tables = _view_tables(flc)
     monkeypatch.setattr(publish, "get_tables", lambda item: tables)
     view = _Item(item_id="view1")
-    view.share = lambda **kw: {}
+    view.sharing = SimpleNamespace(sharing_level=None,
+                                   groups=SimpleNamespace(add=lambda g: True, list=lambda: []))
     gis = SimpleNamespace(content=SimpleNamespace(search=lambda *a, **k: [], get=lambda i: view),
                           users=SimpleNamespace(me=SimpleNamespace(username="u")))
     flc_cls = sys.modules["arcgis.features"].FeatureLayerCollection
@@ -604,11 +608,11 @@ def test_workflow_descriptions_with_a_bom_load(tmp_path):
 
 class _NoSharedWith(_Item):
     @property
-    def shared_with(self):
-        raise AssertionError("shared_with makes portal requests; the hourly check must not read it")
+    def sharing(self):
+        raise AssertionError("Item.sharing makes portal requests; the hourly check must not read it")
 
-    @shared_with.setter
-    def shared_with(self, value):
+    @sharing.setter
+    def sharing(self, value):
         pass
 
 

@@ -36,8 +36,9 @@ class FakeItem:
         self.log.append(("move", self.id))
         return {"success": True}
 
-    def share(self, **kw):
-        self.log.append(("item.share", self.id))
+    @property
+    def sharing(self):
+        self.log.append(("item.sharing", self.id))
 
     def update(self, **kw):
         self.log.append(("item.update", self.id))

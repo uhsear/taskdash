@@ -99,8 +99,22 @@ jobs:
 
   tests:
     runs-on: windows-latest
+    # Three fixed-offset zones without daylight saving: UTC, UTC+1 and UTC-5. The zone is set
+    # with tzutil before Python starts, and a test asserts that the leg really runs in it.
+    strategy:
+      fail-fast: false
+      matrix:
+        zone:
+          - { id: "UTC", offset: "0" }
+          - { id: "W. Central Africa Standard Time", offset: "3600" }
+          - { id: "SA Pacific Standard Time", offset: "-18000" }
+    env:
+      TASKDASH_EXPECT_UTC_OFFSET_S: ${{ matrix.zone.offset }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Set the time zone
+        run: tzutil /s "${{ matrix.zone.id }}"
 
       - uses: actions/setup-python@v5
         with:
@@ -112,3 +126,16 @@ jobs:
 
       - name: Run the full suite
         run: python -m pytest -q -p no:cacheprovider
+
+  # Scans every commit of this repository for leaked credentials. The pinned binary needs no token.
+  secrets-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: gitleaks over the full history
+        run: |
+          curl -sSfL https://github.com/gitleaks/gitleaks/releases/download/v8.21.2/gitleaks_8.21.2_linux_x64.tar.gz | tar -xz gitleaks
+          ./gitleaks git --redact --verbose .

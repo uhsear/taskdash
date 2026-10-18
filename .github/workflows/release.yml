@@ -1,0 +1,50 @@
+# Builds the wheel for a v* tag and attaches it, with its SHA-256, to a GitHub Release.
+# The repository is private, so the release is visible only to people with access to it.
+# A tag with a hyphen (v1.0.0-rc1) makes a pre-release.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    env:
+      # The tag reaches the scripts only through the environment, never pasted into a command.
+      TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Build the wheel and its checksum
+        shell: powershell
+        run: |
+          python -m pip install build
+          python -m build --wheel
+          $wheel = Get-ChildItem dist\*.whl | Select-Object -First 1
+          $hash = (Get-FileHash $wheel.FullName -Algorithm SHA256).Hash.ToLower()
+          "$hash  $($wheel.Name)" | Out-File -FilePath "dist\SHA256SUMS.txt" -Encoding ascii
+
+      - name: Check that the tag matches the package version
+        shell: powershell
+        run: |
+          $version = (Get-ChildItem dist\*.whl | Select-Object -First 1).Name.Split("-")[1]
+          $base = $env:TAG.TrimStart("v").Split("-")[0]
+          if ($version -ne $base) { throw "Tag $env:TAG does not match package version $version. Change TASKDASH_VERSION or the tag." }
+
+      - name: Create the release
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $flags = @()
+          if ($env:TAG.Contains("-")) { $flags += "--prerelease" }
+          gh release create $env:TAG dist\taskdash-*.whl dist\SHA256SUMS.txt --title "TaskDash $env:TAG" --generate-notes @flags
+          if ($LASTEXITCODE) { throw "gh release create exited $LASTEXITCODE." }

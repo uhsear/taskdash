@@ -50,14 +50,42 @@ def _view_tables(log, drop=None):
             for name in publish.TABLE_SPECS}
 
 
+class _Sharing:
+    """Item.sharing as arcgis 2.4 shapes it. Writes land in item.shares; refused=True makes every
+    group share fail, which arcgis reports only by the group missing from groups.list()."""
+
+    def __init__(self, item):
+        self.item = item
+        self.groups = SimpleNamespace(add=self._add, list=self._list)
+
+    @property
+    def shared_with(self):
+        shared = self.item.shared
+        level = "EVERYONE" if shared["everyone"] else "ORG" if shared["org"] else "PRIVATE"
+        return {"groups": shared["groups"], "level": SimpleNamespace(name=level)}
+
+    @property
+    def sharing_level(self):
+        raise AssertionError("share_item never reads the level")
+
+    @sharing_level.setter
+    def sharing_level(self, value):
+        self.item.shares.append(("level", value))
+
+    def _add(self, group):
+        self.item.shares.append(("group", getattr(group, "id", group)))
+        return not self.item.refused
+
+    def _list(self):
+        return [] if self.item.refused else [SimpleNamespace(id=g) for kind, g in self.item.shares if kind == "group"]
+
+
 class _Item:
     def __init__(self, item_id, title="TaskDash", shared=None):
-        self.id, self.title, self.shares, self.access = item_id, title, [], "private"
-        self.shared_with = shared if shared is not None else {"everyone": False, "org": True,
-                                                              "groups": [SimpleNamespace(id="grp1")]}
-
-    def share(self, **kw):
-        self.shares.append(kw)
+        self.id, self.title, self.shares, self.access, self.refused = item_id, title, [], "private", False
+        self.shared = shared if shared is not None else {"everyone": False, "org": True,
+                                                         "groups": [SimpleNamespace(id="grp1")]}
+        self.sharing = _Sharing(self)
 
 
 @pytest.fixture
@@ -111,7 +139,7 @@ def test_apply_creates_hides_resends_capabilities_and_never_shares_everyone(worl
                                                "latest_log_path", "definition_hash"]
     assert hidden[publish.TABLE_RUNS] == ["user_context"]
     assert hidden[publish.TABLE_METRICS] == ["sample_line"]
-    assert world.view.shares == [{"everyone": False, "org": True, "groups": ["grp1"]}]
+    assert world.view.shares == [("level", "ORG"), ("group", "grp1")]
 
 
 def test_apply_refetches_the_view_until_its_tables_appear(world, monkeypatch):
@@ -130,13 +158,13 @@ def test_view_whose_tables_never_appear_stops_with_the_fix(world, monkeypatch):
 
 
 def test_private_source_makes_no_share_call(world):
-    world.item.shared_with = {"everyone": False, "org": False, "groups": []}
-    world.view.share = lambda **kw: (_ for _ in ()).throw(AssertionError("share() must not be called"))
+    world.item.shared = {"everyone": False, "org": False, "groups": []}
+    world.view.sharing = None  # any sharing call raises AttributeError
     publish.create_view(world.gis, world.item, {}, apply=True)
 
 
 def test_private_source_stops_when_the_view_is_not_private(world):
-    world.item.shared_with = {"everyone": False, "org": False, "groups": []}
+    world.item.shared = {"everyone": False, "org": False, "groups": []}
     world.view.access = "org"
     with pytest.raises(SystemExit, match="should be private but its access is 'org'"):
         publish.create_view(world.gis, world.item, {}, apply=True)
@@ -151,7 +179,7 @@ def test_existing_view_search_uses_the_source_owner(world):
 
 
 def test_failed_group_share_stops_the_run_and_names_the_group(world):
-    world.view.share = lambda **kw: {"notSharedWith": ["grp1"]}
+    world.view.refused = True
     with pytest.raises(SystemExit, match="grp1"):
         publish.create_view(world.gis, world.item, {}, apply=True)
 
@@ -191,7 +219,7 @@ def test_everyone_guard_refuses_and_names_the_fix():
         publish.share_item(item, everyone=True)
     assert item.shares == []
     publish.share_item(item, org=True)
-    assert item.shares[0]["everyone"] is False
+    assert item.shares == [("level", "ORG")]
 
 
 # ------------------------------------------------------------------ dashboard ids

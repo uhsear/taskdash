@@ -1325,7 +1325,7 @@ def refuse_public_sharing(everyone: Any) -> None:
 
 
 def share_item(item: Any, *, everyone: bool = False, org: bool = False,
-               groups: Sequence[Any] = ()) -> Any:
+               groups: Sequence[Any] = ()) -> None:
     refuse_public_sharing(everyone)
     if not org and not groups:
         # Nothing to share, so share() is skipped: it raises for an admin account that does not
@@ -1336,14 +1336,29 @@ def share_item(item: Any, *, everyone: bool = False, org: bool = False,
             raise SystemExit(f"Item {item.id} should be private but its access is '{access}'. Set its "
                              f"sharing to Owner in ArcGIS Online, then re-run.")
         return None
-    result = item.share(everyone=False, org=bool(org), groups=list(groups))
-    # share() reports a failed group share in the result and does not raise.
-    not_shared = (result or {}).get("notSharedWith") if isinstance(result, dict) else None
+    # Item.sharing, not Item.share: share() is deprecated since arcgis 2.3 and gone in 3.0.
+    # Raising the level to ORG keeps the groups; nothing here ever lowers a level.
+    if org:
+        item.sharing.sharing_level = "ORG"
+    for group in groups:
+        item.sharing.groups.add(group)
+    # groups.add() returns False both for a failed share and for a group already shared, so the
+    # item's group list is the one answer that tells the two apart.
+    have = {g.id for g in item.sharing.groups.list()}
+    not_shared = [getattr(g, "id", g) for g in groups if getattr(g, "id", g) not in have]
     if not_shared:
         raise SystemExit(f"Item {item.id} was not shared with group(s) {', '.join(map(str, not_shared))}. "
                          f"Share it with them by hand, or add the collector account to those groups "
                          f"and re-run.")
-    return result
+
+
+def item_sharing(item: Any) -> Dict[str, Any]:
+    """{'everyone', 'org', 'groups'} from Item.sharing; Item.shared_with is gone in arcgis 3.0.
+    Makes portal requests, so the hourly check (check_source_sharing) never calls it."""
+    shared = item.sharing.shared_with
+    level = getattr(shared.get("level"), "name", "PRIVATE")
+    return {"everyone": level == "EVERYONE", "org": level in ("ORG", "EVERYONE"),
+            "groups": list(shared.get("groups") or [])}
 
 
 def view_key(target: str) -> str:
@@ -1461,7 +1476,7 @@ def update_then_resend(update: Callable[[], None], view_item: Any,
 
 def refuse_public_source(item: Any, shared: Optional[Dict[str, Any]] = None) -> None:
     """A service shared with everyone exposes every field and the edit path; no view fixes that.
-    shared: item.shared_with, only where the caller has already paid for it (create_view)."""
+    shared: item_sharing(item), only where the caller has already paid for it (create_view)."""
     if getattr(item, "access", None) == "public" or (shared or {}).get("everyone"):
         raise SystemExit(f"The service {item.id} is shared with everyone. Set its sharing to Owner "
                          f"in ArcGIS Online, then re-run. Share only the read-only view.")
@@ -1477,7 +1492,7 @@ def warn_shared_source(item: Any) -> None:
 
 def check_source_sharing(item: Any, config: Dict[str, Any], target: str) -> None:
     """With a view configured, the service itself must not be shared: Esri's view pattern keeps the
-    editable source owner-only. Reads only item.access, loaded with the item: item.shared_with
+    editable source owner-only. Reads only item.access, loaded with the item: item_sharing
     makes several portal requests, and this runs hourly outside the outage-tolerant block."""
     if not normalize_text(config.get("arcgis", {}).get(view_key(target))):
         return
@@ -1492,9 +1507,9 @@ def create_view(gis: Any, item: Any, config: Dict[str, Any], apply: bool,
 
     name = f"{item.title}_view"
     hidden = view_hidden_fields(config)
-    # access first: a public service stops here before the shared_with requests.
+    # access first: a public service stops here before the sharing requests.
     refuse_public_source(item)
-    shared = getattr(item, "shared_with", None) or {}
+    shared = item_sharing(item)
     refuse_public_source(item, shared)
     org = bool(shared.get("org"))
     groups = [g.id for g in shared.get("groups") or []]

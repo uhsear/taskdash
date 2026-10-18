@@ -730,6 +730,9 @@ def _open_gis(url: str, *args: Any, **kwargs: Any) -> Any:
     import requests
     from arcgis.gis import GIS
 
+    # arcgis leaves its requests session's trust_env at None unless told, and requests then skips
+    # HTTPS_PROXY: behind a proxy every call went direct (measured 2026-10-18, arcgis 2.4.3).
+    kwargs.setdefault("trust_env", True)
     try:
         return GIS(url, *args, **kwargs)
     except requests.exceptions.ConnectionError as exc:

@@ -210,8 +210,8 @@ def apply_setup(gis: Any, config: Dict[str, Any], path: Path, args: argparse.Nam
     item = create_service_item(gis, config, path, args, created)
     view = create_view_item(gis, item, config, path, created)
     group = create_group(gis, args, created)
-    # The Group object, not its id: share() looks an id up in the search index, which does not
-    # list a group created seconds ago ("Cannot find group with id", first TDI_ run).
+    # The Group object, not its id: the old Item.share() looked an id up in the search index, which
+    # did not list a group created seconds ago ("Cannot find group with id", first TDI_ run).
     publish.share_item(view, groups=[group])
     create_dashboard_item(gis, view, folder, group, config, path, args, created)
     publish.require_no_anonymous_access(publish.table_urls(item, view))

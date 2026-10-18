@@ -3,9 +3,11 @@ export script's file selection."""
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import sys
+import time
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -134,13 +136,33 @@ def test_workflow_has_the_expected_jobs_and_steps():
                    "preflight --offline --config", "New-LocalUser", "install_task.ps1",
                    "-LogonType Password", "-Apply", "Principal.LogonType",
                    "collect --fixture tests/fixtures/synthetic_app_host_01.json", "dashboard --offline",
-                   "pip install arcgis pytest", "python -m pytest"):
+                   "pip install arcgis pytest", "python -m pytest", "tzutil /s",
+                   "TASKDASH_EXPECT_UTC_OFFSET_S", "fetch-depth: 0", "gitleaks git --redact"):
         assert needle in text, needle
     assert text.count("runs-on: windows-latest") == 2
     assert "secrets." not in text
     # The fixture dry run must never reach ArcGIS Online.
     assert "collect --fixture" in text and "collect --apply" not in text
 
+
+
+
+def test_release_workflow_builds_on_tags_and_passes_the_tag_only_by_environment():
+    text = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+    for needle in ('tags: ["v*"]', "contents: write", "python -m build --wheel", "SHA256SUMS.txt",
+                   "GH_TOKEN: ${{ github.token }}", "gh release create $env:TAG", "--prerelease"):
+        assert needle in text, needle
+    assert "secrets." not in text
+    # The tag is set once as TAG and never pasted into a script.
+    assert text.count("${{ github.ref_name }}") == 1
+
+def test_the_ci_leg_runs_in_the_zone_it_names():
+    """A leg that silently stayed in UTC would prove nothing about time-zone handling. Only the CI
+    legs set the variable; on any other machine there is no zone to check."""
+    expected = os.environ.get("TASKDASH_EXPECT_UTC_OFFSET_S")
+    if expected is None:
+        pytest.skip("not a CI time-zone leg")
+    assert -time.timezone == int(expected)
 
 FAKE_TRACKED = [
     "taskdash_publish.py", "rules/default.json", "rules/mar" + "ion.json",

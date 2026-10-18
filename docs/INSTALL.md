@@ -50,6 +50,10 @@ saved sign-in, and TaskDash fails with "A specified logon session does not exist
   file `taskdash-<version>-py3-none-any.whl` into your `Downloads` folder. Keep only one TaskDash
   wheel in that folder. If this computer cannot reach GitHub, download the file on another computer
   and copy it into `Downloads`.
+  - The repository is private. If the page does not open for you, ask the TaskDash maintainer for
+    access or for the wheel.
+  - The release also lists `SHA256SUMS.txt`. To check the download, compare its value with the
+    output of `Get-FileHash $env:USERPROFILE\Downloads\taskdash-*.whl`.
 
 TaskDash is tested on one computer with 29 tasks that run at most hourly. Larger installs may work.
 
