@@ -66,8 +66,14 @@ def test_the_apply_publish_runs_the_sharing_check_after_the_schema_check(monkeyp
     monkeypatch.setattr(publish, "ensure_service", lambda gis, config, target: item)
     monkeypatch.setattr(publish, "get_tables", lambda i: {})
     monkeypatch.setattr(publish, "check_schema_drift", lambda tables: calls.append("schema"))
+    # The refusal skips every write but still collects and alerts (see test_alerting_hardening).
     monkeypatch.setattr(publish, "collect_everything",
-                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must stop first")))
+                        lambda *a, **k: {"host_name": "H", "inventory": [], "runs": [],
+                                         "metrics": [], "log_summary": {}})
+    monkeypatch.setattr(publish, "report", lambda collected: None)
+    monkeypatch.setattr(publish, "maybe_send_alert", lambda *a: False)
+    monkeypatch.setattr(publish, "publish",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not write")))
     args = SimpleNamespace(apply=True, target="prod", allow_host_mismatch=False, full_history=False,
                            fixture="")
     with pytest.raises(SystemExit, match="shared with everyone"):

@@ -374,7 +374,7 @@ def task(name, logon, **extra):
 
 
 def test_logon_s4u_with_stored_credentials_fails():
-    ctx = make_ctx({"arcgis": {"profile": "p1"}}, tasks=[task("Task Dash", "S4U")])
+    ctx = make_ctx({"arcgis": {"profile": "p1"}}, tasks=[task("TaskDash Collector", "S4U")])
     status, message = pf.check_logon_type(ctx)
     assert status == pf.FAIL and "S4U logon cannot read stored credentials" in message
     assert "Password logon type" in message and "arcgis.profile" in message
@@ -382,20 +382,20 @@ def test_logon_s4u_with_stored_credentials_fails():
 
 def test_logon_s4u_with_keyring_smtp_user_fails_but_plain_config_is_ok():
     keyring = {"alerting": {"enabled": True}, "smtp": {"user": "u1"}}
-    assert pf.check_logon_type(make_ctx(keyring, tasks=[task("Task Dash", "S4U")]))[0] == pf.FAIL
-    assert pf.check_logon_type(make_ctx({"arcgis": {"username_env": "A"}}, tasks=[task("Task Dash", "S4U")]))[0] == pf.OK
+    assert pf.check_logon_type(make_ctx(keyring, tasks=[task("TaskDash Collector", "S4U")]))[0] == pf.FAIL
+    assert pf.check_logon_type(make_ctx({"arcgis": {"username_env": "A"}}, tasks=[task("TaskDash Collector", "S4U")]))[0] == pf.OK
 
 
 @pytest.mark.parametrize("logon", ["Password", "Interactive"])
 def test_logon_password_and_interactive_are_ok(logon):
-    ctx = make_ctx({"arcgis": {"profile": "p1"}}, tasks=[task("Task Dash", logon)])
+    ctx = make_ctx({"arcgis": {"profile": "p1"}}, tasks=[task("TaskDash Collector", logon)])
     assert pf.check_logon_type(ctx)[0] == pf.OK
 
 
 def test_logon_task_not_found_names_the_installer_and_honours_the_configured_name():
     ctx = make_ctx(tasks=[task("Other", "Password")])
     status, message = pf.check_logon_type(ctx)
-    assert status == pf.FAIL and "install_task.ps1" in message and "'Task Dash'" in message
+    assert status == pf.FAIL and "install_task.ps1" in message and "'TaskDash Collector'" in message
     ctx = make_ctx({"scheduler": {"collector_task_name": "Custom Collector"}},
                    tasks=[task("custom collector", "Password")])
     assert pf.check_logon_type(ctx)[0] == pf.OK
@@ -408,7 +408,7 @@ def test_logon_without_task_list_fails():
 # --------------------------------------------------------------------------- 10b collector account
 
 def admin_ctx(user):
-    return make_ctx(tasks=[task("Task Dash", "Password", run_as_user=user)])
+    return make_ctx(tasks=[task("TaskDash Collector", "Password", run_as_user=user)])
 
 
 @pytest.mark.parametrize("user", ["DOMAIN\\svc-td", "svc-td", "SVC-TD"])
@@ -472,6 +472,27 @@ def test_scale_counts_only_monitored_tasks_and_flags_fast_repetition():
     assert pf.check_scale(make_ctx(tasks=[fast]))[0] == pf.WARN
 
 
+# --------------------------------------------------------------------------- 12 health check
+
+def test_health_check_blank_warns_without_failing():
+    for config in ({}, {"alerting": {"healthcheck_url": "  "}}):
+        status, message = pf.check_health_check(make_ctx(config))
+        assert status == pf.WARN and message.startswith("WARNING")
+        assert "not set" in message and "alerting.healthcheck_url" in message and "never starts" in message
+
+
+def test_health_check_set_passes_and_hides_the_url():
+    url = "https://hc.example/secret-ping-id"
+    status, message = pf.check_health_check(make_ctx({"alerting": {"healthcheck_url": url}}))
+    assert status == pf.OK and "set" in message and "secret-ping-id" not in message and url not in message
+
+
+def test_health_check_warning_keeps_preflight_exit_zero(tmp_path, monkeypatch):
+    monkeypatch.setattr(pf, "CHECKS", (("health check", False, pf.check_health_check),))
+    args = SimpleNamespace(config=write_config(tmp_path), offline=True)
+    assert pf.run_preflight(args) == 0
+
+
 # --------------------------------------------------------------------------- the runner
 
 def test_crash_in_one_check_does_not_stop_the_next(tmp_path, monkeypatch, capsys):
@@ -493,7 +514,7 @@ def local_fakes(monkeypatch, tasks=None):
     fake_wevtutil(monkeypatch)
     monkeypatch.setattr(taskdash_collect, "collect_tasks",
                         lambda timeout: tasks if tasks is not None
-                        else [task("Task Dash", "Password", run_as_user="HOST\\svc-td")])
+                        else [task("TaskDash Collector", "Password", run_as_user="HOST\\svc-td")])
     monkeypatch.setattr(pf, "read_admin_members", lambda: [("HOST\\svc-td", "User")])
 
 
@@ -515,7 +536,8 @@ def test_offline_makes_no_network_call(tmp_path, monkeypatch, capsys):
 
 
 def test_full_run_with_fakes_makes_no_write(tmp_path, monkeypatch, capsys):
-    config_path = write_config(tmp_path, {"arcgis": {"item_id": "svc1", "view_item_id": "view1", "profile": "p1"}})
+    config_path = write_config(tmp_path, {"arcgis": {"item_id": "svc1", "view_item_id": "view1", "profile": "p1"},
+                                          "alerting": {"healthcheck_url": "https://hc.example/ping-id"}})
     config = json.loads(open(config_path, encoding="utf-8").read())
     gis = FakeGis(items={"svc1": FakeItem("svc1"), "view1": FakeItem("view1", "org")})
     monkeypatch.setattr(pf, "connect_agol", lambda c: gis)
@@ -526,7 +548,7 @@ def test_full_run_with_fakes_makes_no_write(tmp_path, monkeypatch, capsys):
     local_fakes(monkeypatch)
     assert pf.main(["--config", config_path]) == 0
     out = capsys.readouterr().out
-    assert "[!!]" not in out and out.count("[ok]") == 11 and "[--] smtp" in out
+    assert "[!!]" not in out and out.count("[ok]") == 12 and "[--] smtp" in out and "ping-id" not in out
     assert "Preflight: 0 problem(s), 0 warning(s)." in out
 
 

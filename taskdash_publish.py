@@ -26,6 +26,7 @@ import datetime as dt
 import hashlib
 import json
 import logging
+import ntpath
 import os
 import re
 import sys
@@ -45,11 +46,13 @@ from taskdash_common import (
     TABLE_TASK_CHANGES,
     SCHEMA_VERSION,
     TASKDASH_VERSION,
+    PowerShellTimeout,
     RunLockHeld,
     apply_edits_chunked,
     atomic_write_json,
     chunked,
     cleanup_old_logs,
+    write_bootstrap_fail,
     max_field_value,
     connect_agol,
     emit,
@@ -871,7 +874,10 @@ def is_own_task(task: Dict[str, Any]) -> bool:
     if not target:
         return False
     folder = os.path.dirname(os.path.abspath(target))
-    return os.path.normcase(folder) == os.path.normcase(str(runtime_dir()))
+    if os.path.normcase(folder) == os.path.normcase(str(runtime_dir())):
+        return True
+    # Wheel install: the task runs venv\Scripts\taskdash.exe "collect --apply" from another folder.
+    return metrics.is_taskdash_command(ntpath.basename(target), task.get("command_target_arguments"))
 
 
 def apply_own_run_view(task: Dict[str, Any], stats: Dict[str, Any]) -> str:
@@ -2032,22 +2038,82 @@ def resolve_log_dir(config: Dict[str, Any]) -> Path:
     return Path(normalize_text(config.get("logging", {}).get("log_dir")) or (runtime_dir() / "Logs"))
 
 
+FIRST_RUN_BUDGET_FILE = "first_run_budget.json"
+FIRST_RUN_BUDGET_FLOOR = 250
+# Newest record id the last published run read, monitored task or not. The watermark moves only
+# with monitored runs, so on a host whose tasks run weekly it lags the log by days and the normal
+# turnover of Edge-updater events would look like lost records. Absent file: no gap check.
+EVENT_READ_MARK_FILE = "event_read_mark.json"
+
+
+def _saved_event_read_mark(path: Path) -> int:
+    try:
+        return int(json.loads(path.read_text(encoding="utf-8"))["record_id"])
+    except FileNotFoundError:
+        return 0
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        emit(f"WARNING: ignored {path.name} ({type(exc).__name__}); skipping the event-log gap check.")
+        return 0
+
+
+def _saved_first_run_budget(path: Path, configured: int) -> int:
+    """The halved budget a timed-out first-run read saved, else the configured one. A saved
+    value for another configured budget is stale: changing the setting starts over."""
+    if not path.is_file():
+        return configured
+    try:
+        saved = json.loads(path.read_text(encoding="utf-8"))
+        if saved["configured"] == configured and 0 < int(saved["max_events"]) < configured:
+            return int(saved["max_events"])
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        emit(f"WARNING: ignored {path.name} ({type(exc).__name__}); reading the full budget.")
+    return configured
+
+
 def read_run_events(history: Dict[str, Any], timeout: int, min_record_id: int,
-                    max_events: int) -> Tuple[List[Dict[str, Any]], bool]:
+                    max_events: int, budget_path: Optional[Path] = None
+                    ) -> Tuple[List[Dict[str, Any]], bool]:
     """Operational-log events past the watermark, or by time window when there is none.
 
     Returns (events, stalled_risk): True when an incremental read filled its budget, so the
     caller can tell a backlog still being walked from one that can never move (see below).
+    budget_path is where a first-run read saves its halved budget after a timeout.
     """
     if max_events:
         event_budget, budget_setting = max_events, "history.first_run_max_events"
+        if budget_path:
+            event_budget = _saved_first_run_budget(budget_path, max_events)
+            if event_budget < max_events:
+                emit(f"WARNING: reading {event_budget} events, not the {max_events} of "
+                     f"history.first_run_max_events, because the last first-run read timed out. "
+                     f"Raise powershell_timeout_seconds, then delete {budget_path.name} to read "
+                     f"the full budget again.")
     else:
         event_budget = int(history.get("max_events_per_run", 5000))
         budget_setting = "history.max_events_per_run"
     if min_record_id:
         emit(f"Incremental fetch: events newer than record id {min_record_id}.")
-    raw_events = collect.collect_run_events(
-        int(history.get("days_back", 30)), event_budget, timeout, min_record_id=min_record_id)
+    try:
+        raw_events = collect.collect_run_events(
+            int(history.get("days_back", 30)), event_budget, timeout, min_record_id=min_record_id)
+    except PowerShellTimeout:
+        # ponytail: a timed-out first read repeated itself every hour (the watermark stays 0 until
+        # a read gets through). Halve the next first-run budget, saved in the log folder, so a
+        # slow log gets through in about log2(budget / floor) runs, at most 8 from 30000.
+        # Ceiling: the run that gets through keeps only the newest events in the window (the
+        # same truncation the budget warning below reports), so older history is not backfilled.
+        # Upgrade path if that matters: read the history oldest-first in pages and publish each.
+        note = ""
+        if max_events and budget_path:
+            smaller = max(event_budget // 2, FIRST_RUN_BUDGET_FLOOR)
+            atomic_write_json(budget_path, {"configured": max_events, "max_events": smaller})
+            if smaller < event_budget:
+                note = f" The next run reads {smaller} events."
+        raise PowerShellTimeout(
+            f"Reading up to {event_budget} events from the Operational log did not finish in "
+            f"{timeout} s. Raise powershell_timeout_seconds, or lower {budget_setting}.{note}")
+    # The saved budget stays after a read that gets through: only a publish that moves the
+    # watermark proves progress, so _run_publish deletes it then (see FIRST_RUN_BUDGET_FILE).
     emit(f"Collected {len(raw_events)} Operational log event(s).")
     full = len(raw_events) >= event_budget
     if full and min_record_id:
@@ -2204,7 +2270,8 @@ def interactive_pattern(scheduler: Dict[str, Any]) -> str:
 
 
 def collect_everything(config: Dict[str, Any], fixture: Optional[Path],
-                       min_record_id: int = 0, max_events: int = 0) -> Dict[str, Any]:
+                       min_record_id: int = 0, max_events: int = 0,
+                       first_run_budget: bool = True) -> Dict[str, Any]:
     host_name = get_host_name(config)
     scheduler = config.get("scheduler", {})
     history = config.get("history", {})
@@ -2212,6 +2279,10 @@ def collect_everything(config: Dict[str, Any], fixture: Optional[Path],
     # Taken before the slow task and event queries: a task due at 10:00 that starts at 10:00:05
     # must not look overdue because the audit clock was read a minute later.
     audit_dt = utc_now()
+    event_log_error: Optional[BaseException] = None
+    task_read_warning = ""
+    event_gap = ""
+    event_read_mark = 0
 
     if fixture:
         payload = json.loads(fixture.read_text(encoding="utf-8"))
@@ -2224,10 +2295,31 @@ def collect_everything(config: Dict[str, Any], fixture: Optional[Path],
         emit(f"Loaded fixture {fixture} ({len(raw_tasks)} tasks, {len(raw_events)} events)")
     else:
         emit("Collecting scheduled tasks...")
+        collect.unreadable_tasks.clear()
         raw_tasks = collect.collect_tasks(timeout)
+        task_read_warning = "; ".join(collect.unreadable_tasks)
         emit(f"Collected {len(raw_tasks)} task row(s) before filtering.")
         emit("Collecting run events...")
-        raw_events, stalled_risk = read_run_events(history, timeout, min_record_id, max_events)
+        # A disabled log is common on Windows 10/11. Carry on with zero events so the inventory
+        # and overdue alerts still go out; the caller re-raises this after they are done.
+        try:
+            collect.oldest_record_id = None
+            raw_events, stalled_risk = read_run_events(
+                history, timeout, min_record_id, max_events,
+                resolve_log_dir(config) / FIRST_RUN_BUDGET_FILE if first_run_budget else None)
+            read_mark = _saved_event_read_mark(resolve_log_dir(config) / EVENT_READ_MARK_FILE)
+            event_gap = collect.event_gap_warning(read_mark if min_record_id else 0,
+                                                  collect.oldest_record_id)
+            if event_gap:
+                emit(f"WARNING: {event_gap}")
+            # Saved by _run_publish after a clean publish. oldest - 1 acknowledges a gap, so it is
+            # reported once. A cleared log restarts low, so the newest read wins over the old mark.
+            ids = [safe_int(e.get("event_record_id")) or 0 for e in raw_events]
+            event_read_mark = max(max(ids, default=0) or read_mark, (collect.oldest_record_id or 1) - 1)
+        except (collect.EventLogDisabled, PowerShellTimeout) as exc:
+            event_log_error = exc
+            raw_events, stalled_risk = [], False
+            emit(f"WARNING: {exc} Continuing without run history; the run will exit 1 at the end.")
 
     filtered = [r for r in raw_tasks if collect.should_include_task(r, scheduler)]
     emit(f"Tasks after filtering: {len(filtered)}")
@@ -2280,7 +2372,9 @@ def collect_everything(config: Dict[str, Any], fixture: Optional[Path],
     return {"host_name": host_name, "raw_tasks": raw_tasks, "raw_events": raw_events,
             "inventory": inventory, "runs": runs, "metrics": metric_rows,
             "log_summary": log_summary, "execution_time_limits": execution_time_limits,
-            "audit_dt": audit_dt}
+            "audit_dt": audit_dt, "event_log_error": event_log_error,
+            "task_read_warning": task_read_warning, "event_gap_warning": event_gap,
+            "event_read_mark": event_read_mark}
 
 
 def report(collected: Dict[str, Any]) -> None:
@@ -2940,7 +3034,7 @@ def run_refresh_metrics(config: Dict[str, Any], args: argparse.Namespace) -> int
     oid_field = object_id_field(table)
     stored = query_all_rows(table, out_fields=f"{oid_field},host_name,task_full_name,metric_key,"
                                               "log_file_name,display_name,series_key")
-    own_tasks = [r.get("task_full_name") for r in inventory if metrics.is_taskdash_command(r.get("command_target_name"))]
+    own_tasks = [r.get("task_full_name") for r in inventory if metrics.is_taskdash_command(r.get("command_target_name"), r.get("command_target_arguments"))]
     deletes, updates = plan_metric_refresh(stored, fresh, oid_field, examined, own_tasks)
     emit(f"{TABLE_METRICS}: {len(deletes)} row(s) that the log miner no longer makes, {len(updates)} row(s) with an "
          f"outdated name or series key, of {len(stored)} stored.")
@@ -3131,13 +3225,22 @@ def _run_publish(args: argparse.Namespace, config: Dict[str, Any], log_dir: Path
                 f"still collecting and evaluating alerts before exiting.")
 
         if preflight_error is None:
-            # A missing field/index is a deliberate refusal (run --migrate --apply first), not
-            # a transient outage -- unlike the block above, this must keep failing fast.
-            check_schema_drift(tables)
-            # Same: a public source service is a setup fault to fix, not an outage to ride out.
-            # It reads only item.access, loaded above, so it makes no request that an outage
-            # could fail here, outside the try below.
-            check_source_sharing(item, config, args.target)
+            # A missing field/index or a public source service is a deliberate refusal (run
+            # --migrate --apply, fix the sharing), not an outage -- the run still exits 1 with
+            # that message. But the refusal exists to stop writes, not the failed-task e-mail:
+            # dropping gis/item skips every hosted-table write (the audit row goes to the
+            # pending file), and the stashed error is re-raised after alerting.
+            # check_source_sharing reads only item.access, loaded above, so it makes no request.
+            try:
+                check_schema_drift(tables)
+                check_source_sharing(item, config, args.target)
+            except (Exception, SystemExit) as exc:
+                preflight_error = exc
+                gis = item = None
+                emit(f"WARNING: refusing to write to AGOL ({type(exc).__name__}); still collecting "
+                    f"and evaluating alerts before exiting.")
+
+        if preflight_error is None:
             try:
                 if TABLE_RUNS in tables and not args.full_history:
                     newest = None if args.fixture else collect.newest_record_id(
@@ -3163,9 +3266,12 @@ def _run_publish(args: argparse.Namespace, config: Dict[str, Any], log_dir: Path
     collected = collect_everything(config, Path(args.fixture) if args.fixture else None,
                                    min_record_id=watermark, max_events=max_events)
     report(collected)
+    event_log_error = collected.get("event_log_error")
 
     if not args.apply:
         emit("DRY RUN - nothing written. Re-run with --apply to publish.")
+        if event_log_error is not None:
+            raise event_log_error
         return 0
 
     # Evaluate and send the alert from the collected data even when publish() fails (an AGOL
@@ -3185,28 +3291,61 @@ def _run_publish(args: argparse.Namespace, config: Dict[str, Any], log_dir: Path
 
     # A test publish must neither mail real recipients nor advance prod's alert state.
     alert_sent = False
+    alert_failure = ""
     if args.target == "prod":
-        alert_sent = bool(maybe_send_alert(collected, config, log_dir))
+        try:
+            alert_sent = bool(maybe_send_alert(collected, config, log_dir))
+        except AlertSendError as exc:
+            # Deferred like the errors above: publishing is done, so only the exit code is left.
+            alert_failure = f"Alert e-mail failed: {_scrub_secrets(normalize_text(exc))}"
+            emit(f"WARNING: {alert_failure}")
     else:
         emit("Alerting skipped: --target test never e-mails or touches alert_state.json.")
+
+    # A disabled log is a deferred refusal like the ones above: everything that could be done
+    # was done, and it fails the run only now. A publish error takes precedence in the audit row.
+    # It reads no events, so the watermark stays where it was.
+    run_error = publish_error if publish_error is not None else event_log_error
 
     # A failed publish (preflight or the write itself) means no run landed, so the watermark
     # did not actually advance -- report it unchanged rather than the highest id merely collected.
     watermark_to = (float(watermark) if publish_error is not None else
                     max((safe_float(r.get("max_event_record_id")) or 0.0
                         for r in collected.get("runs") or []), default=float(watermark)))
+    # Forward progress: the halved first-run budget is dropped only when a clean publish moved the
+    # watermark off 0. After that max_events is 0, so a stale file is never read.
+    if max_events and publish_error is None and watermark_to > 0:
+        (resolve_log_dir(config) / FIRST_RUN_BUDGET_FILE).unlink(missing_ok=True)
+    # Same rule as the watermark: a read that was not published is read again, so it is not marked.
+    if publish_error is None and event_log_error is None and collected.get("event_read_mark"):
+        atomic_write_json(resolve_log_dir(config) / EVENT_READ_MARK_FILE,
+                          {"record_id": collected["event_read_mark"]})
     _write_collector_run_row(
         item, config, collected, run_started=run_started, run_ended=utc_now(),
-        exit_status="failed" if publish_error is not None else "success",
-        error_text=normalize_text(publish_error) if publish_error is not None else "",
+        exit_status="failed" if run_error is not None or alert_failure else "success",
+        # A task that could not be read is a warning, not a failure: the run stays "success" but
+        # the dashboard's Error column names the task.
+        error_text=" | ".join(filter(None, (
+            (normalize_text(run_error) if run_error is not None else
+             " | ".join(filter(None, (
+                 ("Unreadable task(s): " + collected["task_read_warning"]
+                  if collected.get("task_read_warning") else ""),
+                 collected.get("event_gap_warning") or "")))),
+            alert_failure))),
         watermark_from=float(watermark), watermark_to=watermark_to,
         publish_counts=publish_counts, alert_sent=alert_sent,
         pending_path=log_dir / PENDING_COLLECTOR_RUNS_FILE.format(target=args.target),
     )
     progress["recorded"] = True
 
-    if publish_error is not None:
-        raise publish_error
+    if run_error is not None:
+        raise run_error
+    if alert_failure:
+        raise SystemExit(
+            f"{alert_failure}. The data was published, but nobody was told about the problem. "
+            "Check smtp.host, smtp.port, smtp.from and smtp.user in the config and the stored SMTP "
+            "password, then run `taskdash test-alert --apply` to prove the mail path. The next run "
+            "tries again.")
 
     emit("TaskDash publish complete.")
     return 0
@@ -3239,9 +3378,12 @@ def run_preview_alert(args: argparse.Namespace, config: Dict[str, Any], log_dir:
     can be 7 days old. The hourly run gets it from the AGOL table; the preview stays off AGOL."""
     collected = collect_everything(
         config, Path(args.fixture) if args.fixture else None,
-        max_events=int(config.get("history", {}).get("first_run_max_events", 30000)))
+        max_events=int(config.get("history", {}).get("first_run_max_events", 30000)),
+        first_run_budget=False)   # a preview publishes nothing, so it must not halve or clear the hourly run's budget
     report(collected)
     preview_alert(collected, config, log_dir)
+    if collected.get("event_log_error") is not None:
+        raise collected["event_log_error"]
     return 0
 
 
@@ -3332,8 +3474,14 @@ def _main_dispatch(args: argparse.Namespace, config: Dict[str, Any], log_dir: Pa
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parse_args(argv)
-    config, config_warnings = load_config(Path(args.config) if args.config else None,
-                                          defer_warnings=True)
+    try:
+        config, config_warnings = load_config(Path(args.config) if args.config else None,
+                                              defer_warnings=True)
+    except SystemExit as exc:
+        # No logger exists yet; a wheel task has no run_taskdash.cmd capture, so keep the message.
+        if isinstance(exc.code, str):
+            write_bootstrap_fail(exc.code)
+        raise
 
     log_dir = resolve_log_dir(config)
     log_path = setup_logging(log_dir, "taskdash")
@@ -3827,19 +3975,24 @@ def compose_alert(collected: Dict[str, Any], config: Dict[str, Any], previous: D
             "first_seen": first_seen, "digest_pending": pending if reason == "digest" else []}
 
 
+class AlertSendError(RuntimeError):
+    """An alert that was due could not be sent. Distinct from "nothing to send" (False), so the
+    run can fail instead of passing as a success."""
+
+
 def maybe_send_alert(collected: Dict[str, Any], config: Dict[str, Any], log_dir: Path) -> bool:
     """Returns True only when an e-mail was actually sent -- run_publish's CollectorRuns row
-    (3.6) reports this as alert_sent.
+    (3.6) reports this as alert_sent. False means nothing was due. Raises AlertSendError when
+    an alert was due and could not go out; the alert state is then left alone, so the next run
+    retries.
     """
+    import taskdash_common
     from taskdash_common import load_mail_settings, send_email
 
     alerting = config.get("alerting", {})
     if not alerting.get("enabled"):
         return False
     recipients = [r for r in (alerting.get("to") or []) if normalize_text(r)]
-    if not recipients:
-        emit("WARNING: alerting.enabled is true but alerting.to is empty; no alert sent.")
-        return False
 
     state_path = log_dir / "alert_state.json"
     previous = _read_alert_state(state_path)
@@ -3863,25 +4016,32 @@ def maybe_send_alert(collected: Dict[str, Any], config: Dict[str, Any], log_dir:
             emit(f"No alert: problem set unchanged ({len(current)} open, {len(suppressed)} in maintenance).")
         return False
 
+    if not recipients:
+        raise AlertSendError("alerting.enabled is true but alerting.to is empty, so there is nobody "
+                             "to e-mail")
     mail = load_mail_settings(config)
-    sent = bool(mail and send_email(mail, recipients, alert["subject"], alert["body"]))
-    if sent:
-        state = {"signature": current, "updated_utc": now.isoformat(),
-                 "last_heartbeat_utc": now.isoformat() if alert["reason"] == "heartbeat"
-                 else previous.get("last_heartbeat_utc"),
-                 "problem_last_alert_utc": {k: now.isoformat() for k in current},
-                 "problem_first_seen_utc": alert["first_seen"],
-                 # Set while an incident is open, so the next additions wait for the digest, and
-                 # compared with the cause this e-mail announced.
-                 "incident_alert_utc": now.isoformat() if alert["incident"] else None,
-                 "incident_cause": alert["incident"]["cause"] if alert["incident"] else None,
-                 "incident_causes": sorted(alert["incident"]["counts"]) if alert["incident"] else [],
-                 "digest_pending": []}
-        try:
-            atomic_write_json(state_path, state)
-        except OSError as exc:
-            emit(f"WARNING: could not persist alert state ({exc}); may re-alert next run.")
-    return sent
+    if not mail:
+        raise AlertSendError("no usable mail settings (see the WARNING above in the log)")
+    taskdash_common.last_send_error = ""
+    if not send_email(mail, recipients, alert["subject"], alert["body"]):
+        raise AlertSendError(taskdash_common.last_send_error or "the mail server did not accept "
+                             "the message (see the WARNING above in the log)")
+    state = {"signature": current, "updated_utc": now.isoformat(),
+             "last_heartbeat_utc": now.isoformat() if alert["reason"] == "heartbeat"
+             else previous.get("last_heartbeat_utc"),
+             "problem_last_alert_utc": {k: now.isoformat() for k in current},
+             "problem_first_seen_utc": alert["first_seen"],
+             # Set while an incident is open, so the next additions wait for the digest, and
+             # compared with the cause this e-mail announced.
+             "incident_alert_utc": now.isoformat() if alert["incident"] else None,
+             "incident_cause": alert["incident"]["cause"] if alert["incident"] else None,
+             "incident_causes": sorted(alert["incident"]["counts"]) if alert["incident"] else [],
+             "digest_pending": []}
+    try:
+        atomic_write_json(state_path, state)
+    except OSError as exc:
+        emit(f"WARNING: could not persist alert state ({exc}); may re-alert next run.")
+    return True
 
 
 def _other_attention(inventory: Sequence[Dict[str, Any]]) -> List[str]:

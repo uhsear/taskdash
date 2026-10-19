@@ -4,6 +4,65 @@ All notable changes to TaskDash are listed here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). The version numbers follow
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- `taskdash preflight` has a `health check` line. It warns, without failing, when
+  `alerting.healthcheck_url` is empty, because a collector that never starts is otherwise silent. It
+  prints only "set" or "not set", never the address. INSTALL.md now recommends an outside health check.
+
+- `taskdash test-alert` checks the alert e-mail path. Without `--apply`, it prints the recipients,
+  the server and the subject, and sends nothing. With `--apply`, it sends one test message through
+  the same send code as the hourly run, and exits 1 with the reason if that fails.
+
+### Changed
+
+- The default of `scheduler.collector_task_name` is now `TaskDash Collector`, the task name that
+  `install_task.ps1` registers. Before, the default was `Task Dash`, so a new install had to set the
+  key. An install that registered its task under another name must set the key to that name.
+
+### Fixed
+
+- A failed alert e-mail is no longer silent. When an alert is due and cannot be sent, including
+  when alerting is on but the mail settings are unusable, the run still publishes everything. It
+  then saves `Alert e-mail failed: <reason>` in `error_text` of the `CollectorRuns` row, pings the
+  health check with `/fail`, and exits 1 with a message that names the `smtp` settings and
+  `taskdash test-alert`. The alert state stays unsaved, so the next run tries again. A run with
+  nothing to send still exits 0. An empty `alerting.to` now fails the same way when an alert is due.
+
+- A schema-drift refusal or a public source service no longer silences the failed-task alert.
+  The run still writes nothing to the service and still exits 1, but it now sends the alert first.
+  It saves the `CollectorRuns` row to the pending file, as it does when AGOL is down.
+- A wheel install now keeps a config error or a module import error in
+  `Logs\bootstrap_FAIL_<time>.log`. Before, the task ran `taskdash.exe` with no log to read.
+  This includes a config saved as UTF-16 by Windows PowerShell 5.1 and a config the task account
+  cannot read. Both now exit with a message that says how to fix the file.
+- The help example in `install_task.ps1` passed the venv folder as `-InstallDir`. The task would
+  start there and miss the config. The example now matches `docs/INSTALL.md`.
+- A turned-off Task Scheduler log no longer discards the whole run. The run now publishes the task
+  inventory and the overdue state, sends the alerts, and saves the `CollectorRuns` row with the
+  message in `error_text`. It then exits 1. It reads no events, so the watermark does not move.
+- A wheel install now shows the collector's own failures and its Latest log. TaskDash now also
+  recognises the task that runs `taskdash.exe collect`, wherever the venv sits.
+- A first `--apply` run on a busy event log no longer repeats the same timed-out read every hour.
+  A timed-out PowerShell call now ends with a message that names `powershell_timeout_seconds`,
+  not a traceback. The run still publishes the task inventory, sends the alerts and saves the
+  `CollectorRuns` row, then exits 1. A timed-out first read also halves the next one, saved in
+  `Logs\first_run_budget.json`. The file stays until a publish moves the watermark, so a run never
+  goes back to a read that timed out, and `--preview-alert` never changes it.
+- One corrupt or unreadable task definition no longer stops the whole inventory. The run collects
+  every readable task and prints a warning that names each problem task. It saves the names in
+  `error_text` of the `CollectorRuns` row, and the run still counts as a success. A task whose
+  run info cannot be read is left out, not listed as never run. If Task Scheduler returns errors
+  and no task at all, the run fails with `Cannot list scheduled tasks`.
+- A Task Scheduler log that wrapped or was cleared between two runs is no longer silent.
+  The event read now also returns the oldest record id left. When that id is more than one past
+  the newest record the last published run read, the run warns how many record ids were skipped
+  and saves the warning in `error_text`. The run still exits 0. TaskDash keeps the newest id read
+  in `Logs\event_read_mark.json`, not the watermark, because the watermark moves only with
+  monitored runs. A host with idle monitored tasks therefore gets no false warning.
+
 ## [1.0.2] - 2026-10-19
 
 ### Fixed

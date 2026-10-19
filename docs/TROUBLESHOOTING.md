@@ -66,6 +66,20 @@ To see the last line of the newest log without opening it, run `taskdash status 
 already installed, add `--force-reinstall --no-deps` to the `pip install` command from step 1 of
 [INSTALL.md](INSTALL.md).
 
+### A module failed to import
+
+> `<module>` failed to import. Reinstall TaskDash; if it persists, send this traceback to the maintainer.
+
+**Cause.** The command's Python file exists but raised an error when Python loaded it. A damaged
+or mixed-version install causes this. A wheel install has no wrapper script, so TaskDash also
+saves the message and the traceback in `Logs\bootstrap_FAIL_<time>.log` under the `TASKDASH_HOME`
+folder, or the working folder if that is not set. A wheel install saves a config error there too,
+before the run log exists. TaskDash hides secrets in the text and deletes the file with the other
+old logs. The folder install keeps its own `bootstrap_FAIL_` file through `run_taskdash.cmd`.
+
+**Fix.** Read the traceback. Run the install again with the full wheel from the release, as in the
+fix above.
+
 ### A command prints a usage line and an error
 
 > taskdash: unknown command '`<name>`'
@@ -106,6 +120,24 @@ extra comma after the last item, or a missing quote are the usual causes.
 
 **Fix.** Open the file in an editor, go to the line, and correct the syntax. Run
 `taskdash preflight --offline` to check it again.
+
+### The config is not UTF-8 text
+
+> Config at `<path>` is not UTF-8 text. Open it in an editor and save it as UTF-8, then run again.
+
+**Cause.** The file uses another encoding. Windows PowerShell 5.1 writes UTF-16 with `Out-File`.
+
+**Fix.** Open the file in an editor and save it as UTF-8. Run `taskdash preflight --offline` to
+check it again.
+
+### The config cannot be read
+
+> Cannot read the config at `<path>`: `<detail>`. Give the account that runs TaskDash read access to the file, then run again.
+
+**Cause.** The account that runs TaskDash has no read access to the file, or another program
+locks it.
+
+**Fix.** Give the task account read access to the file. Close any program that holds it open.
 
 ### The config is not a JSON object
 
@@ -245,10 +277,47 @@ TaskDash may not read it. `<reason>` is the error that Windows reported.
 > Event log '`<log name>`' is disabled, so run history cannot be collected. Enable it with: wevtutil sl "`<log name>`" /e:true (run elevated), then retry.
 
 **Cause.** Windows often ships this log turned off. TaskDash cannot collect run history while it is
-off.
+off. The run still publishes the task list and the overdue state, and it still sends alerts. It
+records this message in `error_text` of the `CollectorRuns` row, then exits with code 1.
 
 **Fix.** Open PowerShell as administrator and run `taskdash preflight --enable-event-log --apply`.
 Step 5 of [INSTALL.md](INSTALL.md) lists the full steps. Run history starts when you turn the log on.
+
+### A task could not be read
+
+> WARNING: `<n>` scheduled task problem(s); the readable tasks are still collected: `<task>: <message>`
+
+**Cause.** Task Scheduler refused to read one task definition. A common message is 0x80041321, "The
+task image is corrupt or has been tampered with". Access denied gives the same warning. The run does
+not fail. It lists every readable task, and it leaves out each task named in the warning.
+
+**Fix.** Open Task Scheduler and look at the named task. Re-create the task if it is corrupt. If the
+message says access denied, give the task account read access to the task. The `CollectorRuns` row
+holds the same names in `error_text`, and its exit status stays success.
+
+### TaskDash cannot list any scheduled task
+
+> Cannot list scheduled tasks: `<task>: <message>`. Check that the Task Scheduler service is running and that the task account can read the task folders, then run again.
+
+**Cause.** Task Scheduler returned errors and no task at all. The service may be stopped, or the task
+account may have no access to the task folders. The run fails because an empty list would publish an
+empty inventory and send a false "recovered" e-mail.
+
+**Fix.** Start the Task Scheduler service, or give the task account read access to the task folders.
+Then run the collector again.
+
+### Event records were skipped
+
+> WARNING: `<n>` event record id(s) were skipped: the oldest record left in the Operational log is `<id>` but the last one read was `<id>`. The log wrapped or was cleared since TaskDash last read it. Raise the log size with the preflight event-log fix.
+
+**Cause.** The Task Scheduler log is a ring. It overwrote old records between two runs.
+The run history for those records is lost. This run is fine, and the exit code stays 0.
+TaskDash compares the oldest record with the newest record the last published run read. It keeps
+that id in `Logs\event_read_mark.json`. It warns once for each gap. Without the file, which is the
+case on the first run after an upgrade, it skips the check.
+
+**Fix.** Raise the log size so it holds more than the longest gap between runs. Run preflight and
+apply its event-log fix. The `CollectorRuns` row holds the same warning in `error_text`.
 
 ### PowerShell failed
 
@@ -366,6 +435,10 @@ index that the service does not have yet.
 
 **Fix.** Run `taskdash collect --migrate --apply`, then run the failed command again.
 
+While the schema is out of date, `collect --apply` writes nothing to the service. It still sends the
+failed-task alert, and it exits 1. The log says `WARNING: refusing to write to AGOL`. The next
+successful run writes the saved `CollectorRuns` row.
+
 ### A schema change failed
 
 > `<table>`: add_to_definition failed creating the table: `<reply>`
@@ -462,6 +535,9 @@ in ArcGIS Online.
 
 **Fix.** In ArcGIS Online, set the sharing of the service to **Owner**. Share only the read-only
 view, with the organization or with named groups.
+
+While the service is public, `collect --apply` writes nothing to it. It still sends the
+failed-task alert, and it exits 1.
 
 ### A view update failed
 
@@ -563,6 +639,71 @@ the same events.
 1. Raise `history.max_events_per_run` in the config.
 2. Run `taskdash collect --apply --full-history` once. It ignores the saved position and reads the
    event-log window, up to `history.first_run_max_events` events.
+
+### PowerShell did not finish
+
+> PowerShell did not finish within `<n>` s. Raise powershell_timeout_seconds in the config, or check that the computer is not overloaded.
+
+> Reading up to `<n>` events from the Operational log did not finish in `<n>` s. Raise powershell_timeout_seconds, or lower history.first_run_max_events.
+
+**Cause.** A PowerShell call took longer than `powershell_timeout_seconds` (default 180). The second
+message is the event-log read. On a first run it asks for up to `history.first_run_max_events`
+events (default 30000), which a busy log cannot always return in time. For a later run, the
+message names `history.max_events_per_run` instead.
+
+The run still publishes the task list and sends the alerts, then exits 1. It reads no events, so the
+watermark does not move.
+
+**Fix.** Do one of these:
+
+1. Raise `powershell_timeout_seconds` in the config.
+2. Lower `history.first_run_max_events`.
+3. Wait. You need to do nothing else. A first read that times out saves half of its size in
+   `Logs\first_run_budget.json`. Each later run halves it again, down to 250 events, until a read
+   gets through. From 30000, that takes at most 8 runs.
+
+The read that gets through keeps only the newest events in the window, so older runs are not
+backfilled. TaskDash then deletes `first_run_budget.json`. To read the full size again sooner,
+delete the file, or change `history.first_run_max_events`.
+
+## Alert e-mail
+
+### The alert e-mail failed
+
+> Alert e-mail failed: `<reason>`. The data was published, but nobody was told about the problem. Check smtp.host, smtp.port, smtp.from and smtp.user in the config and the stored SMTP password, then run `taskdash test-alert --apply` to prove the mail path. The next run tries again.
+
+**Cause.** An alert was due, and TaskDash could not send it. The mail server refused or did not
+answer, the stored SMTP password is wrong or missing, or alerting is on but there are no usable mail
+settings. The run still publishes everything first. It then saves `Alert e-mail failed: <reason>` in
+`error_text` of the `CollectorRuns` row, sends the failure ping to the health check, and exits with
+code 1. The row shows `alert_sent` as 0 and an exit status of failed.
+
+**Fix.** Do these steps:
+
+1. Run `taskdash test-alert`. It prints the recipients and the server, and it sends nothing.
+2. Run `taskdash test-alert --apply`. It sends one test message and prints the reason if it fails.
+3. Fix the `smtp` settings or the stored password named in the reason. The mail password steps are
+   in [CONFIGURE.md](CONFIGURE.md).
+4. Wait for the next hourly run. TaskDash keeps the alert state until a send works, so it sends the
+   same alert again. Nothing is lost.
+
+### The test alert has no recipient
+
+> alerting.to is empty, so the test message has no recipient. Add at least one address to alerting.to in the config.
+
+**Cause.** `taskdash test-alert` sends to the addresses in `alerting.to`, and the list is empty.
+
+**Fix.** Add at least one address to `alerting.to`, then run the command again.
+
+### The test alert has no mail settings
+
+> There are no usable mail settings, so the test message cannot be sent. Fix the smtp block in the config (host, from, user and the stored password); the WARNING above says which part is missing.
+
+**Cause.** The `smtp` object lacks `smtp.host` or `smtp.from`, or the password for `smtp.user` is
+not in the keyring of this Windows account.
+
+**Fix.** Complete the `smtp` object, and store the password as the account that runs the task. The
+steps are in [CONFIGURE.md](CONFIGURE.md). Run the command again.
 
 ## Setup
 

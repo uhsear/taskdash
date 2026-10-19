@@ -214,6 +214,9 @@ these three lines are expected, because steps 6 and 7 have not run yet:
 `[--] view: no arcgis.view_item_id configured ...` and
 `[--] collector account: collector task 'TaskDash Collector' is not registered yet` are also expected.
 
+A `health check` line that starts with `WARNING` means `alerting.healthcheck_url` is empty. It is not
+a failure, and preflight still exits 0. See "Set up an outside health check" after step 8.
+
 A `tested scale` line that starts with `WARNING` is not a problem. It says that this computer has
 more tasks than the tested install, or tasks that repeat more often than hourly.
 
@@ -383,6 +386,15 @@ If the collector logon type line still says `collector task 'TaskDash Collector'
 normal window may not be allowed to see a task that runs as another account. Run
 `& $td preflight --offline` in the administrator window. That line must be
 `[ok] collector logon type: task 'TaskDash Collector' logs on as Password`.
+
+### Set up an outside health check
+
+If the collector never starts, nothing inside TaskDash can tell you. An expired password or a
+disabled task causes this. Only an outside monitor notices. Create a check at a service such as
+Healthchecks.io, then put its ping address in `alerting.healthcheck_url`. The
+"Watch for a silent collector" section of `docs/CONFIGURE.md` explains the pings. The address holds a
+secret ID, so keep it out of tickets and chat. Run `& $td preflight`. The `health check` line then
+says `alerting.healthcheck_url is set` and does not show the address.
 
 ## 9. Open the dashboard and add viewers
 

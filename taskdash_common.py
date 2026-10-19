@@ -252,6 +252,13 @@ def load_config(config_path: Optional[Path] = None, *, defer_warnings: bool = Fa
         config = json.loads(path.read_text(encoding="utf-8-sig"))
     except json.JSONDecodeError as exc:
         raise SystemExit(f"Config at {path} is not valid JSON (line {exc.lineno}): {exc.msg}")
+    except UnicodeDecodeError:
+        # Windows PowerShell 5.1 Out-File and Set-Content write UTF-16 / ANSI by default.
+        raise SystemExit(f"Config at {path} is not UTF-8 text. Open it in an editor and save it "
+                         f"as UTF-8, then run again.")
+    except OSError as exc:
+        raise SystemExit(f"Cannot read the config at {path}: {exc}. Give the account that runs "
+                         f"TaskDash read access to the file, then run again.")
     if not isinstance(config, dict):
         raise SystemExit(f"Config at {path} must be a JSON object, not {type(config).__name__}.")
 
@@ -348,6 +355,29 @@ def emit(message: str) -> None:
 # run_taskdash.cmd (its stdout/stderr redirect, before setup_logging ever runs), and the
 # --preview-alert output.
 TASKDASH_LOG_GLOBS = ("taskdash_*.log", "bootstrap*.log", "alert_preview_*.txt")
+
+
+def write_bootstrap_fail(message: str) -> None:
+    """Keep a pre-logging failure of a wheel install as Logs/bootstrap_FAIL_<stamp>.log.
+
+    The wheel task runs taskdash.exe directly, so run_taskdash.cmd's capture does not apply and a
+    config or import error would leave no file. The folder install already has that capture.
+    Never raises: a failing writer must not hide the error it reports.
+    """
+    if _folder_deploy():
+        return
+    try:
+        try:
+            from taskdash_publish import _scrub_secrets
+            message = _scrub_secrets(message)
+        except Exception:
+            pass
+        log_dir = home_dir() / "Logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        (log_dir / f"bootstrap_FAIL_{stamp}.log").write_text(message.rstrip() + "\n", encoding="utf-8")
+    except Exception as exc:
+        print(f"TaskDash could not write bootstrap_FAIL log: {exc}", file=sys.stderr)
 
 
 def cleanup_old_logs(log_dir: Path, max_age_days: int) -> None:
@@ -559,25 +589,36 @@ def short_duration(seconds: float) -> str:
 
 # --------------------------------------------------------------------------- powershell
 
+class PowerShellTimeout(SystemExit):
+    """A SystemExit the event read can tell apart, so a slow log defers its exit to the end of
+    the run (like EventLogDisabled) and halves the next first-run read."""
+
+
 def run_powershell_json(script: str, timeout_seconds: int = DEFAULT_POWERSHELL_TIMEOUT_SECONDS) -> List[Dict[str, Any]]:
     """Run a PowerShell snippet that ends in ConvertTo-Json and return a list of dicts.
 
     Output is decoded as UTF-8 explicitly. The old wrapper piped PowerShell's default
     UTF-16 through a text log and produced unreadable spaced-out characters.
     """
-    completed = subprocess.run(
-        [
-            "powershell.exe",
-            "-NoProfile",
-            "-NonInteractive",
-            "-ExecutionPolicy", "Bypass",
-            "-OutputFormat", "Text",
-            "-Command", script,
-        ],
-        capture_output=True,
-        timeout=timeout_seconds,
-        check=False,
-    )
+    try:
+        completed = subprocess.run(
+            [
+                "powershell.exe",
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy", "Bypass",
+                "-OutputFormat", "Text",
+                "-Command", script,
+            ],
+            capture_output=True,
+            timeout=timeout_seconds,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        raise PowerShellTimeout(
+            f"PowerShell did not finish within {timeout_seconds} s. Raise "
+            f"powershell_timeout_seconds in the config, or check that the computer is not "
+            f"overloaded.")
     stdout = completed.stdout.decode("utf-8", errors="replace").strip()
     stderr = completed.stderr.decode("utf-8", errors="replace").strip()
 
@@ -1007,6 +1048,9 @@ def purge_older_than(table: Any, time_field: str, retention_days: int, label: st
 # --------------------------------------------------------------------------- alerting
 
 SMTP_KEYRING_SERVICE = "taskdash-smtp"
+# Why the newest send_email call failed. send_email keeps its bool return so every caller and test
+# double still works; a caller that needs the reason reads it here right after a False.
+last_send_error = ""
 
 
 def _smtp_block_settings(smtp: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -1085,13 +1129,16 @@ def load_mail_settings(config: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 def send_email(mail: Dict[str, Any], recipients: List[str], subject: str, body: str) -> bool:
     """Send a plain-text alert. Returns True on success; never raises into the caller.
 
-    A failed alert must not fail the publish -- the data write already succeeded and losing it
-    over a mail outage would be worse than the missed notification.
+    A failed alert must not abort the publish -- the data write already succeeded and losing it
+    over a mail outage would be worse than the missed notification. The caller fails the run
+    afterwards instead, and reads the reason from last_send_error.
     """
     import smtplib
     import ssl
     from email.message import EmailMessage
 
+    global last_send_error
+    last_send_error = ""
     try:
         msg = EmailMessage()
         msg["Subject"] = subject
@@ -1130,5 +1177,6 @@ def send_email(mail: Dict[str, Any], recipients: List[str], subject: str, body: 
         emit(f"Alert e-mailed to {', '.join(recipients)}: {subject}")
         return True
     except Exception as exc:  # noqa: BLE001 - alerting must never break the publish
-        emit(f"WARNING: could not send alert e-mail: {type(exc).__name__}: {exc}")
+        last_send_error = f"{type(exc).__name__}: {exc}"
+        emit(f"WARNING: could not send alert e-mail: {last_send_error}")
         return False

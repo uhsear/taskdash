@@ -14,7 +14,8 @@ taskdash_common.disable_arcpy_import()
 import taskdash_dashboard as dash  # noqa: E402
 import taskdash_publish as publish  # noqa: E402
 
-REFERENCE = {"alerting": {"heartbeat_hour": 7}, "retention": {"runs_days": 90}}
+REFERENCE = {"alerting": {"heartbeat_hour": 7}, "retention": {"runs_days": 90},
+             "scheduler": {"collector_task_name": "Task Dash"}}
 
 
 def _templates():

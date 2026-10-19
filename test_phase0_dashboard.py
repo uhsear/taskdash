@@ -127,11 +127,15 @@ def _normalised(definition):
 
 
 def test_reference_defaults_leave_every_help_text_byte_identical():
-    reference = {"scheduler": {"overdue_grace_minutes": 15, "collector_interval_minutes": 60},
+    reference = {"scheduler": {"overdue_grace_minutes": 15, "collector_interval_minutes": 60,
+                               "collector_task_name": "Task Dash"},
               "alerting": {"heartbeat_hour": 7}}
     # A config with no heartbeat_hour has no daily e-mail (phase 2.5), so the plain build differs
-    # from the reference only in that sentence; the reference config keeps the old text.
-    plain = _build({"alerting": {"heartbeat_hour": 7}})
+    # from the reference only in that sentence; the reference config keeps the old text. The
+    # reference install names its task "Task Dash" in its config since v1.1 (H1-9), because the
+    # code default became the installer's "TaskDash Collector".
+    plain = _build({"alerting": {"heartbeat_hour": 7}, "scheduler": {"collector_task_name": "Task Dash"}})
+    assert "TaskDash Collector task" in _help_blob(_build({"alerting": {"heartbeat_hour": 7}}))
     configured = _build(reference)
     assert _help_blob(plain) == _help_blob(configured)
     assert _normalised(plain) == _normalised(configured)

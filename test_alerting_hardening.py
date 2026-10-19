@@ -132,6 +132,64 @@ def test_alert_still_sent_when_connect_agol_raises_before_any_collection(monkeyp
     assert len(alerts) == 1, "the alert must still be evaluated even when connect_agol raises"
 
 
+class _WriteSpy:
+    """A table that lacks every required field and records any call made on it."""
+
+    def __init__(self):
+        self.calls = []
+        self.properties = type("P", (), {"fields": [], "indexes": [], "objectIdField": "OBJECTID"})()
+
+    def __getattr__(self, name):
+        return lambda *a, **k: self.calls.append(name)
+
+
+def _refusal_run(monkeypatch, tmp_path, item, tables, config):
+    """Run --apply against a service the run must refuse to write to; returns (alerts, error)."""
+    alerts = []
+    monkeypatch.setattr(publish, "connect_agol", lambda cfg: object())
+    monkeypatch.setattr(publish, "ensure_service", lambda gis, cfg, tgt: item)
+    monkeypatch.setattr(publish, "get_tables", lambda i: tables)
+    monkeypatch.setattr(publish, "collect_everything",
+                        lambda *a, **k: {"host_name": "H", "inventory": [], "runs": [],
+                                         "metrics": [], "log_summary": {}})
+    monkeypatch.setattr(publish, "report", lambda collected: None)
+    monkeypatch.setattr(publish, "publish",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not write")))
+    monkeypatch.setattr(publish, "maybe_send_alert", lambda *a: alerts.append(a))
+    with pytest.raises(SystemExit) as exc:
+        publish.run_publish(_run_publish_args(target="prod"), config, tmp_path)
+    return alerts, str(exc.value)
+
+
+def _pending_rows(tmp_path):
+    return publish._read_pending_collector_runs(
+        tmp_path / publish.PENDING_COLLECTOR_RUNS_FILE.format(target="prod"))
+
+
+def test_alert_still_sent_and_nothing_written_when_the_schema_has_drifted(monkeypatch, tmp_path):
+    """An upgrade without --migrate --apply refuses the write, not the failed-task e-mail."""
+    table = _WriteSpy()
+    item = type("I", (), {"title": "x", "id": "svc", "access": "private"})()
+    alerts, message = _refusal_run(monkeypatch, tmp_path, item, {publish.TABLE_RUNS: table}, {})
+
+    assert "Schema drift" in message and "--migrate --apply" in message
+    assert len(alerts) == 1
+    assert table.calls == []
+    rows = _pending_rows(tmp_path)
+    assert len(rows) == 1 and rows[0]["exit_status"] == "failed" and "Schema drift" in rows[0]["error_text"]
+
+
+def test_alert_still_sent_and_nothing_written_when_the_source_service_is_public(monkeypatch, tmp_path):
+    item = type("I", (), {"title": "x", "id": "svc", "access": "public"})()
+    config = {"arcgis": {"view_item_id": "v1"}}
+    alerts, message = _refusal_run(monkeypatch, tmp_path, item, {}, config)
+
+    assert "shared with everyone" in message
+    assert len(alerts) == 1
+    rows = _pending_rows(tmp_path)
+    assert len(rows) == 1 and rows[0]["exit_status"] == "failed" and "shared with everyone" in rows[0]["error_text"]
+
+
 def test_watermark_to_does_not_advance_when_publish_fails(monkeypatch, tmp_path):
     """No run actually landed if publish() failed, so the CollectorRuns audit row must report
     the watermark unchanged, not the highest id merely collected this pass."""

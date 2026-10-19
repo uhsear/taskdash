@@ -220,3 +220,9 @@ def test_export_writes_a_fake_tree_without_the_excluded_files(tmp_path, monkeypa
     written = sorted(p.relative_to(out).as_posix() for p in out.rglob("*") if p.is_file())
     assert written == sorted(kept)
     assert not (out / "dashboard_taskdash.json").exists()
+
+
+def test_help_example_install_dir_matches_install_guide():
+    # The task starts in -InstallDir, and home_dir() looks for the config there, so the
+    # example must not point at the venv folder.
+    assert "-InstallDir C:\\TaskDash\\venv" not in SCRIPT.read_text(encoding="utf-8")

@@ -6,7 +6,7 @@ With -Apply it registers the task, then reads it back and checks the logon type.
 
     .\install_task.ps1 -InstallDir C:\TaskDash
     .\install_task.ps1 -InstallDir C:\TaskDash -Apply
-    .\install_task.ps1 -InstallDir C:\TaskDash\venv -Python C:\TaskDash\venv\Scripts\taskdash.exe -Apply
+    .\install_task.ps1 -InstallDir C:\TaskDash -Python C:\TaskDash\venv\Scripts\taskdash.exe -Apply
 
 -InstallDir holds run_taskdash.cmd, and is also the working directory the task starts in.
 -Python names the interpreter for run_taskdash.cmd (it becomes TASKDASH_PYTHON), or a

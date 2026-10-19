@@ -1652,7 +1652,8 @@ MOBILE_WHY = {
 # unchanged (test_phase0_dashboard proves it byte for byte).
 DEFAULT_RETENTION_DAYS = 90  # retention.runs_days default, as in taskdash_publish
 NO_DAILY_EMAIL_TEXT = "There is no daily e-mail."
-DEFAULT_COLLECTOR_TASK_NAME = "Task Dash"
+# install_task.ps1's -TaskName default, so a new install needs no config key to find its own task.
+DEFAULT_COLLECTOR_TASK_NAME = "TaskDash Collector"
 DEFAULT_GRACE_MINUTES = 15  # taskdash_collect.DEFAULT_OVERDUE_GRACE_MINUTES (not imported, see Overdue help)
 
 

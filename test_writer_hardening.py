@@ -604,6 +604,14 @@ def test_run_publish_apply_refuses_a_table_missing_a_field(tmp_path, monkeypatch
     monkeypatch.setattr(publish, "get_tables", lambda item: {"TaskRuns": object()})
     monkeypatch.setattr(publish, "check_schema_drift",
                         lambda tables: (_ for _ in ()).throw(SystemExit("Schema drift -- TaskRuns: run_key")))
+    # The drift refusal is deferred, so the run reaches collection; keep it off the real host.
+    monkeypatch.setattr(publish, "collect_everything",
+                        lambda *a, **k: {"host_name": "H", "inventory": [], "runs": [],
+                                         "metrics": [], "log_summary": {}})
+    monkeypatch.setattr(publish, "report", lambda collected: None)
+    monkeypatch.setattr(publish, "maybe_send_alert", lambda *a: None)
+    monkeypatch.setattr(publish, "publish",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not write")))
     config = {"host_name_override": socket.gethostname()}
     with pytest.raises(SystemExit, match="Schema drift"):
         publish.run_publish(publish.parse_args(["--apply"]), config, tmp_path)

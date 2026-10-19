@@ -922,7 +922,7 @@ def _name_tokens(text: str, min_len: int = 3) -> List[str]:
 _OWN_SCRIPT_NAME_RE = re.compile(r"^taskdash_\w+\.py$", re.IGNORECASE)
 
 
-def is_taskdash_command(command_target_name: Any) -> bool:
+def is_taskdash_command(command_target_name: Any, command_target_arguments: Any = "") -> bool:
     """metrics_tab-03/wording-03/interactions-taskdash-own-logs-mined: the Task Dash inventory
     row must never mine its own logs, whatever folder it or its Logs directory sit in -- that's
     what left junk keys like "Added updated" and doubled 08:00 values in the metric table. This
@@ -931,7 +931,12 @@ def is_taskdash_command(command_target_name: Any) -> bool:
     name = normalize_text(command_target_name)
     if not name:
         return False
-    return name.lower() == "run_taskdash.cmd" or bool(_OWN_SCRIPT_NAME_RE.match(name))
+    if name.lower() == "run_taskdash.cmd" or _OWN_SCRIPT_NAME_RE.match(name):
+        return True
+    # A wheel install runs venv\Scripts\taskdash.exe "collect --apply"; other subcommands
+    # (preflight, ...) are not the collector's scheduled task.
+    arguments = normalize_text(command_target_arguments).split()
+    return name.lower() == "taskdash.exe" and bool(arguments) and arguments[0].lower() == "collect"
 
 
 def _log_belongs_to_task(filename: str, script_stem: str, name_tokens: Sequence[str]) -> bool:
@@ -965,7 +970,7 @@ def _plan_task_directories(
     for task in inventory_rows:
         task_full_name = task.get("task_full_name")
         override_dir = normalize_text(overrides.get(task_full_name)) if task_full_name else ""
-        if is_taskdash_command(task.get("command_target_name")):
+        if is_taskdash_command(task.get("command_target_name"), task.get("command_target_arguments")):
             # Never mine Task Dash's own logs -- independent of install folder, override or
             # log_dir. Keep the own_dir/own_logs_dir filter below too, as a second layer.
             directories = []
@@ -1142,7 +1147,7 @@ def _scan_task_logs(
     """
     task = plan["task"]
     task_full_name = task.get("task_full_name")
-    if is_taskdash_command(task.get("command_target_name")):
+    if is_taskdash_command(task.get("command_target_name"), task.get("command_target_arguments")):
         # task_detail-taskdash-no-log-found-false: never mined (no metric rows), but the Task
         # Detail card still needs a real "Latest log" -- its own newest per-run log
         # (taskdash_YYYYMMDD_HHMMSS.log), not bootstrap.log and not a monitored task's log.

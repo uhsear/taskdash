@@ -398,6 +398,16 @@ def check_scale(ctx: Context) -> Result:
     return OK, f"{len(monitored)} task(s) monitored, none repeating more often than hourly (tested scale)"
 
 
+def check_health_check(ctx: Context) -> Result:
+    # Print only set / not set: the address carries a secret ping ID.
+    if normalize_text((ctx.config or {}).get("alerting", {}).get("healthcheck_url")):
+        return OK, "alerting.healthcheck_url is set"
+    return WARN, ("WARNING: alerting.healthcheck_url is not set. If the collector never starts, such as "
+                  "after a password expires or someone disables the task, nothing tells you. Set it to the "
+                  "ping address of an outside monitor, such as a Healthchecks.io check. See "
+                  "'Watch for a silent collector' in docs/CONFIGURE.md.")
+
+
 CHECKS: Sequence[Tuple[str, bool, Callable[[Context], Result]]] = (
     # (name, needs network, function); check_config runs first, outside this list.
     ("credentials", True, check_credentials),
@@ -412,6 +422,7 @@ CHECKS: Sequence[Tuple[str, bool, Callable[[Context], Result]]] = (
     ("collector logon type", False, check_logon_type),
     ("collector account", False, check_admin_account),
     ("tested scale", False, check_scale),
+    ("health check", False, check_health_check),
 )
 
 

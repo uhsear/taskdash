@@ -181,10 +181,27 @@ function Get-XmlList {
         if ($_.InnerText) { $_.InnerText } else { $_.LocalName } }) -join ',')
 }
 
-$tasks = Get-ScheduledTask
+$problems = @()
+function Add-ReadProblem {
+    param([string]$Name, [string]$Message)
+    $script:problems += [pscustomobject]@{ name = $Name; message = $Message }
+}
+
+# One corrupt or ACL-denied definition (e.g. 0x80041321, "task image is corrupt") used to make
+# Get-ScheduledTask throw under Stop and end the whole inventory. Its per-task errors are
+# collected here and reported; every readable task still comes back.
+$tasks = Get-ScheduledTask -ErrorAction SilentlyContinue -ErrorVariable taskListErrors
+foreach ($err in @($taskListErrors)) {
+    $target = if ($err.TargetObject) { [string]$err.TargetObject } else { "(unnamed task)" }
+    Add-ReadProblem $target ([string]$err.Exception.Message)
+}
 $rows = foreach ($task in $tasks) {
     $info = $null
-    try { $info = Get-ScheduledTaskInfo -TaskName $task.TaskName -TaskPath $task.TaskPath } catch { }
+    try { $info = Get-ScheduledTaskInfo -TaskName $task.TaskName -TaskPath $task.TaskPath } catch {
+        Add-ReadProblem "$($task.TaskPath)$($task.TaskName)" "Get-ScheduledTaskInfo failed, so the task is left out: $($_.Exception.Message)"
+        # Skipped, not listed with blank run fields: a failing task would read as never run.
+        continue
+    }
 
     $actionCount = 0
     $primaryExecute = ""
@@ -244,7 +261,10 @@ $rows = foreach ($task in $tasks) {
                 $xml = [xml](Export-ScheduledTask -TaskName $task.TaskName -TaskPath $task.TaskPath)
                 $xmlTriggers = @($xml.DocumentElement.SelectSingleNode("*[local-name()='Triggers']").ChildNodes |
                     Where-Object { $_.NodeType -eq 'Element' })
-            } catch { $xmlTriggers = @() }
+            } catch {
+                $xmlTriggers = @()
+                Add-ReadProblem "$($task.TaskPath)$($task.TaskName)" "Export-ScheduledTask failed, so monthly trigger details are blank: $($_.Exception.Message)"
+            }
         }
         $triggerIndex = 0
         $triggerDetails = @($triggerList | ForEach-Object {
@@ -306,7 +326,7 @@ $rows = foreach ($task in $tasks) {
     }
 }
 
-$rows | ConvertTo-Json -Depth 6 -Compress
+[pscustomobject]@{ tasks = @($rows); errors = @($problems) } | ConvertTo-Json -Depth 6 -Compress
 """
 
 
@@ -428,12 +448,50 @@ $rows = foreach ($event in $events) {
     }
 }
 
-$rows | ConvertTo-Json -Depth 6 -Compress
+if ($MinRecordId -gt 0) {
+    # The oldest surviving record rides in the same call as one extra row (no second process), so
+    # the caller can tell a wrapped or cleared log from a quiet one. See event_gap_warning.
+    # A failure here only loses the gap check, so it must not fail the read that already succeeded.
+    $oldest = $null
+    try { $oldest = Get-WinEvent -LogName $LogName -MaxEvents 1 -Oldest -ErrorAction Stop } catch { $oldest = $null }
+    $marker = [pscustomobject]@{ oldest_record_id = if ($oldest) { [int64]$oldest.RecordId } else { $null } }
+    @($rows | Where-Object { $null -ne $_ }) + $marker | ConvertTo-Json -Depth 6 -Compress
+} else {
+    $rows | ConvertTo-Json -Depth 6 -Compress
+}
 """
 
 
+# "name: message" for each task the last collect_tasks call could not fully read. Module state, so
+# collect_tasks keeps returning a plain task list for its callers; collect_everything clears it first.
+unreadable_tasks: List[str] = []
+
+
 def collect_tasks(timeout_seconds: int = 180) -> List[Dict[str, Any]]:
-    return run_powershell_json(POWERSHELL_TASK_QUERY, timeout_seconds)
+    rows = run_powershell_json(POWERSHELL_TASK_QUERY, timeout_seconds)
+    payload = rows[0] if rows else {}
+    errors = [e for e in payload.get("errors") or [] if isinstance(e, dict)]
+    tasks = [t for t in payload.get("tasks") or [] if isinstance(t, dict)]
+    unreadable_tasks.extend(
+        f"{normalize_text(e.get('name'))}: {normalize_text(e.get('message'))}" for e in errors)
+    if errors and not tasks:
+        # SilentlyContinue turns a failed listing (service stopped, no access to the root) into
+        # errors and zero tasks. Carrying on would publish an empty inventory and mail a false
+        # "recovered", so this stays the loud failure it was before per-task errors were tolerated.
+        raise SystemExit(
+            f"Cannot list scheduled tasks: {'; '.join(unreadable_tasks[-len(errors):])}. Check that "
+            f"the Task Scheduler service is running and that the task account can read the task "
+            f"folders, then run again.")
+    if errors:
+        emit(f"WARNING: {len(errors)} scheduled task problem(s); the readable tasks are still "
+             f"collected: {'; '.join(unreadable_tasks[-len(errors):])}. Repair or re-create the "
+             f"task, or give the task account read access to it.")
+    return tasks
+
+
+class EventLogDisabled(SystemExit):
+    """A SystemExit the publisher can tell apart, so a disabled log defers its exit to the end
+    of the run instead of discarding the task inventory and the alerts."""
 
 
 def check_event_log_health(
@@ -451,7 +509,7 @@ def check_event_log_health(
             f"Run this collector elevated, or confirm the channel exists on this host."
         )
     if not info.get("is_enabled", False):
-        raise SystemExit(
+        raise EventLogDisabled(
             f"Event log '{log_name}' is disabled, so run history cannot be collected. Enable "
             f"it with: wevtutil sl \"{log_name}\" /e:true (run elevated), then retry."
         )
@@ -466,6 +524,11 @@ def _event_id_csv(event_ids: Tuple[int, ...]) -> str:
     return ",".join(str(eid) for eid in event_ids)
 
 
+# Oldest record id the last collect_run_events call saw (incremental reads only); module state so
+# the function keeps returning a plain event list, like unreadable_tasks.
+oldest_record_id: Optional[int] = None
+
+
 def collect_run_events(days_back: int, max_events: int, timeout_seconds: int = 180,
                        min_record_id: int = 0) -> List[Dict[str, Any]]:
     """Fetch run events. With min_record_id > 0 only newer records are read (incremental)."""
@@ -478,7 +541,25 @@ def collect_run_events(days_back: int, max_events: int, timeout_seconds: int = 1
         .replace("__EVENT_ID_XPATH__", _event_id_xpath_clause(HISTORY_EVENT_IDS))
         .replace("__EVENT_ID_CSV__", _event_id_csv(HISTORY_EVENT_IDS))
     )
-    return run_powershell_json(script, timeout_seconds)
+    global oldest_record_id
+    oldest_record_id = None
+    rows = run_powershell_json(script, timeout_seconds)
+    for row in rows:
+        if "oldest_record_id" in row:
+            oldest_record_id = safe_int(row["oldest_record_id"])
+    return [row for row in rows if "oldest_record_id" not in row]
+
+
+def event_gap_warning(min_record_id: int, oldest: Optional[int]) -> str:
+    """Warning text when records between the newest one a run read and the oldest surviving one
+    are gone. min_record_id is that read mark, not the run watermark (see EVENT_READ_MARK_FILE)."""
+    if not min_record_id or oldest is None or oldest <= min_record_id + 1:
+        return ""
+    skipped = oldest - min_record_id - 1
+    return (f"{skipped} event record id(s) were skipped: the oldest record left in the "
+            f"Operational log is {oldest} but the last one read was {min_record_id}. The log "
+            f"wrapped or was cleared since TaskDash last read it. Raise the log size "
+            f"with the preflight event-log fix.")
 
 
 POWERSHELL_NEWEST_RECORD_QUERY = r"""

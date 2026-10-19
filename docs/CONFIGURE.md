@@ -387,6 +387,8 @@ To turn on alerts:
    `true`.
 4. Run `& $td preflight`. The `smtp` line must be `[ok]`. This check connects to the server and
    starts encryption. It does not sign in and it sends nothing. So it cannot find a wrong password.
+   To find one, run `& $td test-alert`, then `& $td test-alert --apply`. The second command sends
+   one test message to every address in `alerting.to`.
 5. Run `& $td collect --preview-alert`. TaskDash collects the tasks and writes
    `alert_preview_<time>.txt` in the log folder. The file holds the decision and the exact e-mail that the next
    hourly run would send. The preview sends nothing and changes no state.
@@ -394,6 +396,10 @@ To turn on alerts:
 If the password is missing, or the keyring cannot be read, TaskDash writes a `WARNING` line to the
 log. It turns off alerts for that run. The data still publishes. When an e-mail is sent, the log
 holds the line `Alert e-mailed to <addresses>`.
+
+If an alert is due and TaskDash cannot send it, the run fails. It publishes first, then exits with
+code 1, and it pings the health check with `/fail`. See
+[TROUBLESHOOTING.md](TROUBLESHOOTING.md). The run with nothing to send still exits 0.
 
 ### When TaskDash sends an e-mail
 
@@ -607,7 +613,7 @@ rejects a key of the wrong type.
 | Key | Type | Default | Meaning |
 |---|---|---|---|
 | `alerting.enabled` | boolean | `false` | Turns alert e-mails on or off. |
-| `alerting.to` | list of strings | empty | Addresses that receive alert e-mails. If the list is empty, TaskDash sends none and logs a warning. |
+| `alerting.to` | list of strings | empty | Addresses that receive alert e-mails. If the list is empty when an alert is due, TaskDash sends none, and the run fails with exit code 1. |
 | `alerting.mail_config_path` | string | empty | Path of an older mail settings file with an `email settings` object. TaskDash reads it only when the `smtp` object is empty. New installs use `smtp`. |
 | `alerting.healthcheck_url` | string | empty | Address of an outside monitor. TaskDash pings it around each hourly production run. |
 | `alerting.dashboard_url` | string | empty | Dashboard link placed in alert e-mails. If empty, TaskDash builds it from `arcgis.url` and `arcgis.dashboard_id`. |
@@ -629,7 +635,7 @@ rejects a key of the wrong type.
 | `scheduler.include_disabled` | boolean | `true` | Keep disabled tasks in the inventory. |
 | `scheduler.exclude_command_target_types` | list of strings | empty list | Skip tasks that run a script of a listed type, such as `VBScript`. Use the type names in the table of "Choose which tasks to monitor", not file extensions. |
 | `scheduler.interactive_required_pattern` | string or `false` | `\ArcGIS\Pro\bin\Python` | Text, not a regex, that marks a program path as needing a signed-in session, such as ArcGIS Pro Python under a Single Use licence. TaskDash adds a settings note to a matching task that does not use the Interactive logon type. A script that TaskDash can read and that does not import arcpy gets no note. An empty value keeps the default. `false` turns the check off. |
-| `scheduler.collector_task_name` | string | `Task Dash` | Full name of the task that runs the collector. It must match the `-TaskName` of `install_task.ps1`. The example config sets `TaskDash Collector`, which is the installer's default. Keep that value. |
+| `scheduler.collector_task_name` | string | `TaskDash Collector` | Full name of the task that runs the collector. It must match the `-TaskName` of `install_task.ps1`. The default is the installer's default task name. Set this key only if you registered the task under another name. |
 | `scheduler.collector_interval_minutes` | number | `60` | Minutes between collector runs. The dashboard calls the collector late after 1.5 intervals and down after 3. It must be above 0. |
 | `scheduler.overdue_grace_minutes` | number | `15` | Minutes a task may run late before it is overdue. |
 
@@ -768,6 +774,18 @@ the collector run table.
 |---|---|---|
 | `--offline` | off | Print only the local line. It never signs in and works without a config. |
 | `--target` | `prod` | Which service to read: `prod` or `test`. |
+| `--config` | `TaskDash.config.json` in the TaskDash folder | Path of the config file. |
+
+### `taskdash test-alert`
+
+This command checks the alert e-mail path. Without `--apply`, it prints the recipients, the server
+and the subject of the test message, and it sends nothing. With `--apply`, it sends one short test
+message the way the hourly run sends alerts. It exits 0 when the server accepts the message, and 1
+with the reason when it does not. It never prints the mail password.
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--apply` | off | Send the test message to every address in `alerting.to`. |
 | `--config` | `TaskDash.config.json` in the TaskDash folder | Path of the config file. |
 
 ### `taskdash demo`
