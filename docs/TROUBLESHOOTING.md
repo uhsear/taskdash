@@ -92,6 +92,18 @@ with exit code 2.
 **Fix.** Read the error line. Run `taskdash <command> --help` to see the flags of that command.
 The reference part of [CONFIGURE.md](CONFIGURE.md) lists the flags.
 
+### A log line was withheld
+
+> log line withheld: secret scrubbing failed
+
+**Cause.** TaskDash removes secrets from every line before it writes it to its own log. The
+scrubber raised an error on one line, so TaskDash wrote this text instead of the line. It never
+writes a line that it could not scrub. The run continues.
+
+**Fix.** If the text repeats, check the rules files for a recent change to `secret_words`, then
+re-run. If it still repeats, send the time of the line to the maintainer. Do not send the task's
+command line.
+
 ## Sign-in and config
 
 These messages come from reading `TaskDash.config.json` and from signing in to ArcGIS Online. Every
@@ -190,6 +202,7 @@ file and the entry. `<problem>` says what is wrong. These problems are the usual
 - A section name is unknown. Start the name of a note with `_`.
 - An entry has no `order` number, or two entries use the same `order`.
 - A `cause_text` entry is missing for a cause that a rule can produce.
+- A `secret_words` entry is empty, or the section is not a list of words.
 
 **Fix.** Do what the `Fix:` part of the message says. Paths in `rules.profiles` are relative to the
 install folder, the folder that TaskDash starts in.
@@ -318,6 +331,18 @@ case on the first run after an upgrade, it skips the check.
 
 **Fix.** Raise the log size so it holds more than the longest gap between runs. Run preflight and
 apply its event-log fix. The `CollectorRuns` row holds the same warning in `error_text`.
+
+### Log folders were skipped
+
+> WARNING: skipped `<n>` log folder(s) outside metrics.log_roots or reached through a link. To read them, add their parent folder to metrics.log_roots.
+
+**Cause.** `metrics.log_roots` is set, and some task logs are outside every listed folder. A log that
+is reached through a symbolic link or a junction is skipped too. The affected tasks get no log
+metrics. The run itself is fine.
+
+**Fix.** Add the parent folder of those logs to `metrics.log_roots`. If a link points to the logs,
+list the link's target folder instead. See "Limit where TaskDash reads logs" in
+[CONFIGURE.md](CONFIGURE.md).
 
 ### PowerShell failed
 
@@ -539,6 +564,21 @@ view, with the organization or with named groups.
 While the service is public, `collect --apply` writes nothing to it. It still sends the
 failed-task alert, and it exits 1.
 
+### The view or dashboard is shared with everyone
+
+> The item `<id>` (arcgis.view_item_id) is shared with everyone. Set its sharing to your organization or to the viewers group in ArcGIS Online, then re-run.
+
+**Cause.** The view or the dashboard in the config is public. The key in the message,
+`arcgis.view_item_id`, `arcgis.test_view_item_id` or `arcgis.dashboard_id`, names the item. A public
+view lets anyone read your task data.
+
+**Fix.** In ArcGIS Online, set the sharing of the item to your organization or to the viewers group.
+Sharing with the organization or with groups is allowed.
+
+While the item is public, `collect --apply` writes nothing to it. It still sends the failed-task
+alert, and it exits 1. If TaskDash cannot find the item, it warns and skips this check. Correct the
+ID in the config, or share the item with the collector account.
+
 ### A view update failed
 
 > View `<what>`: update_definition failed: `<reply>`
@@ -704,6 +744,21 @@ not in the keyring of this Windows account.
 
 **Fix.** Complete the `smtp` object, and store the password as the account that runs the task. The
 steps are in [CONFIGURE.md](CONFIGURE.md). Run the command again.
+
+### The legacy mail file warning
+
+> WARNING: alerting.mail_config_path is deprecated and TLS is not verified for it, so the mail server's certificate is never checked. Move to the smtp block (smtp.host, smtp.from, smtp.user; store the password with 'python -m keyring set taskdash-smtp <smtp.user>'), then clear alerting.mail_config_path.
+
+> WARNING: the legacy mail file holds a login but turns TLS off, so the password crosses the network in plain text. Move to the smtp block with smtp.starttls set to true.
+
+**Cause.** `alerting.mail_config_path` is set and the `smtp` object is empty. TaskDash still sends
+alerts through the old file. It does not check the mail server's certificate for that file. The
+collector logs the first warning once per run, and `taskdash preflight` shows it on the `smtp` line.
+The second warning appears when the file also holds a login and turns TLS off.
+
+**Fix.** Fill the `smtp` object, store the password in the keyring, and clear
+`alerting.mail_config_path`. The steps are in [CONFIGURE.md](CONFIGURE.md). Run `taskdash preflight`
+and `taskdash test-alert --apply` to prove the new path. Alerts keep working until you move.
 
 ## Setup
 

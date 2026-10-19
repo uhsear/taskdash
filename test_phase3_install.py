@@ -130,13 +130,13 @@ def test_script_rejects_an_install_dir_without_the_wrapper(tmp_path):
 
 def test_workflow_has_the_expected_jobs_and_steps():
     text = WORKFLOW.read_text(encoding="utf-8")
-    for needle in ("workflow_dispatch:", "runs-on: windows-latest", "actions/checkout@v4",
-                   "actions/setup-python@v5", 'python-version: "3.11"', "python -m pip install build",
+    for needle in ("workflow_dispatch:", "runs-on: windows-latest", "actions/checkout@",
+                   "actions/setup-python@", 'python-version: "3.11"', 'python -m pip install "build==',
                    "python -m build --wheel", "python -m venv", "--version",
                    "preflight --offline --config", "New-LocalUser", "install_task.ps1",
                    "-LogonType Password", "-Apply", "Principal.LogonType",
                    "collect --fixture tests/fixtures/synthetic_app_host_01.json", "dashboard --offline",
-                   "pip install arcgis pytest", "python -m pytest", "tzutil /s",
+                   'pip install "arcgis>=2.4,<3" pytest', "python -m pytest", "tzutil /s",
                    "TASKDASH_EXPECT_UTC_OFFSET_S", "fetch-depth: 0", "gitleaks git --redact"):
         assert needle in text, needle
     assert text.count("runs-on: windows-latest") == 2
@@ -153,8 +153,9 @@ def test_release_workflow_builds_on_tags_and_passes_the_tag_only_by_environment(
                    "GH_TOKEN: ${{ github.token }}", "gh release create $env:TAG", "--prerelease"):
         assert needle in text, needle
     assert "secrets." not in text
-    # The tag is set once as TAG and never pasted into a script.
-    assert text.count("${{ github.ref_name }}") == 1
+    # The tag is set as TAG once per job that needs it (build, publish) and never pasted into a script.
+    assert text.count("${{ github.ref_name }}") == 2
+    assert text.count("TAG: ${{ github.ref_name }}") == 2
 
 def test_the_ci_leg_runs_in_the_zone_it_names():
     """A leg that silently stayed in UTC would prove nothing about time-zone handling. Only the CI

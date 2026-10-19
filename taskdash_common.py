@@ -124,13 +124,13 @@ _CONFIG_NUMBER_KEYS = {
     "upload.chunk_size", "retention.runs_days", "retention.metrics_days",
     "retention.changes_days", "logging.max_log_age_days", "smtp.port",
 }
-_CONFIG_BOOL_KEYS = {"alerting.enabled", "scheduler.exclude_microsoft_tasks",
+_CONFIG_BOOL_KEYS = {"alerting.enabled", "alerting.include_log_tail", "scheduler.exclude_microsoft_tasks",
                     "scheduler.include_disabled", "arcgis.allow_plaintext_password",
                     "smtp.starttls", "smtp.ssl", "smtp.allow_plaintext_auth",
                     "privacy.hide_command_lines", "privacy.hide_sample_lines",
                     "privacy.hide_accounts", "privacy.hide_paths"}
 _CONFIG_STRING_LIST_KEYS = {"alerting.to", "scheduler.exclude_command_target_types",
-                            "rules.profiles"}
+                            "rules.profiles", "metrics.log_roots"}
 _CONFIG_DICT_KEYS = {"metrics.log_directory_overrides", "metrics.tasks"}
 # alerting.maintenance_windows: list of {"task": regex str, "start": ISO str, "end": ISO str,
 # "reason": str}. Only the list-of-objects shape is validated here; a malformed entry (bad
@@ -329,21 +329,59 @@ def get_host_name(config: Dict[str, Any]) -> str:
 
 # --------------------------------------------------------------------------- logging
 
+class ScrubSecretsFilter(logging.Filter):
+    """Redact secrets in every record's final message and traceback before a handler writes it.
+
+    Messages and exception texts echo whatever a library or a task put in them: a request URL
+    with ?token=, a failing command line. The scrubber lives in taskdash_publish, which imports
+    this module, so it is imported at first use.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            from taskdash_publish import _scrub_secrets
+
+            record.msg, record.args = _scrub_secrets(record.getMessage()), None
+            if record.exc_info:
+                record.exc_text = logging.Formatter().formatException(record.exc_info)
+            if record.exc_text:
+                record.exc_text = _scrub_secrets(record.exc_text)
+            if record.stack_info:
+                record.stack_info = _scrub_secrets(record.stack_info)
+        except Exception:
+            # logging must never raise into the caller; an unscrubbed line must never be written.
+            record.msg, record.args = "log line withheld: secret scrubbing failed", None
+            record.exc_info = record.exc_text = record.stack_info = None
+        return True
+
+
 def setup_logging(log_dir: Path, prefix: str = "taskdash") -> Path:
     log_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     log_path = log_dir / f"{prefix}_{stamp}.log"
+    handler = logging.FileHandler(log_path, encoding="utf-8")
+    handler.addFilter(ScrubSecretsFilter())
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s - %(levelname)s - %(message)s",
-        handlers=[logging.FileHandler(log_path, encoding="utf-8")],
+        handlers=[handler],
         force=True,
     )
     return log_path
 
 
 def emit(message: str) -> None:
-    """Log and print. Under pythonw/Task Scheduler stdout is None, so the file is the record."""
+    """Log and print. Under pythonw/Task Scheduler stdout is None, so the file is the record.
+
+    The message is scrubbed here as well as in the log filter: run_taskdash.cmd keeps stdout in
+    Logs\\bootstrap.log, so a printed secret would still land in a file.
+    """
+    try:
+        from taskdash_publish import _scrub_secrets
+
+        message = _scrub_secrets(str(message))
+    except Exception:
+        message = "log line withheld: secret scrubbing failed"
     logging.info(message)
     try:
         print(message, flush=True)
@@ -589,6 +627,15 @@ def short_duration(seconds: float) -> str:
 
 # --------------------------------------------------------------------------- powershell
 
+def system32_exe(*parts: str) -> str:
+    """Absolute path under System32. A bare name is searched in the working folder and PATH,
+    so a planted copy would run as the task account."""
+    return str(Path(os.environ.get("SystemRoot") or r"C:\Windows", "System32", *parts))
+
+
+POWERSHELL_EXE = ("WindowsPowerShell", "v1.0", "powershell.exe")
+
+
 class PowerShellTimeout(SystemExit):
     """A SystemExit the event read can tell apart, so a slow log defers its exit to the end of
     the run (like EventLogDisabled) and halves the next first-run read."""
@@ -603,7 +650,7 @@ def run_powershell_json(script: str, timeout_seconds: int = DEFAULT_POWERSHELL_T
     try:
         completed = subprocess.run(
             [
-                "powershell.exe",
+                system32_exe(*POWERSHELL_EXE),
                 "-NoProfile",
                 "-NonInteractive",
                 "-ExecutionPolicy", "Bypass",
@@ -1097,6 +1144,20 @@ def _smtp_block_settings(smtp: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     return mail
 
 
+def legacy_mail_warnings(mail: Dict[str, Any]) -> List[str]:
+    """Deprecation advice for a mail dict read from alerting.mail_config_path. Never quotes a value."""
+    warnings = [
+        "alerting.mail_config_path is deprecated and TLS is not verified for it, so the mail server's "
+        "certificate is never checked. Move to the smtp block (smtp.host, smtp.from, smtp.user; store "
+        "the password with 'python -m keyring set taskdash-smtp <smtp.user>'), then clear "
+        "alerting.mail_config_path."]
+    if mail.get("smtp username") and mail.get("smtp password") and not mail.get("use tls", True):
+        warnings.append(
+            "the legacy mail file holds a login but turns TLS off, so the password crosses the "
+            "network in plain text. Move to the smtp block with smtp.starttls set to true.")
+    return warnings
+
+
 def load_mail_settings(config: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """Read SMTP settings from the organization's existing mail-service config.
 
@@ -1126,6 +1187,37 @@ def load_mail_settings(config: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     return mail
 
 
+def warn_legacy_mail(config: Dict[str, Any]) -> None:
+    """Log the legacy-mail deprecation, for the caller to run once per run.
+
+    load_mail_settings only runs when an alert is due, which is rare on an hourly schedule, so
+    the warning cannot live there. A file that cannot be read is reported by load_mail_settings.
+    """
+    if config.get("smtp"):
+        return
+    configured = normalize_text((config.get("alerting") or {}).get("mail_config_path"))
+    if not configured:
+        return
+    try:
+        mail = json.loads(Path(configured).read_text(encoding="utf-8-sig")).get("email settings", {})
+    except (OSError, ValueError, AttributeError):
+        mail = {}
+    for text in legacy_mail_warnings(mail):
+        emit(f"WARNING: {text}")
+
+
+_CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
+
+
+def strip_control_chars(text: str) -> str:
+    """Drop ASCII control characters except tab and newline.
+
+    Task paths, command lines and log lines are untrusted: an ESC sequence or a stray CR in an
+    alert would reach a mail client's terminal view or a header.
+    """
+    return _CONTROL_CHARS.sub("", text)
+
+
 def send_email(mail: Dict[str, Any], recipients: List[str], subject: str, body: str) -> bool:
     """Send a plain-text alert. Returns True on success; never raises into the caller.
 
@@ -1141,12 +1233,13 @@ def send_email(mail: Dict[str, Any], recipients: List[str], subject: str, body: 
     last_send_error = ""
     try:
         msg = EmailMessage()
-        msg["Subject"] = subject
+        # One line: a newline in a header would split it (or make EmailMessage refuse it).
+        msg["Subject"] = strip_control_chars(subject).replace("\n", " ")
         msg["From"] = mail["from address"]
         msg["To"] = ", ".join(recipients)
         if mail.get("reply to"):
             msg["Reply-To"] = mail["reply to"]
-        msg.set_content(body)
+        msg.set_content(strip_control_chars(body))
 
         # A default context verifies the server certificate and hostname; a bare starttls() does not.
         # Only the smtp block is strict. The legacy mail_config_path file keeps its old behaviour:

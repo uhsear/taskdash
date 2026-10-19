@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import functools
 import hashlib
 import json
 import logging
@@ -51,6 +52,7 @@ from taskdash_common import (
     apply_edits_chunked,
     atomic_write_json,
     chunked,
+    strip_control_chars,
     cleanup_old_logs,
     write_bootstrap_fail,
     max_field_value,
@@ -1511,6 +1513,27 @@ def check_source_sharing(item: Any, config: Dict[str, Any], target: str) -> None
     warn_shared_source(item)
 
 
+def check_release_sharing(gis: Any, config: Dict[str, Any], target: str) -> None:
+    """The configured view and dashboard must not be public: the view's Query capability would let
+    anyone read the hosted tables. Org and group sharing stay allowed. One content.get per item;
+    a missing item only warns, because the run's own preflight names a missing id."""
+    agol = config.get("arcgis", {})
+    keys = [view_key(target)] + (["dashboard_id"] if target == "prod" else [])
+    for key in keys:
+        item_id = normalize_text(agol.get(key))
+        if not item_id:
+            continue
+        found = gis.content.get(item_id)
+        if found is None:
+            emit(f"WARNING: arcgis.{key} {item_id} was not found or is not visible to this account, "
+                 f"so its sharing was not checked. Fix the id, or share the item with this account.")
+            continue
+        if getattr(found, "access", None) == "public":
+            raise SystemExit(f"The item {item_id} (arcgis.{key}) is shared with everyone. Set its "
+                             f"sharing to your organization or to the viewers group in ArcGIS "
+                             f"Online, then re-run.")
+
+
 def create_view(gis: Any, item: Any, config: Dict[str, Any], apply: bool,
                 target: str = "prod", folder: Optional[str] = None,
                 on_create: Optional[Callable[[Any], None]] = None) -> Optional[Any]:
@@ -1524,10 +1547,7 @@ def create_view(gis: Any, item: Any, config: Dict[str, Any], apply: bool,
     refuse_public_source(item)
     shared = item_sharing(item)
     refuse_public_source(item, shared)
-    org = bool(shared.get("org"))
-    groups = [g.id for g in shared.get("groups") or []]
     emit(f"Plan: view '{name}' of {item.id}, capabilities {VIEW_CAPABILITIES}.")
-    emit(f"Sharing copied from the service: org={org}, groups={groups or 'none'}.")
     emit("Fields hidden: " + ("; ".join(f"{t}: {', '.join(f)}" for t, f in hidden.items()) or "none"))
     if not apply:
         return None
@@ -1566,7 +1586,8 @@ def create_view(gis: Any, item: Any, config: Dict[str, Any], apply: bool,
                                f"{table_name} hidden fields")
 
     update_then_resend(update, view, lambda: view_tables)
-    share_item(view, org=org, groups=groups)
+    # Owner only: the service's org and group sharing is not copied. This call confirms it is private.
+    share_item(view)
     warn_shared_source(item)
     return view
 
@@ -1664,6 +1685,8 @@ def run_create_view(config: Dict[str, Any], args: argparse.Namespace) -> int:
         return 0
     emit(f"Created view '{view.title}' -> item id {view.id}")
     emit(f"Add this to the config: \"{key}\": \"{view.id}\", then rebuild the dashboard.")
+    emit("The view is owner only. To let people read it, share it with the viewers group in "
+         "ArcGIS Online.")
     require_no_anonymous_access(table_urls(item, view))
     return 0
 
@@ -3231,9 +3254,11 @@ def _run_publish(args: argparse.Namespace, config: Dict[str, Any], log_dir: Path
             # dropping gis/item skips every hosted-table write (the audit row goes to the
             # pending file), and the stashed error is re-raised after alerting.
             # check_source_sharing reads only item.access, loaded above, so it makes no request.
+            # check_release_sharing adds one content.get per configured view or dashboard.
             try:
                 check_schema_drift(tables)
                 check_source_sharing(item, config, args.target)
+                check_release_sharing(gis, config, args.target)
             except (Exception, SystemExit) as exc:
                 preflight_error = exc
                 gis = item = None
@@ -3623,17 +3648,36 @@ def partition_maintenance(
 # A secret value: quoted (an unclosed quote runs to the end, as after a cut) or one bare token.
 # (?!<redacted>) in the patterns below keeps a later pattern from re-redacting an earlier one's work.
 _SECRET_VALUE = r"""(?:"[^"]*(?:"\S*|\Z)|'[^']*(?:'\S*|\Z)|\S+)"""
-_SECRET_KV_PATTERN = re.compile(
-    r'(?i)(pass(?:word|wd|phrase)?|pwd|secret(?:[_-]?(?:access[_-]?)?key)?|token|api[_-]?key|accountkey'
-    r'|sharedaccesskey)'
-    r'["\']?\s*[:=]\s*(?!<redacted>)' + _SECRET_VALUE)
+_SECRET_KV_WORDS = (r'pass(?:word|wd|phrase)?|pwd|secret(?:[_-]?(?:access[_-]?)?key)?|token|api[_-]?key'
+                    r'|accountkey|sharedaccesskey')
+
+
+@functools.lru_cache(maxsize=4)
+def _secret_kv_pattern(extra_words: Tuple[str, ...]) -> Any:
+    """The key=value pattern: the English words above plus the rules' secret_words."""
+    words = "|".join([_SECRET_KV_WORDS, *(re.escape(word) for word in extra_words)])
+    return re.compile(r'(?i)(' + words + r')["\']?\s*[:=]\s*(?!<redacted>)' + _SECRET_VALUE)
+
+
 # A space-separated command-line flag ('-Password x', '--db-password x', '-pw x'): no = or : to
 # key on, so the flag itself is the anchor. The lookbehind keeps it off words that merely end in
-# the key. Only password/passwd take a prefix (-AdminPassword, -SqlPassword); a prefix on pw would
-# catch unrelated flags.
+# the key. Only password/passwd take any prefix (-AdminPassword, -SqlPassword); a prefix on pw would
+# catch unrelated flags. Secret and token take only the OAuth prefixes (--client-secret,
+# -AccessToken), so a flag such as --max-tokens stays.
 _SECRET_FLAG_PATTERN = re.compile(
-    r'(?i)(?<![\w-])(--?(?:[\w-]*(?:password|passwd)|pass|pwd|pw|secret|token|api[_-]?key))\s+'
+    r'(?i)(?<![\w-])(--?(?:[\w-]*(?:password|passwd)|(?:client|access|auth|refresh)[_-]?(?:secret|token)'
+    r'|pass|pwd|pw|secret|token|api[_-]?key))\s+'
     r'(?!<redacted>)' + _SECRET_VALUE)
+# Tokens with a fixed prefix, found anywhere in the text: GitHub (ghp_ gho_ ghu_ ghs_, github_pat_),
+# AWS access key IDs, Slack bot and user tokens, and JWTs. No generic high-entropy or long-hex rule:
+# it would also scrub the GUIDs, item IDs and hashes the dashboard shows.
+_TOKEN_PREFIX_PATTERN = re.compile(
+    r'(?<![A-Za-z0-9])(?:gh[pous]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}'
+    r'|AKIA[0-9A-Z]{16}(?![A-Za-z0-9])|xox[bp]-[A-Za-z0-9-]{10,}'
+    # A JWT may not start inside a [\w-] run: '-eyJ' * 16000 took 4 s with the shared lookbehind.
+    r'|(?<![\w-])eyJ[\w-]+\.eyJ[\w-]+\.[\w-]+)')
+# ?token=... in a URL: only the value goes, so the rest of the query string stays readable.
+_QUERY_TOKEN_PATTERN = re.compile(r'(?i)([?&][\w.-]*token=)(?!<redacted>)[^&\s"\']+')
 # sqlcmd/bcp/osql take the password as an upper-case -P and a space. Case-sensitive, so ssh's
 # lower-case -p port is left alone, and an all-digit value is skipped: scp, pscp and mysql take a
 # port as -P 22. ponytail: an all-digit password after -P is missed; add a sqlcmd context if one appears.
@@ -3729,6 +3773,8 @@ def _scrub_secrets(text: str) -> str:
     SAS signatures, ConvertTo-SecureString literals and scheme://user:pass@ URLs.
     The flag or key stays; only the value becomes <redacted>."""
     text = _URL_CREDENTIAL_PATTERN.sub(r"\1<redacted>@", text)
+    text = _TOKEN_PREFIX_PATTERN.sub("<redacted>", text)
+    text = _QUERY_TOKEN_PATTERN.sub(r"\1<redacted>", text)
     text = _BASIC_AUTH_PATTERN.sub("Authorization: Basic <redacted>", text)
     text = _BEARER_TOKEN_PATTERN.sub("Authorization: Bearer <redacted>", text)
     text = _SAS_SIGNATURE_PATTERN.sub(r"\1<redacted>", text)
@@ -3742,7 +3788,8 @@ def _scrub_secrets(text: str) -> str:
     text = _UPPER_P_PATTERN.sub(r"\1 <redacted>", text)
     text = _SLASH_PASSWORD_PATTERN.sub(r"\1:<redacted>", text)
     text = _SECRET_FLAG_PATTERN.sub(lambda m: f"{m.group(1)} <redacted>", text)
-    text = _SECRET_KV_PATTERN.sub(lambda m: f"{m.group(1)}=<redacted>", text)
+    text = _secret_kv_pattern(tuple(sorted(metrics.SECRET_WORDS))).sub(
+        lambda m: f"{m.group(1)}=<redacted>", text)
     return text
 
 
@@ -3750,26 +3797,18 @@ def tail_log_for_email(latest_log_path: str, max_lines: int = 15, max_bytes: int
     """Last ~15 lines (~2KB max) of a failing task's latest log, scrubbed of secrets.
 
     A read failure (missing file, permission, non-text) never breaks the alert -- returns "".
-    # ponytail: reads the last max_bytes*8 raw bytes before line-splitting rather than streaming
-    # backward line-by-line; generous enough for real task-server log lines, revisit if a log
-    # ever has lines longer than ~2KB each.
     """
     path = normalize_text(latest_log_path)
-    if not path:
+    if not path or not metrics.log_path_allowed(path):
         return ""
     try:
-        p = Path(path)
-        size = p.stat().st_size
-        read_size = min(size, max_bytes * 8)
-        with p.open("rb") as fh:
-            fh.seek(size - read_size)
-            data = fh.read()
-        text = data.decode("utf-8", errors="replace")
-        if read_size < size:
-            # The read began mid-line; that fragment can start inside a secret, past its flag.
-            text = text.partition("\n")[2]
+        # The metrics reader sniffs the encoding. A UTF-16LE log (PowerShell redirection) read as
+        # UTF-8 is full of NULs, and a NUL between the letters of "password" defeats every pattern.
+        # It also drops the partial first line a mid-file read starts in, which can begin inside
+        # a secret, past its flag.
+        text = "\n".join(metrics.read_last_lines(Path(path), max_lines)).replace("\x00", "")
         # Scrubbed before the cut: a cut can drop a flag and leave its value behind.
-        return _scrub_secrets("\n".join(text.splitlines()[-max_lines:]))[-max_bytes:]
+        return _scrub_secrets(text)[-max_bytes:]
     except OSError:
         return ""
 
@@ -3785,6 +3824,7 @@ def ping_healthcheck(config: Dict[str, Any], suffix: str) -> None:
     url = normalize_text(config.get("alerting", {}).get("healthcheck_url"))
     if not url:
         return
+    import urllib.parse
     import urllib.request
 
     target = url.rstrip("/") + suffix
@@ -3792,7 +3832,16 @@ def ping_healthcheck(config: Dict[str, Any], suffix: str) -> None:
         with urllib.request.urlopen(target, timeout=10):
             pass
     except Exception as exc:
-        emit(f"WARNING: healthcheck ping to {target} failed: {exc}")
+        # The path is the secret ping ID, and an error message can repeat it.
+        try:
+            parts = urllib.parse.urlsplit(target)
+            shown = f"{parts.scheme}://{parts.hostname}/<redacted>"
+            reason = str(exc).replace(target, shown)
+            if len(parts.path) > 1:
+                reason = reason.replace(parts.path, "<redacted>")
+        except ValueError:
+            shown, reason = "<healthcheck_url>", type(exc).__name__
+        emit(f"WARNING: healthcheck ping to {shown} failed: {reason}")
 
 
 def should_alert(previous: Dict[str, Any], current: List[str], now: datetime,
@@ -3987,11 +4036,12 @@ def maybe_send_alert(collected: Dict[str, Any], config: Dict[str, Any], log_dir:
     retries.
     """
     import taskdash_common
-    from taskdash_common import load_mail_settings, send_email
+    from taskdash_common import load_mail_settings, send_email, warn_legacy_mail
 
     alerting = config.get("alerting", {})
     if not alerting.get("enabled"):
         return False
+    warn_legacy_mail(config)
     recipients = [r for r in (alerting.get("to") or []) if normalize_text(r)]
 
     state_path = log_dir / "alert_state.json"
@@ -4140,8 +4190,9 @@ def _alert_message(collected: Dict[str, Any], config: Dict[str, Any], now: dt.da
         lines += ["", f"{len(others)} other task(s) need attention:", *(f"  {o}" for o in others)]
 
     task_by_name = {t.get("task_name"): t for t in inventory}
+    include_tail = config.get("alerting", {}).get("include_log_tail", True) is not False
     for key in current:
-        if not key.startswith("FAILED: "):
+        if not include_tail or not key.startswith("FAILED: "):
             continue
         task = task_by_name.get(key[len("FAILED: "):])
         tail = tail_log_for_email(task.get("latest_log_path")) if task else ""
@@ -4154,7 +4205,8 @@ def _alert_message(collected: Dict[str, Any], config: Dict[str, Any], now: dt.da
         lines += [details.get(k, k) for k in suppressed]
 
     lines += ["", f"Dashboard: {alert_dashboard_link(config)}", ""]
-    return subject, "\n".join(lines)
+    # Same cleaning as send_email, so --preview-alert shows the text that goes out.
+    return strip_control_chars(subject).replace("\n", " "), strip_control_chars("\n".join(lines))
 
 
 def alert_dashboard_link(config: Dict[str, Any]) -> str:
@@ -4229,5 +4281,27 @@ def preview_alert(collected: Dict[str, Any], config: Dict[str, Any], log_dir: Pa
     return path
 
 
+def _print_scrubbed_traceback(exc_type: Any, exc: Any, tb: Any) -> None:
+    import traceback
+    # The default hook prints the raw traceback, and run_taskdash.cmd keeps stderr in
+    # Logs\bootstrap_FAIL_<id>.log. A library error can echo a request URL with ?token= in it.
+    try:
+        text = _scrub_secrets("".join(traceback.format_exception(exc_type, exc, tb)))
+    except Exception:
+        text = "log line withheld: secret scrubbing failed\n"
+    print(text, file=sys.stderr, end="")
+
+
+def _run_cli() -> int:
+    sys.excepthook = _print_scrubbed_traceback
+    try:
+        return main()
+    except SystemExit as exc:
+        # The interpreter prints a str exit code to stderr as it is.
+        if isinstance(exc.code, str):
+            raise SystemExit(_scrub_secrets(exc.code)) from None
+        raise
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(_run_cli())

@@ -59,9 +59,9 @@ tested yet. [docs/INTRODUCTION.md](docs/INTRODUCTION.md) lists the details and a
 
 ## Issues
 
-This repository is private. Readers are invited users. To report a problem or ask for a change,
-open an issue in the GitHub repository you downloaded TaskDash from. Users with access can open
-issues. For a vulnerability, do not open an issue. Follow [SECURITY.md](SECURITY.md).
+Release files are public at <https://github.com/uhsear/taskdash-releases/releases/latest>. To report
+a problem or ask for a change, contact the repository owner through GitHub. For a vulnerability,
+do not open an issue. Follow [SECURITY.md](SECURITY.md).
 
 Follow this rule for every report. Before you send a message or a log line, remove host names,
 account names, paths and other values that identify your site. Never send a captured fixture file

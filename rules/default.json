@@ -308,6 +308,16 @@
       "token": "skipped"
     }
   ],
+  "secret_words": [
+    "passwort",
+    "kennwort",
+    "mot_de_passe",
+    "motdepasse",
+    "contrasena",
+    "contraseña",
+    "senha",
+    "wachtwoord"
+  ],
   "display_acronyms": [
     "db",
     "dbf",

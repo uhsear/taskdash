@@ -159,6 +159,7 @@ def send_test_alert(argv: Sequence[str]) -> int:
         raise SystemExit("alerting.to is empty, so the test message has no recipient. "
                          "Add at least one address to alerting.to in the config.")
     mail = common.load_mail_settings(config)
+    common.warn_legacy_mail(config)
     if not mail:
         raise SystemExit("There are no usable mail settings, so the test message cannot be sent. "
                          "Fix the smtp block in the config (host, from, user and the stored "

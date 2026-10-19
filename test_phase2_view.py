@@ -139,7 +139,7 @@ def test_apply_creates_hides_resends_capabilities_and_never_shares_everyone(worl
                                                "latest_log_path", "definition_hash"]
     assert hidden[publish.TABLE_RUNS] == ["user_context"]
     assert hidden[publish.TABLE_METRICS] == ["sample_line"]
-    assert world.view.shares == [("level", "ORG"), ("group", "grp1")]
+    assert world.view.shares == []
 
 
 def test_apply_puts_the_view_in_the_folder_and_reports_it_before_the_table_wait(world, monkeypatch):
@@ -191,11 +191,10 @@ def test_existing_view_search_uses_the_source_owner(world):
     assert queries and "owner:service_owner" in queries[0]
 
 
-def test_failed_group_share_stops_the_run_and_names_the_group(world, monkeypatch):
-    monkeypatch.setattr(publish.time, "sleep", lambda s: None)
-    world.view.refused = True
-    with pytest.raises(SystemExit, match="grp1"):
-        publish.create_view(world.gis, world.item, {}, apply=True)
+def test_the_source_sharing_is_not_copied_onto_the_new_view(world):
+    world.view.refused = True  # any group share would fail, so none may be tried
+    publish.create_view(world.gis, world.item, {}, apply=True)
+    assert world.view.shares == []
 
 
 def test_existing_view_message_names_the_target_key_and_says_delete(world):

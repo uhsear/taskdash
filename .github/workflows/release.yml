@@ -1,6 +1,12 @@
-# Builds the wheel for a v* tag and attaches it, with its SHA-256, to a GitHub Release.
+# Builds the wheel for a v* tag and attaches it to a GitHub Release. The release also carries a
+# hash-pinned requirements.lock, a CycloneDX SBOM, and SHA256SUMS.txt that lists all three.
 # The repository is private, so the release is visible only to people with access to it.
+# After the private release exists, the maintainer copies the release files to the public
+# repository uhsear/taskdash-releases by hand. This workflow does not do the copy: it would need
+# a token for the other repository, and none is stored here.
 # A tag with a hyphen (v1.0.0-rc1) makes a pre-release.
+# Only the publish job can write. It runs after the full test suite and the build both pass.
+# Only the sign job can request an OIDC token. It signs the wheel and SHA256SUMS.txt with Sigstore.
 name: release
 
 on:
@@ -8,30 +14,49 @@ on:
     tags: ["v*"]
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  release:
+  test:
     runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+
+      # The tests import arcgis but replace its network calls with fakes.
+      - name: Install test dependencies
+        run: python -m pip install "arcgis>=2.4,<3" pytest
+
+      - name: Run the full suite
+        run: python -m pytest -q -p no:cacheprovider
+
+  build:
+    needs: test
+    runs-on: windows-latest
+    # This job installs unlocked build tools, so it has no OIDC token: the sign job below does.
     env:
       # The tag reaches the scripts only through the environment, never pasted into a command.
       TAG: ${{ github.ref_name }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.11"
 
-      - name: Build the wheel and its checksum
+      - name: Build the wheel
         shell: powershell
         run: |
-          python -m pip install build
+          python -m pip install "build==1.6.1"
           python -m build --wheel
-          $wheel = Get-ChildItem dist\*.whl | Select-Object -First 1
-          $hash = (Get-FileHash $wheel.FullName -Algorithm SHA256).Hash.ToLower()
-          # LF, not the CRLF Out-File writes: `sha256sum -c` on Linux reads the CR into the file name.
-          [IO.File]::WriteAllText("$PWD\dist\SHA256SUMS.txt", "$hash  $($wheel.Name)`n")
+          if ($LASTEXITCODE) { throw "python -m build exited $LASTEXITCODE. Read the build output above." }
 
       - name: Check that the tag matches the package version
         shell: powershell
@@ -40,6 +65,106 @@ jobs:
           $base = $env:TAG.TrimStart("v").Split("-")[0]
           if ($version -ne $base) { throw "Tag $env:TAG does not match package version $version. Change TASKDASH_VERSION or the tag." }
 
+      # The lock covers the runtime dependencies and the smtp extra for Python 3.11 on Windows.
+      # pyproject.toml keeps its version ranges, because exact pins would fight ArcGIS Pro's arcgis.
+      - name: Lock the dependencies with hashes
+        shell: powershell
+        run: |
+          python -m pip install "pip-tools==7.6.2"
+          python -m piptools compile --generate-hashes --strip-extras --extra smtp --output-file dist/requirements.lock pyproject.toml
+          if ($LASTEXITCODE) { throw "pip-compile exited $LASTEXITCODE. A dependency may have no Windows 3.11 wheel; read the output above." }
+
+      # The tool runs outside the venv, so the SBOM lists the installed wheel and its locked
+      # packages, not the SBOM tool.
+      - name: Write the SBOM
+        shell: powershell
+        run: |
+          $wheel = Get-ChildItem dist\*.whl | Select-Object -First 1
+          $version = $wheel.Name.Split("-")[1]
+          python -m venv sbom-venv
+          sbom-venv\Scripts\python.exe -m pip install --require-hashes -r dist\requirements.lock
+          if ($LASTEXITCODE) { throw "pip install of the lock exited $LASTEXITCODE. Read the output above." }
+          sbom-venv\Scripts\python.exe -m pip install --no-deps $wheel.FullName
+          if ($LASTEXITCODE) { throw "pip install of the wheel exited $LASTEXITCODE. Read the output above." }
+          python -m pip install "cyclonedx-bom==7.5.0"
+          cyclonedx-py environment sbom-venv\Scripts\python.exe --of JSON --output-file "dist\taskdash-$version.cdx.json"
+          if ($LASTEXITCODE) { throw "cyclonedx-py exited $LASTEXITCODE. Read the output above." }
+
+      - name: Write the checksums
+        shell: powershell
+        run: |
+          $lines = Get-ChildItem dist\*.whl, dist\requirements.lock, dist\*.cdx.json | ForEach-Object {
+            "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower())  $($_.Name)"
+          }
+          # LF, not the CRLF Out-File writes: `sha256sum -c` on Linux reads the CR into the file name.
+          [IO.File]::WriteAllText("$PWD\dist\SHA256SUMS.txt", ($lines -join "`n") + "`n")
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-files
+          path: |
+            dist/*.whl
+            dist/requirements.lock
+            dist/*.cdx.json
+            dist/SHA256SUMS.txt
+          if-no-files-found: error
+
+  # Keyless Sigstore signing with the job's GitHub identity, because artifact attestations
+  # need a public repository or GitHub Enterprise Cloud. Each file gets <file>.sigstore.json.
+  # This is the only job with an OIDC token. It runs no code from the repository and installs
+  # one tool, so no build tool can request the token. sigstore's own dependencies are not
+  # hash-locked: ponytail: add a hash-locked sign-requirements.txt if the signer's supply chain matters.
+  sign:
+    needs: build
+    runs-on: windows-latest
+    # A job-level permissions block replaces the top-level one, so contents: read repeats here.
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-files
+          path: dist
+
+      - name: Sign the wheel and its checksum
+        shell: powershell
+        run: |
+          python -m pip install "sigstore==4.5.0"
+          $wheel = Get-ChildItem dist\*.whl | Select-Object -First 1
+          python -m sigstore sign $wheel.FullName "$PWD\dist\SHA256SUMS.txt"
+          if ($LASTEXITCODE) { throw "sigstore sign exited $LASTEXITCODE. Re-run the workflow, because the Sigstore services may have failed." }
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-signatures
+          path: dist/*.sigstore.json
+          if-no-files-found: error
+
+  publish:
+    needs: [test, build, sign]
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ github.ref_name }}
+      # This job has no checkout, so gh needs the repository named.
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-files
+          path: dist
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-signatures
+          path: dist
+
       - name: Create the release
         shell: powershell
         env:
@@ -47,5 +172,5 @@ jobs:
         run: |
           $flags = @()
           if ($env:TAG.Contains("-")) { $flags += "--prerelease" }
-          gh release create $env:TAG dist\taskdash-*.whl dist\SHA256SUMS.txt --title "TaskDash $env:TAG" --generate-notes @flags
+          gh release create $env:TAG dist\taskdash-*.whl dist\requirements.lock dist\*.cdx.json dist\SHA256SUMS.txt dist\*.sigstore.json --title "TaskDash $env:TAG" --generate-notes @flags
           if ($LASTEXITCODE) { throw "gh release create exited $LASTEXITCODE." }

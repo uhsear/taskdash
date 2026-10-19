@@ -36,10 +36,12 @@ from taskdash_common import (
     connect_agol,
     emit,
     get_tables,
+    legacy_mail_warnings,
     load_config,
     load_mail_settings,
     normalize_text,
     run_powershell_json,
+    system32_exe,
 )
 from taskdash_dashboard import DEFAULT_COLLECTOR_TASK_NAME
 from taskdash_publish import (
@@ -133,7 +135,7 @@ def check_privileges(ctx: Context) -> Result:
 
 def read_log_state(log_name: str = EVENT_LOG_NAME) -> Tuple[bool, int]:
     """(enabled, max size in bytes) from the read-only `wevtutil gl`."""
-    done = subprocess.run(["wevtutil", "gl", log_name], capture_output=True, text=True,
+    done = subprocess.run([system32_exe("wevtutil.exe"), "gl", log_name], capture_output=True, text=True,
                           timeout=30, check=False)
     if done.returncode != 0:
         raise RuntimeError(f"wevtutil gl exited {done.returncode}: {done.stderr.strip()[:200]}")
@@ -213,7 +215,10 @@ def check_smtp(ctx: Context) -> Result:
         return FAIL, (f"cannot reach {mail['smtp server']}:{mail.get('smtp port', 587)}: "
                       f"{type(exc).__name__}: {exc}. Check smtp.host, smtp.port, the firewall and that "
                       "the relay's certificate is trusted.")
-    return OK, f"{mail['smtp server']} answered EHLO (nothing sent, no login)"
+    answered = f"{mail['smtp server']} answered EHLO (nothing sent, no login)"
+    if not mail.get("strict tls"):
+        return WARN, "WARNING: " + " WARNING: ".join(legacy_mail_warnings(mail)) + f" ({answered})"
+    return OK, answered
 
 
 def check_service(ctx: Context) -> Result:
@@ -458,9 +463,10 @@ def run_enable_event_log(apply: bool, max_size_mb: Optional[int]) -> int:
     emit(f"{EVENT_LOG_NAME}: enabled={str(enabled).lower()}, max size {current} bytes.")
     # Never shrink a log the owner already enlarged, unless they ask for a size.
     wanted = max_size_mb * 1024 * 1024 if max_size_mb else max(current, RECOMMENDED_LOG_MB * 1024 * 1024)
-    command = ["wevtutil", "sl", EVENT_LOG_NAME, "/e:true", f"/ms:{wanted}"]
+    args = ["sl", EVENT_LOG_NAME, "/e:true", f"/ms:{wanted}"]
+    command = [system32_exe("wevtutil.exe"), *args]
     if not apply:
-        emit("Check mode, nothing changed. Would run: " + " ".join(command))
+        emit("Check mode, nothing changed. Would run: " + " ".join(["wevtutil", *args]))
         emit(f"Run it from an elevated prompt with: {EVENT_LOG_FIX}")
         return 0
     done = subprocess.run(command, capture_output=True, text=True, timeout=30, check=False)

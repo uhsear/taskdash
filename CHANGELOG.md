@@ -16,11 +16,75 @@ All notable changes to TaskDash are listed here. The format follows
   the server and the subject, and sends nothing. With `--apply`, it sends one test message through
   the same send code as the hourly run, and exits 1 with the reason if that fails.
 
+- `alerting.include_log_tail` (default `true`) controls the log tail in the alert e-mail. Set it to
+  `false` to leave the tail out.
+- `secret_words` in a rules file adds key words, such as `Passwort` or `senha`, to the secret
+  scrubber. `rules/default.json` lists eight German, French, Spanish, Portuguese and Dutch words.
+
+### Security
+
+- Each release now lists `requirements.lock` (every dependency pinned with SHA-256 hashes, for
+  Python 3.11 64-bit on Windows) and a CycloneDX SBOM, `taskdash-<version>.cdx.json`. Both are in
+  `SHA256SUMS.txt`. INSTALL.md has an optional locked install that uses `--require-hashes`.
+  The version ranges in `pyproject.toml` do not change.
+- Task text that reaches dashboard list cards (descriptions, paths, command lines, result and log
+  text) is now HTML-escaped in the Arcade expressions, so `<` `>` `&` show as text. That includes
+  the task name and host name in list cards, which come through `{expression/f_*}`. The alert
+  e-mail drops control characters other than tab and newline, and its subject stays on one line.
+- Every `collect --apply` run now refuses to publish when the configured view or dashboard is
+  shared with everyone. The run still sends the failed-task alert, writes nothing and exits 1.
+  Organization and group sharing stay allowed. A view or dashboard that TaskDash cannot find only
+  warns.
+- `collect --create-view` now leaves the new view owner only. Before, it copied the organization and
+  group sharing of the service onto the view. It prints how to share the view with the viewers
+  group. `taskdash setup` is unchanged: it shares with its private group only.
+- `metrics.log_roots` (default empty) confines log reads. When it lists folders, TaskDash mines
+  and quotes in alert e-mails only logs that resolve inside them. It skips junctions and symbolic
+  links, and warns once per run with the number of skipped folders.
+- The secret scrubber now also hides values after `--client-secret`, `-ClientSecret`,
+  `--access-token`, `-AccessToken`, `--auth-token` and `--refresh-token`, `token=` in a web
+  address, and GitHub, Slack, AWS and JSON Web tokens wherever they appear.
+- TaskDash now scrubs every line and traceback it writes to its own log file. It also scrubs the
+  copy it prints, which `run_taskdash.cmd` keeps in `Logs\bootstrap.log`. A crash traceback and a
+  fatal error message on stderr, which `run_taskdash.cmd` keeps in `Logs\bootstrap_FAIL_<id>.log`,
+  are scrubbed the same way.
+- A failed health-check ping now logs only `scheme://host/<redacted>`. Before, it logged the whole
+  address, and the path is the secret ping ID.
+- The log tail in the alert e-mail now reads UTF-16 logs correctly. Before, a UTF-16 log came out
+  with NUL bytes between the letters, so no secret pattern matched.
+- TaskDash now starts `powershell.exe`, `wevtutil.exe` and `cmd.exe` by absolute path under
+  `%SystemRoot%\System32` (`C:\Windows` if unset). A planted copy in the working folder or PATH can
+  no longer run as the task account.
+- `SECURITY.md` now states response targets: acknowledgement within 7 days, an assessment or fix
+  plan within 30 days, and coordinated disclosure after a fix ships or 90 days after the report. The
+  targets are goals, not a service-level agreement.
+- The GitHub workflows are hardened. Every action is pinned to a full commit SHA on a Node 24
+  release, checkouts no longer keep the token, and the top-level permission is read-only. The
+  release workflow now runs the full test suite and builds with read access only. A separate publish
+  job holds the only write permission and needs both to pass, so a failing tag cannot publish. CI
+  pins `arcgis>=2.4,<3`, and the gitleaks download is checked against its published SHA-256.
+- Releases now carry Sigstore signatures. A separate sign job signs the wheel and `SHA256SUMS.txt`
+  with its GitHub identity and no stored key, and the release lists a `.sigstore.json` bundle for
+  each. Only the sign job has `id-token: write`, so the unlocked build tools never run where they
+  could request the token. The workflows also pin `build` to an exact version.
+  `docs/INSTALL.md` shows the optional verify command.
+  `SECURITY.md` notes that the public transparency log records the repository and workflow path.
+
+### Deprecated
+
+- `alerting.mail_config_path` is deprecated. TLS stays unverified for that file, so alerts keep
+  working, but `taskdash preflight` now warns on the `smtp` line and the collector logs one WARNING
+  per run with the steps to move to the `smtp` block. A separate warning appears when the file holds
+  a login and turns TLS off. Neither warning prints a value from the file.
+
 ### Changed
 
 - The default of `scheduler.collector_task_name` is now `TaskDash Collector`, the task name that
   `install_task.ps1` registers. Before, the default was `Task Dash`, so a new install had to set the
   key. An install that registered its task under another name must set the key to that name.
+
+- Release files are public at `uhsear/taskdash-releases`. INSTALL.md and README.md link to that
+  page and no longer say that you must ask for access.
 
 ### Fixed
 

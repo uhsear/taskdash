@@ -527,7 +527,10 @@ def route_fields_through_arcade(expression: str, text: str) -> Tuple[str, str]:
     if expression.count(ARCADE_ATTRIBUTES) != 1:
         raise SystemExit("A list template names a field, but its Arcade has no single "
                          "'attributes: {' block to carry it -- add the field to the expression.")
-    lines = "".join(f'    f_{f}: DefaultValue($datapoint["{f}"], ""),\n' for f in fields)
+    # The text is HTML. Replace chain as in FMT_HELPERS' esc(): "&" first so entities are not doubled.
+    lines = "".join(
+        f'    f_{f}: Replace(Replace(Replace(DefaultValue($datapoint["{f}"], ""), "&", "&amp;"), '
+        f'"<", "&lt;"), ">", "&gt;"),\n' for f in fields)
     expression = expression.replace(ARCADE_ATTRIBUTES, ARCADE_ATTRIBUTES + lines)
     return expression, BARE_FIELD_RE.sub(lambda m: "{expression/f_" + m.group(1) + "}", text)
 
@@ -613,6 +616,12 @@ FMT_HELPERS = (
     # Table cells are too narrow for the year: this drops it so the minute and AM/PM still fit
     # in an equal-width column (defect: column widths are not applied, see column()).
     'function fmtDateShort(v) { return IIf(IsEmpty(v), "--", Text(Date(Number(v)), "M/D h:mm A")); }\n'
+    # Arcade has no escape function. List text is HTML, and task paths, descriptions, command
+    # lines and log text can hold < > &. "&" goes first so the entities are not escaped twice.
+    # OPEN CHECK (needs a TEST render, not done): if a card with a task value "A&B" or "2>&1"
+    # shows "&amp;" or "&gt;", Arcade output is plain text here. Then remove esc() and the
+    # f_* Replace chain in route_fields_through_arcade().
+    'function esc(t) { return Replace(Replace(Replace(t, "&", "&amp;"), "<", "&lt;"), ">", "&gt;"); }\n'
     'function fmtN(v) { return IIf(IsEmpty(v), "--", Text(v, "#,##0")); }\n'
     'function plural(n, word) { var c = DefaultValue(n, 0); return Text(c, "#,##0") + " " + word + IIf(c == 1, "", "s"); }\n'
     # Seconds under a minute, then "M min S s", then "H h M min": "0.0 min" hid 1-3 s failures (D5).
@@ -727,18 +736,18 @@ DETAIL_VARS = (
     'var logName = DefaultValue($datapoint["latest_log_name"], "");\n'
     'var logMins = minsFromNow($datapoint["latest_log_time_utc"]);\n'
     'var ratio = $datapoint["duration_ratio"];\n'
-    'var detail = DefaultValue($datapoint["schedule_detail"], "");\n'
-    'var runAs = DefaultValue($datapoint["run_as_user"], "");\n'
+    'var detail = esc(DefaultValue($datapoint["schedule_detail"], ""));\n'
+    'var runAs = esc(DefaultValue($datapoint["run_as_user"], ""));\n'
     'var lt = DefaultValue($datapoint["logon_type"], "--");\n'
     # The collector splits the command line, so the script's arguments ("--apply") arrive ready.
-    'var cmdPath = DefaultValue($datapoint["command_target_path"], "");\n'
-    'var args = DefaultValue($datapoint["command_target_arguments"], "");\n'
+    'var cmdPath = esc(DefaultValue($datapoint["command_target_path"], ""));\n'
+    'var args = esc(DefaultValue($datapoint["command_target_arguments"], ""));\n'
     # Read once here so detail_list_expression can blank them when privacy.hide_paths hides them.
-    'var workDir = DefaultValue($datapoint["command_target_working_directory"], "");\n'
-    'var logPath = DefaultValue($datapoint["latest_log_path"], "");\n'
+    'var workDir = esc(DefaultValue($datapoint["command_target_working_directory"], ""));\n'
+    'var logPath = esc(DefaultValue($datapoint["latest_log_path"], ""));\n'
     # settings_detail is collected and stored but shown nowhere (critic-02): an acknowledged
     # risky setting (Config Notes filters it out once acknowledged) was otherwise invisible.
-    'var settingsDetail = DefaultValue($datapoint["settings_detail"], "");\n'
+    'var settingsDetail = esc(DefaultValue($datapoint["settings_detail"], ""));\n'
 )
 
 # LogonType enum -> plain words. The raw token stays visible in brackets for anyone checking it
@@ -767,8 +776,8 @@ def detail_list_expression(hidden: Sequence[str] = ()) -> str:
         '  selectionColor: "#00304d", selectionTextColor: "#ffffff",\n'
         '  attributes: {\n'
         '    statusText: statusText,\n'
-        '    whyText: IIf(kind == "", "", "Why: " + DefaultValue($datapoint["attention_reason"], "")),\n'
-        '    descText: DefaultValue($datapoint["description"], "No description recorded."),\n'
+        '    whyText: IIf(kind == "", "", "Why: " + esc(DefaultValue($datapoint["attention_reason"], ""))),\n'
+        '    descText: esc(DefaultValue($datapoint["description"], "No description recorded.")),\n'
         # The bucket word repeated the detail's own opening word on every task ("Daily | Daily
         # every day at..."); show the detail alone once it exists (task_detail-06).
         '    scheduleText: IIf(detail == "", DefaultValue($datapoint["schedule_bucket"], "--"), detail),\n'
@@ -783,16 +792,16 @@ def detail_list_expression(hidden: Sequence[str] = ()) -> str:
         # it -- no "a new run is in progress" suffix, which never went away once the new run
         # finished (task_detail-taskdash-always-in-progress). "took" now uses the same " | "
         # separator as the other branch below, not the stray ", took" that read as "successfully.,".
-        '    lastText: IIf(IsEmpty($datapoint["last_run_time"]), DefaultValue($datapoint["last_result_text"], "--"),'
+        '    lastText: IIf(IsEmpty($datapoint["last_run_time"]), esc(DefaultValue($datapoint["last_result_text"], "--")),'
         ' IIf(Find("Running now.", DefaultValue($datapoint["attention_reason"], "")) == 0,'
-        ' fmtDate($datapoint["last_run_time"]) + " | " + DefaultValue($datapoint["last_result_text"], "--")'
+        ' fmtDate($datapoint["last_run_time"]) + " | " + esc(DefaultValue($datapoint["last_result_text"], "--"))'
         ' + IIf(IsEmpty($datapoint["last_duration_seconds"]), "", " | took " + fmtDur($datapoint["last_duration_seconds"]))'
         # Task Dash's own row: the line above is the PREVIOUS finished run (see the comment
         # above), so say which run actually wrote this page (round7 item 10).
         ' + " | this page was written by the run at " + fmtDate($datapoint["collected_at_utc"]),'
         ' fmtDate($datapoint["last_run_time"]) + " | " + IIf(health == "Running"'
         ' || DefaultValue($datapoint["state"], "") == "Running", "in progress",'
-        ' DefaultValue($datapoint["last_result_text"], "--")'
+        ' esc(DefaultValue($datapoint["last_result_text"], "--"))'
         ' + " | " + IIf(IsEmpty($datapoint["last_duration_seconds"]), "duration not recorded",'
         ' "took " + fmtDur($datapoint["last_duration_seconds"]))))),\n'
         # The table's fallback (task_table_expression next_run_time cell) is repeated here: a
@@ -844,9 +853,11 @@ def detail_list_expression(hidden: Sequence[str] = ()) -> str:
         ' IIf(IsEmpty(logMins), "", "written " + fmtSpan(logMins) + " ago | ")'
         ' + "Error count not known (log could not be read)"))),\n'
         '    logPathText: logPath,\n'
-        # Dashboards list text is not HTML-injectable from Arcade, so "; " becomes a bullet run.
+        # The original build (93f811b) found that markup built in Arcade does not render as HTML,
+        # so "; " becomes a bullet run. Whether Dashboards also decodes "&amp;" from Arcade is unproven:
+        # see the esc() comment in FMT_HELPERS.
         f'    cfgLabel: IIf(cw == "", "", {_s(badge("ConfigWarning", "Setting notes") + " (not failures):")}),\n'
-        '    cfgText: IIf(cw == "", "", "• " + Replace(cw, "; ", " • ")),\n'
+        '    cfgText: IIf(cw == "", "", "• " + esc(Replace(cw, "; ", " • "))),\n'
         # Published but shown nowhere until now (critic-02): the settings that a Setting note
         # warns about were invisible even after the note was read and acknowledged.
         '    settingsText: IIf(settingsDetail == "", "--", settingsDetail)\n'
@@ -884,7 +895,7 @@ def failure_list_expression() -> str:
             '    startText: IIf(estStart, "ended about " + fmtDate($datapoint["end_time_utc"]),'
             ' fmtDate($datapoint["start_time_utc"])),\n'
             '    ageText: IIf(IsEmpty(ageMins), "", fmtSpan(Abs(ageMins)) + " ago"),\n'
-            '    resultText: DefaultValue($datapoint["result_text"], ""),\n'
+            '    resultText: esc(DefaultValue($datapoint["result_text"], "")),\n'
             # A null duration (4 prod rows, start_time_estimated=1) rendered a bare "--", the mark
             # for missing data everywhere else, while Task detail already said "duration not
             # recorded" for the same value (failures_trend-null-duration-bare-dash).
@@ -949,8 +960,8 @@ def changes_list_expression() -> str:
         f'var tier = {_decode("ck", tiers, _s(""))};\n'
         + palette_arcade()
         + f'var label = {_decode("ck", words, unknown_word)};\n' + STATUS_TEXT + (
-            f'var oldS = {_tidy_old_summary("old_summary")};\n'
-            f'var newS = {_tidy_old_summary("new_summary")};\n'
+            f'var oldS = esc({_tidy_old_summary("old_summary")});\n'
+            f'var newS = esc({_tidy_old_summary("new_summary")});\n'
             'return {\n'
             '  textColor: "#4c4c4c", backgroundColor: bg, separatorColor: "#D6D6D6",\n'
             '  selectionColor: "#00304d", selectionTextColor: "#ffffff",\n'
@@ -972,13 +983,13 @@ def changes_list_expression() -> str:
 
 def config_notes_expression() -> str:
     # No per-row label: every row of this list is a setting note, and the title says so (X9).
-    return (
+    return FMT_HELPERS + (
         'var cw = DefaultValue($datapoint["config_warnings"], "");\n'
         'return {\n'
         f'  textColor: {_s(fg("ConfigWarning"))}, separatorColor: "#D6D6D6",\n'
         '  selectionColor: "#00304d", selectionTextColor: "#ffffff",\n'
         '  attributes: {\n'
-        '    noteText: IIf(cw == "", "No setting note.", "• " + Replace(cw, "; ", " • "))\n'
+        '    noteText: IIf(cw == "", "No setting note.", "• " + esc(Replace(cw, "; ", " • ")))\n'
         '  }\n'
         '};\n'
     )
@@ -996,7 +1007,7 @@ def mobile_attention_expression() -> str:
         'var reasonText = "";\n'
         'if (kind != "" && why != "") {\n'
         '  var reasons = Split(why, "; ");\n'
-        '  reasonText = shortText(reasons[0], 90);\n'
+        '  reasonText = esc(shortText(reasons[0], 90));\n'
         '}\n'
         'if (reasonText == "" && DefaultValue($datapoint["enabled"], 1) == 0) {\n'
         '  reasonText = "Disabled in Task Scheduler.";\n'
@@ -1019,8 +1030,8 @@ METRIC_LIST_EXPRESSION = FMT_HELPERS + (
     '  attributes: {\n'
     '    valueText: fmtMetric($datapoint["metric_key"], $datapoint["metric_value"]),\n'
     '    whenText: fmtDate($datapoint["observed_at_utc"]),\n'
-    '    metricText: DefaultValue($datapoint["display_name"], ""),\n'
-    '    logText: DefaultValue($datapoint["log_file_name"], "")\n'
+    '    metricText: esc(DefaultValue($datapoint["display_name"], "")),\n'
+    '    logText: esc(DefaultValue($datapoint["log_file_name"], ""))\n'
     '  }\n'
     '};\n'
 )

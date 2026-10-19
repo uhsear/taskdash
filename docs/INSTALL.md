@@ -46,14 +46,25 @@ saved sign-in, and TaskDash fails with "A specified logon session does not exist
   the local Administrators group on this computer. It needs a password, because the task stores it.
   This guide calls it `DOMAIN\svc-taskdash`. Use your own account name everywhere you see it. For a
   local account, write `COMPUTERNAME\name`, for example `TASKHOST1\svc-taskdash`.
-- **The TaskDash wheel:** from <https://github.com/uhsear/taskdash/releases/latest>, download the
+- **The TaskDash wheel:** from <https://github.com/uhsear/taskdash-releases/releases/latest>, download the
   file `taskdash-<version>-py3-none-any.whl` into your `Downloads` folder. Keep only one TaskDash
   wheel in that folder. If this computer cannot reach GitHub, download the file on another computer
-  and copy it into `Downloads`.
-  - The repository is private. If the page does not open for you, ask the TaskDash maintainer for
-    access or for the wheel.
-  - The release also lists `SHA256SUMS.txt`. To check the download, compare its value with the
+  and copy it into `Downloads`. The release page is public, so you need no GitHub account.
+  - The release also lists `SHA256SUMS.txt`. It has one line each for the wheel, `requirements.lock`
+    and the `.cdx.json` SBOM. To check the download, compare its value with the
     output of `Get-FileHash $env:USERPROFILE\Downloads\taskdash-*.whl`.
+  - Optional: check who built the files. The release lists a `.sigstore.json` bundle for the wheel
+    and for `SHA256SUMS.txt`. Download both bundles into `Downloads`. In a separate virtual
+    environment, install the checker with `python -m pip install sigstore`. Then run this command
+    for each file. Replace `<tag>` with the release tag, for example `v1.1.0`, and `<file>` with the
+    file name:
+
+    ```powershell
+    python -m sigstore verify github --cert-identity https://github.com/uhsear/taskdash/.github/workflows/release.yml@refs/tags/<tag> --bundle <file>.sigstore.json <file>
+    ```
+
+    The command prints `OK: <file>` when the release workflow of the TaskDash repository signed
+    the file. Any other output means you must not install the file. Ask the TaskDash maintainer.
 
 TaskDash is tested on one computer with 29 tasks that run at most hourly. Larger installs may work.
 
@@ -91,6 +102,28 @@ C:\TaskDash\venv\Scripts\python.exe -m pip install "$whl[smtp]"
 ```
 
 You can also add it later by running that line again. Alerts without a mail sign-in need no extra.
+
+### Optional: locked install
+
+The release also lists `requirements.lock`. It pins every package that TaskDash needs, with a
+SHA-256 hash for each file, including `keyring` from the `smtp` extra. Use it if you want pip to
+refuse any package that differs from the one the release was built with. The lock is for Python 3.11
+64-bit on Windows. On any other Python, use the normal install above.
+
+1. Download `requirements.lock` into `Downloads`.
+2. Compare its SHA-256 value with the line in `SHA256SUMS.txt`, as you did for the wheel.
+3. Check the wheel the same way. Do not install a file that does not match.
+4. Run these commands in place of the `pip install $whl` line:
+
+```powershell
+C:\TaskDash\venv\Scripts\python.exe -m pip install --require-hashes -r "$env:USERPROFILE\Downloads\requirements.lock"
+C:\TaskDash\venv\Scripts\python.exe -m pip install --no-deps $whl
+```
+
+The first command stops with an error if a downloaded file does not match its hash. The second
+command installs only the wheel, because the first command already installed its dependencies.
+The release also lists a CycloneDX software bill of materials, `taskdash-<version>.cdx.json`. It
+lists the same packages. Keep it if your organization asks for one.
 
 The install takes a few minutes. It ends with a line that starts `Successfully installed` and
 names `taskdash-<version>`. Lines that start `[notice] A new release of pip is available` are

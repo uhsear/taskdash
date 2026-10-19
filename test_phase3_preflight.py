@@ -15,7 +15,7 @@ import pytest
 import taskdash_collect
 import taskdash_preflight as pf
 import taskdash_publish as publish
-from taskdash_common import SCHEMA_VERSION
+from taskdash_common import SCHEMA_VERSION, system32_exe
 
 GOOD_LOG = (f"name: {pf.EVENT_LOG_NAME}\nenabled: true\nlogging:\n  retention: false\n"
             f"  maxSize: {pf.RECOMMENDED_LOG_MB * 1024 * 1024}\n")
@@ -245,8 +245,22 @@ def test_smtp_legacy_mail_file_keeps_its_unverified_tls(monkeypatch, tmp_path):
     mail_file.write_text(json.dumps({"email settings": {"smtp server": "relay.example.invalid",
                                                         "from address": "a@example.invalid"}}), encoding="utf-8")
     ctx = make_ctx({"alerting": {"enabled": True, "mail_config_path": str(mail_file)}})
-    assert pf.check_smtp(ctx)[0] == pf.OK
+    status, message = pf.check_smtp(ctx)
+    assert status == pf.WARN
+    assert "deprecated" in message and "not verified" in message and "smtp block" in message
+    assert str(mail_file) not in message
     assert FakeSmtp.log[2] == ("starttls", None)
+
+
+def test_smtp_legacy_file_with_login_and_no_tls_warns_separately(monkeypatch, tmp_path):
+    FakeSmtp.log = []
+    monkeypatch.setattr(smtplib, "SMTP", FakeSmtp)
+    mail_file = tmp_path / "mail.json"
+    mail_file.write_text(json.dumps({"email settings": {
+        "smtp server": "relay.example.invalid", "from address": "a@example.invalid",
+        "use tls": False, "smtp username": "u", "smtp password": "secret-pw"}}), encoding="utf-8")
+    status, message = pf.check_smtp(make_ctx({"alerting": {"enabled": True, "mail_config_path": str(mail_file)}}))
+    assert status == pf.WARN and "plain text" in message and "secret-pw" not in message
 
 
 def test_smtp_unreachable_and_unusable(monkeypatch):
@@ -573,7 +587,7 @@ def test_enable_event_log_apply_runs_set_log_with_the_right_args_and_rereads(mon
     monkeypatch.setattr(pf.subprocess, "run", run)
     assert pf.main(["--enable-event-log", "--apply", "--max-size-mb", "32"]) == 0
     assert [c[1] for c in calls] == ["gl", "sl", "gl"]
-    assert calls[1] == ["wevtutil", "sl", pf.EVENT_LOG_NAME, "/e:true", f"/ms:{32 * 1024 * 1024}"]
+    assert calls[1] == [system32_exe("wevtutil.exe"), "sl", pf.EVENT_LOG_NAME, "/e:true", f"/ms:{32 * 1024 * 1024}"]
     assert "enabled=true, max size 33554432" in capsys.readouterr().out
 
 
@@ -581,7 +595,7 @@ def test_enable_event_log_default_size_never_shrinks_a_larger_log(monkeypatch):
     calls = []
     fake_wevtutil(monkeypatch, "enabled: true\n  maxSize: 268435456\n", calls=calls)
     pf.main(["--enable-event-log"])
-    assert calls == [["wevtutil", "gl", pf.EVENT_LOG_NAME]]
+    assert calls == [[system32_exe("wevtutil.exe"), "gl", pf.EVENT_LOG_NAME]]
     calls.clear()
     pf.main(["--enable-event-log", "--apply"])
     assert calls[1][-1] == "/ms:268435456"

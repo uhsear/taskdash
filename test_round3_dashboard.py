@@ -99,7 +99,7 @@ def test_task_detail_working_folder_running_state_logon_and_arguments(build):
     assert 'IIf(health == "Running"' in expression and '"in progress"' in expression
     assert 'userText: IIf(runAs == "", "--", runAs + ", runs " + IIf(ltWord == "", lt, ltWord + " [" + lt + "]"))' in expression
     assert 'pathText: IIf(cmdPath == "", "--", cmdPath + IIf(args == "", "", " " + args))' in expression
-    assert 'var args = DefaultValue($datapoint["command_target_arguments"], "");' in expression
+    assert 'var args = esc(DefaultValue($datapoint["command_target_arguments"], ""));' in expression
 
 
 # ------------------------------------------------------------------ decision 6: failed runs / mobile

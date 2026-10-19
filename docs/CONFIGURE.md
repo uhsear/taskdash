@@ -252,6 +252,29 @@ Run `& $td preflight` to check that every override folder exists and is readable
 
 TaskDash never reads its own logs. It reads logs only on the computer where it runs.
 
+#### Limit where TaskDash reads logs
+
+A task author sets the script path and the working directory of a task. Someone who can create tasks
+can point one at any folder, or at a junction named `Logs`. TaskDash runs as an administrator, so it
+would read that folder and quote its last lines in the alert e-mail.
+
+To prevent this, list the folders that hold your logs in `metrics.log_roots`:
+
+```json
+"metrics": {
+  "log_roots": ["D:\\Jobs", "E:\\Scripts"]
+}
+```
+
+When the list is empty or missing, TaskDash reads any folder, as before. When it is set, TaskDash
+reads a log folder or file only if it resolves to a place inside one of these folders. The check
+compares whole folder names, so `D:\Jobs2` is not inside `D:\Jobs`. It ignores letter case.
+TaskDash also skips every folder or file that is a junction or a symbolic link. This rule applies to
+folders in `metrics.log_directory_overrides` too, and to the log tail in the alert e-mail.
+
+TaskDash writes one warning per run with the number of skipped folders. To read a skipped folder,
+move its logs inside a root, or add its parent folder to `metrics.log_roots`.
+
 ### Add your own rules
 
 TaskDash also finds numbers in ordinary log text, such as `Duration: 0:00:07` or `Records updated: 40`.
@@ -298,6 +321,7 @@ allowed in a rules file:
 | `cause_text` | object of `cause` to two strings | What the cause is, and what to check first. Each cause needs an entry. |
 | `display_names` | object of `key` to text | The label of a metric key on the dashboard. |
 | `display_acronyms` | list of words | Words that the dashboard writes in upper case. |
+| `secret_words` | list of words | Key words whose value TaskDash hides in `key=value` and `key: value` text, such as `Passwort`. They add to the built-in English words. |
 | `log_preamble`, `section_pattern` | see `rules\default.json` | How TaskDash strips the timestamp and level from a log line, and finds a section header. |
 
 Follow these rules:
@@ -426,6 +450,24 @@ An alert e-mail cannot tell you that TaskDash itself stopped. For that, set
 `alerting.healthcheck_url` to the ping address of an outside monitor, such as a Healthchecks.io check.
 During each hourly production run, TaskDash pings `<address>/start` at the start. It pings `<address>`
 when the run succeeds and `<address>/fail` when it fails. TaskDash logs a failed ping, and a failed ping never fails the run.
+
+A failed ping logs only `scheme://host/<redacted>`, because the path holds the secret ping ID.
+
+### Hide secrets in logs and e-mails
+
+TaskDash hides secrets in its own log, in the e-mail and in published text. It replaces the value
+with `<redacted>` and keeps the key. It hides these:
+
+- Values after a key word such as `password`, `token` or `secret`, and after the words in `secret_words`.
+- Values after a flag such as `-Password`, `--client-secret` or `-AccessToken`.
+- A `token=` value in a web address.
+- GitHub and Slack tokens, AWS access key IDs and JSON Web Tokens, wherever they appear.
+
+TaskDash does not hide long hex strings, GUIDs or item IDs, because the dashboard needs them. To add
+key words in another language, list them in `secret_words` in a rules file. See [Add your own rules](#add-your-own-rules).
+
+The alert e-mail ends each failed task with the last lines of its log. To leave those lines out, set
+`alerting.include_log_tail` to `false`. The default is `true`.
 
 The dashboard link in the e-mail comes from `alerting.dashboard_url`. If that key is empty, TaskDash builds the
 link from `arcgis.url` and `arcgis.dashboard_id`.
@@ -614,8 +656,9 @@ rejects a key of the wrong type.
 |---|---|---|---|
 | `alerting.enabled` | boolean | `false` | Turns alert e-mails on or off. |
 | `alerting.to` | list of strings | empty | Addresses that receive alert e-mails. If the list is empty when an alert is due, TaskDash sends none, and the run fails with exit code 1. |
-| `alerting.mail_config_path` | string | empty | Path of an older mail settings file with an `email settings` object. TaskDash reads it only when the `smtp` object is empty. New installs use `smtp`. |
+| `alerting.mail_config_path` | string | empty | Path of an older mail settings file with an `email settings` object. TaskDash reads it only when the `smtp` object is empty. New installs use `smtp`. Deprecated: TaskDash does not verify the mail server's certificate for this file. `taskdash preflight` and each collector run warn about it. To move, fill the `smtp` object and clear this key. |
 | `alerting.healthcheck_url` | string | empty | Address of an outside monitor. TaskDash pings it around each hourly production run. |
+| `alerting.include_log_tail` | boolean | `true` | Puts the last lines of a failed task's log in the alert e-mail. Set `false` to leave them out. |
 | `alerting.dashboard_url` | string | empty | Dashboard link placed in alert e-mails. If empty, TaskDash builds it from `arcgis.url` and `arcgis.dashboard_id`. |
 | `alerting.heartbeat_hour` | number | none | Hour of the day, 0 to 23 on the computer's clock, for the daily check e-mail. Without it, no daily check. The example config sets `7`. |
 | `alerting.realert_hours` | number | `24` | Hours before TaskDash repeats an alert for a problem that has not cleared. |
@@ -655,6 +698,7 @@ rejects a key of the wrong type.
 | `metrics.max_log_files_per_task` | number | `40` | Most log files read per task. |
 | `metrics.max_lines_per_file` | number | `5000` | Lines read from the end of each log file. A value of `0` or less reads the whole file. |
 | `metrics.log_directory_overrides` | object | empty object | Maps a full task name to the folder that holds its logs. |
+| `metrics.log_roots` | list of strings | empty list | When set, TaskDash reads logs only inside these folders. It skips links and junctions. |
 | `metrics.tasks` | object | empty object | Maps a full task name to `enabled`, `prose_count_rules` and `noise_metric_key_patterns`. |
 
 ### `upload`, `retention` and `logging`
@@ -720,7 +764,7 @@ The other flags are for setup, upgrades and repair. The table below marks them.
 | `--refresh-result-text` | off | Report stored run rows whose result text is out of date. With `--apply`, update that text. Maintenance: needed only if an upgrade changes the wording. It runs alone. |
 | `--create-service` | off | Print what the hosted service would hold. With `--apply`, create it and print its item ID. A new install does not need it, because `taskdash setup` does this. |
 | `--service-name` | `TaskDash` | Name of the service that `--create-service` creates. |
-| `--create-view` | off | Print the plan for a read-only view of the service. With `--apply`, create it and print its item ID. A new install does not need it. It stops when `arcgis.view_item_id` is set. |
+| `--create-view` | off | Print the plan for a read-only view of the service. With `--apply`, create it and print its item ID. The view is owner only; share it with the viewers group yourself. A new install does not need it. It stops when `arcgis.view_item_id` is set. |
 | `--capture-fixture` | none | Write the tasks and events of this computer to the JSON file you name, then exit. The file holds raw command lines and account names. Keep it private and never send it in a report (see [Issues](../README.md#issues)). For tests only. |
 | `--fixture` | none | Read tasks and events from a captured JSON file instead of Task Scheduler. For tests only. |
 

@@ -645,6 +645,69 @@ def test_create_view_still_refuses_a_source_shared_with_everyone(flc):
                             apply=True)
 
 
+def _gis_with(**items):
+    return SimpleNamespace(content=SimpleNamespace(get=lambda item_id: items.get(item_id)))
+
+
+@pytest.mark.parametrize("key,target", [("view_item_id", "prod"), ("test_view_item_id", "test"),
+                                        ("dashboard_id", "prod")])
+def test_a_public_view_or_dashboard_is_refused(key, target):
+    gis = _gis_with(x1=_Item("public", item_id="x1"))
+    with pytest.raises(SystemExit, match=rf"x1 \(arcgis\.{key}\) is shared with everyone"):
+        publish.check_release_sharing(gis, {"arcgis": {key: "x1"}}, target)
+
+
+@pytest.mark.parametrize("access", ["private", "org", "shared", None])
+def test_an_org_or_group_shared_view_and_dashboard_are_allowed(access, capsys):
+    gis = _gis_with(v1=_Item(access, item_id="v1"), d1=_Item(access, item_id="d1"))
+    publish.check_release_sharing(gis, {"arcgis": {"view_item_id": "v1", "dashboard_id": "d1"}}, "prod")
+    assert capsys.readouterr().out == ""
+
+
+def test_a_missing_view_or_dashboard_warns_and_does_not_crash(capsys):
+    publish.check_release_sharing(_gis_with(), {"arcgis": {"view_item_id": "v1", "dashboard_id": "d1"}}, "prod")
+    out = capsys.readouterr().out
+    assert out.count("WARNING") == 2 and "arcgis.view_item_id" in out and "arcgis.dashboard_id" in out
+
+
+def test_unconfigured_ids_and_the_test_target_make_no_request():
+    gis = SimpleNamespace(content=SimpleNamespace(get=lambda item_id: pytest.fail("no request")))
+    publish.check_release_sharing(gis, {"arcgis": {"view_item_id": "", "dashboard_id": ""}}, "prod")
+    publish.check_release_sharing(gis, {"arcgis": {"dashboard_id": "d1"}}, "test")
+    publish.check_release_sharing(gis, {}, "prod")
+
+
+def test_create_view_leaves_the_new_view_owner_only(flc, monkeypatch, capsys):
+    tables = _view_tables(flc)
+    monkeypatch.setattr(publish, "get_tables", lambda item: tables)
+    view = _Item(item_id="view1")
+    view.sharing = SimpleNamespace(
+        sharing_level=None, groups=SimpleNamespace(
+            add=lambda g: pytest.fail("no group share"), list=lambda: pytest.fail("no group share")))
+    gis = SimpleNamespace(content=SimpleNamespace(search=lambda *a, **k: [], get=lambda i: view),
+                          users=SimpleNamespace(me=SimpleNamespace(username="u")))
+    flc_cls = sys.modules["arcgis.features"].FeatureLayerCollection
+    monkeypatch.setattr(flc_cls, "__init__", lambda self, item: setattr(
+        self, "manager", SimpleNamespace(create_view=lambda **kw: view,
+                                         update_definition=lambda p: {"success": True})))
+    source = _Item("private", shared={"everyone": False, "org": True,
+                                      "groups": [SimpleNamespace(id="grp1")]})
+    publish.create_view(gis, source, {}, apply=True)
+    assert view.sharing.sharing_level is None
+    assert "Sharing copied" not in capsys.readouterr().out
+
+
+def test_the_manual_create_view_tells_the_user_to_share_with_the_viewers_group(monkeypatch, capsys):
+    view = SimpleNamespace(title="TaskDash_view", id="view1")
+    monkeypatch.setattr(publish, "connect_agol", lambda config: "gis")
+    monkeypatch.setattr(publish, "ensure_service", lambda gis, config, target: "svc")
+    monkeypatch.setattr(publish, "create_view", lambda *a, **k: view)
+    monkeypatch.setattr(publish, "table_urls", lambda *a: [])
+    monkeypatch.setattr(publish, "require_no_anonymous_access", lambda urls: None)
+    publish.run_create_view({}, SimpleNamespace(target="prod", apply=True))
+    assert "owner only" in capsys.readouterr().out
+
+
 def test_a_failed_resend_does_not_mask_the_update_error(flc, monkeypatch, capsys):
     tables = _view_tables(flc, fail=True)
     monkeypatch.setattr(publish, "get_tables", lambda item: tables)
@@ -805,7 +868,7 @@ def test_the_new_scrubber_forms_leave_ordinary_text_alone(text):
 def test_the_scrubber_stays_linear_on_many_mysql_tokens():
     import time
     # 16 KB as specified; the 64 KB line is the one the old lazy-bridge pattern fails (seconds).
-    for text in ("mysql " * 2731, "mysql " * 10923, "mysql -p" * 2048, "psexec -p " * 1640, "$" + "a" * 16000 + " = 1"):
+    for text in ("mysql " * 2731, "mysql " * 10923, "mysql -p" * 2048, "psexec -p " * 1640, "$" + "a" * 16000 + " = 1", "-eyJ" * 16000):
         started = time.perf_counter()
         publish._scrub_secrets(text)
         assert time.perf_counter() - started < 0.5, text[:20]

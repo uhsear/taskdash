@@ -55,7 +55,8 @@ if ($Python -match '(?i)taskdash\.exe$') {
     }
     if ($Python) {
         # Task Scheduler cannot set an environment variable for an action, so cmd sets it first.
-        $command = "cmd.exe"
+        $systemRoot = if ($env:SystemRoot) { $env:SystemRoot } else { "C:\Windows" }
+        $command = Join-Path $systemRoot "System32\cmd.exe"
         $arguments = "/d /c `"set `"TASKDASH_PYTHON=$Python`"&& `"$wrapper`" --apply`""
     } else {
         $command = $wrapper

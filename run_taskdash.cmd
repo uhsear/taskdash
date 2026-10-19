@@ -24,7 +24,10 @@ if not exist "Logs" mkdir "Logs"
 
 REM The suffix is a GUID fragment, not %RANDOM%: cmd seeds %RANDOM% from the clock in whole
 REM seconds, so two wrappers started in the same second drew the same number and collided.
-for /f %%i in ('powershell -NoProfile -Command "(Get-Date -Format yyyyMMdd_HHmmss) + '_' + [guid]::NewGuid().ToString('N').Substring(0,8)"') do set "RUNID=%%i"
+REM PowerShell is called by absolute path so a planted powershell.exe in this folder or PATH cannot
+REM run as the task account. "call" keeps cmd /c from stripping the path's quotes.
+if not defined SystemRoot set "SystemRoot=C:\Windows"
+for /f %%i in ('call "%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -Command "(Get-Date -Format yyyyMMdd_HHmmss) + '_' + [guid]::NewGuid().ToString('N').Substring(0,8)"') do set "RUNID=%%i"
 set "BOOT=Logs\bootstrap_%RUNID%.log"
 
 "%PY%" taskdash_publish.py %* > "%BOOT%" 2>&1

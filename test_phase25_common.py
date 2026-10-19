@@ -167,6 +167,59 @@ def test_legacy_mail_config_with_bom_is_read(tmp_path, messages):
     assert mail["smtp server"] == "s.example.test"
 
 
+def _legacy_file(tmp_path, **extra):
+    path = tmp_path / "mail.json"
+    path.write_text(json.dumps({"email settings": _legacy_mail(**extra)}), encoding="utf-8")
+    return {"alerting": {"mail_config_path": str(path)}}
+
+
+def test_legacy_mail_config_logs_one_deprecation_warning_and_still_sends(tmp_path, fake_smtp, messages):
+    config = _legacy_file(tmp_path)
+    mail = common.load_mail_settings(config)
+    common.warn_legacy_mail(config)
+    deprecations = [m for m in messages if "deprecated" in m]
+    assert len(deprecations) == 1 and "not verified" in deprecations[0] and "smtp block" in deprecations[0]
+    assert common.send_email(mail, ["b@example.test"], "s", "body")
+    assert fake_smtp[0].starttls_context is None
+
+
+def test_legacy_mail_config_login_without_tls_gets_its_own_warning(tmp_path, messages):
+    common.warn_legacy_mail(_legacy_file(
+        tmp_path, **{"use tls": False, "smtp username": "u", "smtp password": "secret-pw"}))
+    assert any("plain text" in m for m in messages)
+    assert not any("secret-pw" in m for m in messages)
+
+
+def test_smtp_block_has_no_deprecation_warning(monkeypatch, messages):
+    config = {"smtp": {"host": "h.example.test", "from": "a@example.test"}}
+    common.load_mail_settings(config)
+    common.warn_legacy_mail(config)
+    assert not any("deprecated" in m for m in messages)
+
+
+def test_collector_warns_about_legacy_mail_on_a_run_with_no_alert_due(tmp_path, messages):
+    """The warning must not depend on an alert being due: the hourly run mostly sends nothing."""
+    import taskdash_publish as publish
+
+    config = _legacy_file(tmp_path)
+    config["alerting"].update(enabled=True, to=["b@example.test"])
+    collected = {"host_name": "H", "inventory": []}
+    assert publish.maybe_send_alert(collected, config, tmp_path) is False
+    assert len([m for m in messages if "deprecated" in m]) == 1
+
+
+def test_collector_warns_once_when_a_legacy_mail_alert_is_sent(tmp_path, messages, fake_smtp):
+    import taskdash_publish as publish
+
+    config = _legacy_file(tmp_path)
+    config["alerting"].update(enabled=True, to=["b@example.test"])
+    collected = {"host_name": "H", "inventory": [
+        {"task_name": "A", "last_run_failed": 1, "is_overdue": 0, "last_result_text": "",
+         "next_run_in_hours": 5.0, "latest_log_path": "", "latest_log_name": ""}]}
+    assert publish.maybe_send_alert(collected, config, tmp_path) is True
+    assert len([m for m in messages if "deprecated" in m]) == 1
+
+
 def test_legacy_mail_config_keeps_its_old_tls_and_login_behaviour(fake_smtp):
     """The legacy file's relay was never certificate-checked; turning that on could silently stop
     a working install's alerts, so it keeps a bare starttls() and its login as before."""

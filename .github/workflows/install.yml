@@ -15,16 +15,18 @@ jobs:
   install:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.11"
 
       - name: Build the wheel
         shell: powershell
         run: |
-          python -m pip install build
+          python -m pip install "build==1.6.1"
           python -m build --wheel
 
       - name: Install the wheel into a fresh venv
@@ -111,18 +113,20 @@ jobs:
     env:
       TASKDASH_EXPECT_UTC_OFFSET_S: ${{ matrix.zone.offset }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Set the time zone
         run: tzutil /s "${{ matrix.zone.id }}"
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.11"
 
       # The tests import arcgis but replace its network calls with fakes.
       - name: Install test dependencies
-        run: python -m pip install arcgis pytest
+        run: python -m pip install "arcgis>=2.4,<3" pytest
 
       - name: Run the full suite
         run: python -m pytest -q -p no:cacheprovider
@@ -131,11 +135,19 @@ jobs:
   secrets-scan:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          persist-credentials: false
 
+      # The checksums file comes from the same release, so it catches a corrupt or truncated
+      # download, not a tampered release. A failed check ends the job before anything is extracted.
       - name: gitleaks over the full history
         run: |
-          curl -sSfL https://github.com/gitleaks/gitleaks/releases/download/v8.21.2/gitleaks_8.21.2_linux_x64.tar.gz | tar -xz gitleaks
+          base=https://github.com/gitleaks/gitleaks/releases/download/v8.21.2
+          archive=gitleaks_8.21.2_linux_x64.tar.gz
+          curl -sSfLO "$base/$archive"
+          curl -sSfLO "$base/gitleaks_8.21.2_checksums.txt"
+          grep " $archive\$" gitleaks_8.21.2_checksums.txt | sha256sum -c -
+          tar -xzf "$archive" gitleaks
           ./gitleaks git --redact --verbose .

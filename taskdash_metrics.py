@@ -10,7 +10,9 @@ from __future__ import annotations
 import functools
 import json
 import logging
+import os
 import re
+import stat
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
@@ -175,6 +177,10 @@ MEANINGFUL_METRIC_TOKENS: List[str] = []
 
 # X5: display names keep these upper case ("Ap Exported" read as a word, not Address Points).
 DISPLAY_ACRONYMS: set = set()
+
+# Extra key words for the scrubber's key=value pattern, added to its built-in English words
+# (taskdash_publish._scrub_secrets).
+SECRET_WORDS: set = set()
 
 # Substrings of a metric_key that make it lower-is-better (taskdash_dashboard's Metric change).
 METRIC_CHANGE_LOWER_IS_BETTER: List[str] = []
@@ -427,7 +433,8 @@ _IGNORECASE_RULES = {"prose_count_rules", "fixed_value_rules", "noise_metric_key
 # Fields that are not strings: the metric keys a fixed_value_rules entry sets, and their number.
 _NON_STRING_FIELDS = {"keys": "a non-empty list of strings", "value": "a number"}
 _DICT_RULE_SECTIONS = {"log_preamble", "display_names", "cause_text"}
-_RULE_SECTIONS = {*_ORDERED_RULE_FIELDS, *_DICT_RULE_SECTIONS, "section_pattern", "display_acronyms"}
+_RULE_SECTIONS = {*_ORDERED_RULE_FIELDS, *_DICT_RULE_SECTIONS, "section_pattern", "display_acronyms",
+                  "secret_words"}
 _PREAMBLE_KEYS = ("timestamp", "separator", "levels")
 
 # Config metrics.tasks, keyed by task_full_name like metrics.log_directory_overrides:
@@ -520,7 +527,7 @@ def _check_rule_dict(where: str, section: str, value: Any) -> None:
 
 def _merge_rule_files(paths: Sequence[Path]) -> Dict[str, Any]:
     merged: Dict[str, Any] = {name: {} for name in (*_ORDERED_RULE_FIELDS, *_DICT_RULE_SECTIONS)}
-    merged["display_acronyms"], merged["section_pattern"] = set(), None
+    merged["display_acronyms"], merged["secret_words"], merged["section_pattern"] = set(), set(), None
     for path in paths:
         for section, value in _read_rules_file(path).items():
             if section.startswith("_"):
@@ -534,9 +541,11 @@ def _merge_rule_files(paths: Sequence[Path]) -> Dict[str, Any]:
             elif section in _DICT_RULE_SECTIONS:
                 _check_rule_dict(where, section, value)
                 merged[section].update(value)
-            elif section == "display_acronyms":
-                if not (isinstance(value, list) and all(isinstance(s, str) for s in value)):
-                    raise _rules_error(where, f"expected a list of strings, got {value!r}", 'use ["db", "id"]')
+            elif section in ("display_acronyms", "secret_words"):
+                # A blank secret word would make every "=value" in a log look like a secret.
+                if not (isinstance(value, list) and all(isinstance(s, str) and s.strip() for s in value)):
+                    raise _rules_error(where, f"expected a list of non-empty strings, got {value!r}",
+                                       'use a list such as ["db", "id"]')
                 merged[section].update(value)
             else:
                 merged[section] = (where, value)
@@ -561,6 +570,7 @@ def load_rules(profiles: Tuple[str, ...] = ()) -> Dict[str, Any]:
         "log_level_re": _compile_rule(f"{files} log_preamble", head + rf"(?P<level>{levels})\b", re.IGNORECASE),
         "section_re": _compile_rule(*merged["section_pattern"], 0, "name"),
         "display_acronyms": set(merged["display_acronyms"]),
+        "secret_words": set(merged["secret_words"]),
         "display_names": dict(merged["display_names"]),
         "cause_text": {cause: tuple(text) for cause, text in merged["cause_text"].items()},
     }
@@ -606,6 +616,36 @@ def _compile_task_settings(tasks: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
     return settings
 
 
+# metrics.log_roots, resolved. Empty means unconfined, today's behaviour. A task author controls
+# the script path and working directory, so with roots set no folder or file outside them is read.
+LOG_ROOTS: List[str] = []
+
+
+def _resolve_log_root(root: Any) -> str:
+    return os.path.normcase(os.path.realpath(normalize_text(root))).rstrip("\\/")
+
+
+def _is_reparse_point(path: Any) -> bool:
+    """A junction or symlink. st_reparse_tag exists on Windows only; elsewhere realpath decides.
+    Deduplicated, cloud-placeholder and WOF-compressed logs are reparse points too, so the tag decides."""
+    try:
+        return getattr(os.lstat(path), "st_reparse_tag", 0) in (stat.IO_REPARSE_TAG_SYMLINK,
+                                                                 stat.IO_REPARSE_TAG_MOUNT_POINT)
+    except OSError:
+        return False
+
+
+def log_path_allowed(path: Any) -> bool:
+    """True when no log_roots are set, or path resolves inside one and is not itself a link.
+    Component-aware: C:\\Logs2 is not inside C:\\Logs."""
+    if not LOG_ROOTS:
+        return True
+    if _is_reparse_point(path):
+        return False
+    real = os.path.normcase(os.path.realpath(path))
+    return any(real == root or real.startswith(root + os.sep) for root in LOG_ROOTS)
+
+
 def configure_rules(config: Dict[str, Any]) -> None:
     """Load the rules files that config rules.profiles selects, and config metrics.tasks, into
     this module's tables. load_config calls this, so a bad rule stops the run before any work."""
@@ -623,12 +663,14 @@ def configure_rules(config: Dict[str, Any]) -> None:
     MEANINGFUL_METRIC_TOKENS.extend(rules["meaningful_metric_tokens"])
     METRIC_CHANGE_LOWER_IS_BETTER.extend(rules["metric_change_lower_is_better"])
     CAUSE_PATTERNS.extend(rules["cause_patterns"])
-    for table, source in ((DISPLAY_ACRONYMS, "display_acronyms"), (DISPLAY_NAMES, "display_names"),
-                          (CAUSE_TEXT, "cause_text")):
+    for table, source in ((DISPLAY_ACRONYMS, "display_acronyms"), (SECRET_WORDS, "secret_words"),
+                          (DISPLAY_NAMES, "display_names"), (CAUSE_TEXT, "cause_text")):
         table.clear()
         table.update(rules[source])
     TASK_SETTINGS.clear()
     TASK_SETTINGS.update(task_settings)
+    LOG_ROOTS[:] = [_resolve_log_root(root) for root in (config.get("metrics") or {}).get("log_roots") or ()
+                    if normalize_text(root)]
 
 
 # Import gives the generic rules only; load_config then applies the configured profiles.
@@ -966,6 +1008,7 @@ def _plan_task_directories(
     """
     task_plans: List[Dict[str, Any]] = []
     dir_task_owners: Dict[str, set] = {}
+    skipped_keys: set = set()
 
     for task in inventory_rows:
         task_full_name = task.get("task_full_name")
@@ -982,6 +1025,10 @@ def _plan_task_directories(
                 task.get("command_target_path"), task.get("command_target_working_directory")
             )
         directories = [d for d in directories if _dir_key(d) not in own_log_keys]
+        outside = [d for d in directories if not log_path_allowed(d)]
+        if outside:
+            skipped_keys.update(_dir_key(d) for d in outside)
+            directories = [d for d in directories if d not in outside]
 
         script_path = normalize_text(task.get("command_target_path"))
         task_plans.append({
@@ -996,6 +1043,9 @@ def _plan_task_directories(
         for directory in directories:
             dir_task_owners.setdefault(_dir_key(directory), set()).add(task_full_name)
 
+    if skipped_keys:
+        emit(f"WARNING: skipped {len(skipped_keys)} log folder(s) outside metrics.log_roots or reached "
+             "through a link. To read them, add their parent folder to metrics.log_roots.")
     return task_plans, dir_task_owners
 
 
@@ -1167,6 +1217,8 @@ def _scan_task_logs(
     trusted_dirs = {_dir_key(d) for d in directories} if plan["is_override"] else set()
 
     def belongs_to_this_task(path: Path, _stem=script_stem, _tokens=name_tokens, _shared=shared_dirs) -> bool:
+        if not log_path_allowed(path):
+            return False
         if path.parent not in _shared:
             return True
         return _log_belongs_to_task(path.name, _stem, _tokens)

@@ -143,10 +143,10 @@ class _WriteSpy:
         return lambda *a, **k: self.calls.append(name)
 
 
-def _refusal_run(monkeypatch, tmp_path, item, tables, config):
+def _refusal_run(monkeypatch, tmp_path, item, tables, config, gis=None):
     """Run --apply against a service the run must refuse to write to; returns (alerts, error)."""
     alerts = []
-    monkeypatch.setattr(publish, "connect_agol", lambda cfg: object())
+    monkeypatch.setattr(publish, "connect_agol", lambda cfg: gis or object())
     monkeypatch.setattr(publish, "ensure_service", lambda gis, cfg, tgt: item)
     monkeypatch.setattr(publish, "get_tables", lambda i: tables)
     monkeypatch.setattr(publish, "collect_everything",
@@ -185,6 +185,22 @@ def test_alert_still_sent_and_nothing_written_when_the_source_service_is_public(
     alerts, message = _refusal_run(monkeypatch, tmp_path, item, {}, config)
 
     assert "shared with everyone" in message
+    assert len(alerts) == 1
+    rows = _pending_rows(tmp_path)
+    assert len(rows) == 1 and rows[0]["exit_status"] == "failed" and "shared with everyone" in rows[0]["error_text"]
+
+
+@pytest.mark.parametrize("key", ["view_item_id", "dashboard_id"])
+def test_alert_still_sent_and_nothing_written_when_the_view_or_dashboard_is_public(
+        monkeypatch, tmp_path, key):
+    item = type("I", (), {"title": "x", "id": "svc", "access": "private"})()
+    config = {"arcgis": {"view_item_id": "v1", "dashboard_id": "d1"}}
+    items = {"v1": type("I", (), {"access": "org"})(), "d1": type("I", (), {"access": "org"})()}
+    items[config["arcgis"][key]] = type("I", (), {"access": "public"})()
+    gis = type("G", (), {"content": type("C", (), {"get": staticmethod(items.get)})()})()
+    alerts, message = _refusal_run(monkeypatch, tmp_path, item, {}, config, gis=gis)
+
+    assert "shared with everyone" in message and f"arcgis.{key}" in message
     assert len(alerts) == 1
     rows = _pending_rows(tmp_path)
     assert len(rows) == 1 and rows[0]["exit_status"] == "failed" and "shared with everyone" in rows[0]["error_text"]

@@ -22,6 +22,7 @@
     "alerting.to": "Addresses that receive alert emails.",
     "alerting.mail_config_path": "Path of an older mail settings file; leave empty when you use the smtp block.",
     "alerting.healthcheck_url": "Address pinged after each good run so an outside monitor sees a silent collector.",
+    "alerting.include_log_tail": "True puts the last lines of a failed task's log in the alert email; false leaves them out.",
     "alerting.dashboard_url": "Dashboard link placed in alert emails.",
     "alerting.heartbeat_hour": "Hour of the day (0-23) for the daily all-clear email.",
     "alerting.realert_hours": "Hours to wait before repeating an alert that has not cleared.",
@@ -46,6 +47,7 @@
     "metrics.max_log_files_per_task": "Most log files read per task.",
     "metrics.max_lines_per_file": "Most lines read per log file.",
     "metrics.log_directory_overrides": "Object of task full name to log folder, for tasks whose logs the collector cannot find.",
+    "metrics.log_roots": "List of folders. When set, TaskDash reads logs only inside them. Empty reads any folder a task points at.",
     "metrics.tasks": "Object of task full name to {enabled, prose_count_rules, noise_metric_key_patterns}.",
     "upload.chunk_size": "Rows sent to ArcGIS in each request.",
     "retention.runs_days": "Days to keep rows in the runs table.",
@@ -90,6 +92,7 @@
     "to": ["alerts@example.com"],
     "mail_config_path": "",
     "healthcheck_url": "",
+    "include_log_tail": true,
     "dashboard_url": "https://your-org.example.com/dashboard",
     "heartbeat_hour": 7,
     "realert_hours": 24,
@@ -120,6 +123,7 @@
     "max_log_files_per_task": 40,
     "max_lines_per_file": 5000,
     "log_directory_overrides": {},
+    "log_roots": [],
     "tasks": {}
   },
   "upload": {
