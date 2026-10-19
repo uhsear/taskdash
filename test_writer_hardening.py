@@ -194,6 +194,17 @@ def test_query_all_rows_stops_on_a_short_final_page():
     assert common.query_all_rows(table) == rows
 
 
+def test_query_all_rows_orders_every_page_by_the_oid():
+    """Without order_by_fields, arcgis 2.4 fetches a short last page on 5 threads, which
+    trips the truststore 0.10.0 race that turns certificate checks off."""
+    table = _FakeTable([{"OID": i} for i in range(1, 6)], max_record_count=2, object_id_field="OID")
+    seen = []
+    original = table.query
+    table.query = lambda **kw: (seen.append(kw.get("order_by_fields")), original(**kw))[1]
+    assert len(common.query_all_rows(table)) == 5
+    assert seen == ["OID", "OID", "OID"]
+
+
 def test_object_id_field_reads_the_tables_property():
     table = _FakeTable([], object_id_field="OID")
     assert common.object_id_field(table) == "OID"

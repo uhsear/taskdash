@@ -127,6 +127,12 @@ sent only when `alerting.heartbeat_hour` is set. The example config sets it to 7
 
 ## Release notes
 
+### 1.0.2 (2026-10-19)
+
+Paged reads from the hosted tables are ordered by object ID. This keeps certificate checks on for
+the whole run with the Python that ships with ArcGIS Pro 3.6 and 3.7. See
+[CHANGELOG.md](../CHANGELOG.md).
+
 ### 1.0.1 (2026-10-18)
 
 Fixes from the release audit. Setup keeps the view in the setup folder and lists a half-made view

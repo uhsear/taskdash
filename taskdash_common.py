@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence
 
 # Shown in the dashboard's About panel and the wheel name; release.yml checks it against the tag.
-TASKDASH_VERSION = "1.0.1"
+TASKDASH_VERSION = "1.0.2"
 # Bump when TABLE_SPECS or TABLE_INDEXES change. A service stamped with a newer number was
 # migrated by a newer TaskDash, which this one may write wrongly.
 SCHEMA_VERSION = 1
@@ -842,8 +842,13 @@ def query_all_rows(table: Any, *, where: str = "1=1", out_fields: str = "*",
     Pages at the table's own maxRecordCount (fallback 2000 if unreadable), not a hardcoded
     guess -- see _server_page_size. A page shorter than the requested size is the reliable
     end-of-data signal only when the requested size matches what the server actually enforces.
+
+    Ordering by the OID keeps arcgis 2.4 on its single-thread pager. Without it, a short
+    last page sends arcgis to a 5-thread fetch, and truststore 0.10.0 (ArcGIS Pro 3.6/3.7)
+    then drops certificate checks for the rest of the run. It also makes offset paging stable.
     """
     page_size = page or _server_page_size(table)
+    order_by = object_id_field(table)
     rows: List[Dict[str, Any]] = []
     offset = 0
     while True:
@@ -854,6 +859,7 @@ def query_all_rows(table: Any, *, where: str = "1=1", out_fields: str = "*",
                 return_geometry=False,
                 result_offset=offset,
                 result_record_count=page_size,
+                order_by_fields=order_by,
             ),
             label="query_all_rows",
         )

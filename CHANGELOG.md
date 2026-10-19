@@ -4,6 +4,15 @@ All notable changes to TaskDash are listed here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). The version numbers follow
 [Semantic Versioning](https://semver.org/).
 
+## [1.0.2] - 2026-10-19
+
+### Fixed
+
+- Paged reads from the hosted tables are ordered by object ID. Without an order, a short last page
+  made the arcgis package fetch pages on several threads. On the Python that ships with ArcGIS
+  Pro 3.6 and 3.7, that turned off certificate checks for the rest of the run. The order also keeps
+  offset paging stable.
+
 ## [1.0.1] - 2026-10-18
 
 ### Fixed
