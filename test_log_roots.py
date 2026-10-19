@@ -158,3 +158,18 @@ def test_config_validation_rejects_a_bad_log_roots_type(value):
     errors = taskdash_common._validate_config({"metrics": {"log_roots": value}})
     assert any("metrics.log_roots must be a list of strings" in e for e in errors)
     assert taskdash_common._validate_config({"metrics": {"log_roots": ["C:\\Logs"]}}) == []
+
+
+def test_a_file_swapped_after_the_roots_check_is_not_read(tmp_path, roots, monkeypatch):
+    inside = tmp_path / "root" / "run.log"
+    inside.parent.mkdir()
+    inside.write_text("inside\n", encoding="utf-8")
+    outside = tmp_path / "secret.txt"
+    outside.write_text("outside\n", encoding="utf-8")
+    roots(tmp_path / "root")
+    assert metrics.read_last_lines(inside, 5) == ["inside"]
+    real_stat = os.stat
+    # The opened handle is another file than the one the path names now: a swap happened.
+    monkeypatch.setattr(metrics.os, "fstat", lambda fd: real_stat(outside))
+    with pytest.raises(PermissionError, match="log_roots"):
+        metrics.read_last_lines(inside, 5)

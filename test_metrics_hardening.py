@@ -528,3 +528,12 @@ def test_no_recent_logs_warning_names_shared_folder_attribution(tmp_path, caplog
     assert summary["\\Bravo Run"]["log_files_scanned"] == 0
     warning = next(r.message for r in caplog.records if "Bravo Run" in r.message)
     assert "shared" in warning.lower()
+
+
+def test_read_last_lines_stops_at_the_byte_cap_and_drops_the_partial_line(tmp_path):
+    log = tmp_path / "huge.log"
+    log.write_bytes(b"x" * 500 + b"\nlast\n")
+    assert metrics.read_last_lines(log, max_lines=15, chunk_size=64, max_bytes=100) == ["last"]
+    assert metrics.read_last_lines(log, max_lines=0, max_bytes=100) == ["last"]
+    log.write_bytes(b"password=" + b"y" * 500)
+    assert metrics.read_last_lines(log, max_lines=15, max_bytes=100) == []

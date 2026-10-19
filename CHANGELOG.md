@@ -40,7 +40,10 @@ All notable changes to TaskDash are listed here. The format follows
   group. `taskdash setup` is unchanged: it shares with its private group only.
 - `metrics.log_roots` (default empty) confines log reads. When it lists folders, TaskDash mines
   and quotes in alert e-mails only logs that resolve inside them. It skips junctions and symbolic
-  links, and warns once per run with the number of skipped folders.
+  links, and warns once per run with the number of skipped folders. It checks the opened file
+  again, so a file swapped for a link after the check is not read.
+- A log read now takes at most the last 8 MB of a file. Before, a huge log with no line breaks was
+  read whole, and the alert e-mail tail could fill memory.
 - The secret scrubber now also hides values after `--client-secret`, `-ClientSecret`,
   `--access-token`, `-AccessToken`, `--auth-token` and `--refresh-token`, `token=` in a web
   address, and GitHub, Slack, AWS and JSON Web tokens wherever they appear.

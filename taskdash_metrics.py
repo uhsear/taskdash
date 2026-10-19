@@ -619,6 +619,8 @@ def _compile_task_settings(tasks: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
 # metrics.log_roots, resolved. Empty means unconfined, today's behaviour. A task author controls
 # the script path and working directory, so with roots set no folder or file outside them is read.
 LOG_ROOTS: List[str] = []
+# The most read_last_lines takes from the end of one log.
+MAX_TAIL_BYTES = 8 * 1024 * 1024
 
 
 def _resolve_log_root(root: Any) -> str:
@@ -802,21 +804,34 @@ def _sniff_encoding(sample: bytes) -> Tuple[str, int]:
     return "utf-8", 0
 
 
-def read_last_lines(path: Path, max_lines: int, chunk_size: int = 65536) -> List[str]:
+def _opened_inside_roots(path: Path, handle: Any) -> bool:
+    """log_path_allowed checks a name, and the open comes later. A task author can swap the file
+    for a link in between. So the opened handle must be the file the path resolves to now, and
+    that file must pass the check."""
+    if not LOG_ROOTS:
+        return True
+    if not log_path_allowed(path):
+        return False
+    opened = os.fstat(handle.fileno())
+    current = os.stat(path)
+    return (opened.st_dev, opened.st_ino) == (current.st_dev, current.st_ino)
+
+
+def read_last_lines(path: Path, max_lines: int, chunk_size: int = 65536,
+                    max_bytes: int = MAX_TAIL_BYTES) -> List[str]:
     """Read up to the last max_lines lines of a log without loading a multi-GB file whole.
 
     metrics-02: max_lines used to cap a HEAD read, so a long-running or appended-to log showed
     stale metrics and a traceback near the end was never seen. Seeks backward from EOF in
-    chunks instead. max_lines <= 0 means "no limit" and reads the whole (small) file, matching
-    the previous unlimited mode.
+    chunks instead. max_lines <= 0 means "no limit". Either way at most max_bytes from the end
+    are read, so a huge file with no newline cannot fill memory. A read that stops before the
+    start drops its partial first line, which can begin inside a secret, past its flag.
     """
     with path.open("rb") as handle:
+        if not _opened_inside_roots(path, handle):
+            raise PermissionError(f"{path} changed after its metrics.log_roots check; skipped")
         sample = handle.read(64)
         encoding, bom_len = _sniff_encoding(sample)
-
-        if max_lines <= 0:
-            handle.seek(bom_len)
-            return handle.read().decode(encoding, errors="replace").splitlines()
 
         # utf-16 line separators are 2 bytes, so every chunk boundary must land on a 2-byte
         # code-unit boundary or decoding the assembled buf shifts every character after it.
@@ -829,20 +844,27 @@ def read_last_lines(path: Path, max_lines: int, chunk_size: int = 65536) -> List
         pos = handle.seek(0, 2)
         if is_utf16:
             pos -= (pos - bom_len) % 2
-        buf = b""
-        while pos > bom_len:
-            step = min(chunk_size, pos - bom_len)
+        chunks: List[bytes] = []
+        size = newlines = 0
+        while pos > bom_len and size < max_bytes:
+            step = min(chunk_size, pos - bom_len, max_bytes - size)
             if is_utf16:
                 step -= step % 2
                 step = step or 2  # pos-bom_len is even and >0 here, so 2 bytes are available
             pos -= step
             handle.seek(pos)
-            buf = handle.read(step) + buf
-            if buf.count(newline) > max_lines:
+            chunk = handle.read(step)
+            chunks.append(chunk)
+            size += len(chunk)
+            # Chunk edges sit on code-unit boundaries, so a separator never straddles two chunks.
+            newlines += chunk.count(newline)
+            if 0 < max_lines < newlines:
                 break
 
-        lines = buf.decode(encoding, errors="replace").splitlines()
-        return lines[-max_lines:] if len(lines) > max_lines else lines
+        lines = b"".join(reversed(chunks)).decode(encoding, errors="replace").splitlines()
+        if pos > bom_len:
+            lines = lines[1:]
+        return lines[-max_lines:] if 0 < max_lines < len(lines) else lines
 
 
 def classify_line(line: str) -> Tuple[bool, bool]:
