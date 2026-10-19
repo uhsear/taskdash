@@ -804,17 +804,37 @@ def _sniff_encoding(sample: bytes) -> Tuple[str, int]:
     return "utf-8", 0
 
 
+def _handle_final_path(handle: Any) -> Optional[str]:
+    """The final path of an open file, read from the handle (Windows only), so no later swap of
+    the file or a parent folder can change it. Prefixes are stripped as ntpath.realpath does."""
+    if os.name != "nt":
+        return None
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+    get_path = ctypes.WinDLL("kernel32", use_last_error=True).GetFinalPathNameByHandleW
+    get_path.argtypes = [wintypes.HANDLE, wintypes.LPWSTR, wintypes.DWORD, wintypes.DWORD]
+    get_path.restype = wintypes.DWORD
+    buf = ctypes.create_unicode_buffer(32768)
+    length = get_path(msvcrt.get_osfhandle(handle.fileno()), buf, len(buf), 0)
+    if not length or length >= len(buf):
+        raise ctypes.WinError(ctypes.get_last_error())
+    final = buf.value
+    if final.startswith("\\\\?\\UNC\\"):
+        return "\\\\" + final[len("\\\\?\\UNC\\"):]
+    return final[len("\\\\?\\"):] if final.startswith("\\\\?\\") else final
+
+
 def _opened_inside_roots(path: Path, handle: Any) -> bool:
-    """log_path_allowed checks a name, and the open comes later. A task author can swap the file
-    for a link in between. So the opened handle must be the file the path resolves to now, and
-    that file must pass the check."""
+    """log_path_allowed checks a name, and the open comes later. A task author can swap the file,
+    or a folder above it, for a link in between. So the opened file must itself be inside a root."""
     if not LOG_ROOTS:
         return True
-    if not log_path_allowed(path):
-        return False
-    opened = os.fstat(handle.fileno())
-    current = os.stat(path)
-    return (opened.st_dev, opened.st_ino) == (current.st_dev, current.st_ino)
+    final = _handle_final_path(handle)
+    if final is None:  # not Windows: no handle path, so check the name again
+        return log_path_allowed(path)
+    real = os.path.normcase(final)
+    return any(real == root or real.startswith(root + os.sep) for root in LOG_ROOTS)
 
 
 def read_last_lines(path: Path, max_lines: int, chunk_size: int = 65536,

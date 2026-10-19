@@ -168,8 +168,22 @@ def test_a_file_swapped_after_the_roots_check_is_not_read(tmp_path, roots, monke
     outside.write_text("outside\n", encoding="utf-8")
     roots(tmp_path / "root")
     assert metrics.read_last_lines(inside, 5) == ["inside"]
-    real_stat = os.stat
-    # The opened handle is another file than the one the path names now: a swap happened.
-    monkeypatch.setattr(metrics.os, "fstat", lambda fd: real_stat(outside))
+    real_open = type(inside).open
+    # The path passed the check, but the file opened is another one: a swap happened in between.
+    monkeypatch.setattr(type(inside), "open", lambda self, mode="r": real_open(outside, mode))
     with pytest.raises(PermissionError, match="log_roots"):
         metrics.read_last_lines(inside, 5)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="the handle path is read through a Windows API")
+def test_the_opened_handle_decides_not_the_name(tmp_path, roots):
+    inside = tmp_path / "root" / "run.log"
+    inside.parent.mkdir()
+    inside.write_text("inside\n", encoding="utf-8")
+    outside = tmp_path / "secret.txt"
+    outside.write_text("outside\n", encoding="utf-8")
+    roots(tmp_path / "root")
+    with open(inside, "rb") as handle:
+        assert metrics._opened_inside_roots(inside, handle) is True
+    with open(outside, "rb") as handle:
+        assert metrics._opened_inside_roots(inside, handle) is False
