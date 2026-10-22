@@ -618,9 +618,8 @@ FMT_HELPERS = (
     'function fmtDateShort(v) { return IIf(IsEmpty(v), "--", Text(Date(Number(v)), "M/D h:mm A")); }\n'
     # Arcade has no escape function. List text is HTML, and task paths, descriptions, command
     # lines and log text can hold < > &. "&" goes first so the entities are not escaped twice.
-    # OPEN CHECK (needs a TEST render, not done): if a card with a task value "A&B" or "2>&1"
-    # shows "&amp;" or "&gt;", Arcade output is plain text here. Then remove esc() and the
-    # f_* Replace chain in route_fields_through_arcade().
+    # Render-tested on TaskDash_TEST 2026-10-22: a task named with "&" shows a plain "&" in the
+    # Task detail card, so Dashboards parses Arcade output as HTML and this is not a double escape.
     'function esc(t) { return Replace(Replace(Replace(t, "&", "&amp;"), "<", "&lt;"), ">", "&gt;"); }\n'
     'function fmtN(v) { return IIf(IsEmpty(v), "--", Text(v, "#,##0")); }\n'
     'function plural(n, word) { var c = DefaultValue(n, 0); return Text(c, "#,##0") + " " + word + IIf(c == 1, "", "s"); }\n'

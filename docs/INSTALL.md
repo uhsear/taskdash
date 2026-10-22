@@ -91,7 +91,7 @@ hour as an administrator. The line removes those inherited permissions. It allow
 Administrators group, you and the task account. Step 4 checks the result.
 
 The `$whl` line prints the full path of the wheel. If it prints nothing, the wheel is not in
-`Downloads`. Then set the path yourself, for example `$whl = "D:\Files\taskdash-1.0.2-py3-none-any.whl"`.
+`Downloads`. Then set the path yourself, for example `$whl = "D:\Files\taskdash-1.1.0-py3-none-any.whl"`.
 Keep the original file name; pip rejects a renamed wheel, such as one with ` (1)` in its name.
 
 If you want e-mail alerts that sign in to a mail server, install the `smtp` extra instead. It adds
@@ -128,7 +128,7 @@ lists the same packages. Keep it if your organization asks for one.
 The install takes a few minutes. It ends with a line that starts `Successfully installed` and
 names `taskdash-<version>`. Lines that start `[notice] A new release of pip is available` are
 harmless; you do not need to upgrade pip. The last command prints `TaskDash <version>`, for example
-`TaskDash 1.0.2`.
+`TaskDash 1.1.0`.
 
 TaskDash keeps its config, logs and state in the folder it starts in. **Run these two lines in every
 new PowerShell window before you use `$td`:**
@@ -328,6 +328,10 @@ mode. `-Python` names the `taskdash.exe` that the task runs.
 powershell.exe -ExecutionPolicy Bypass -File C:\TaskDash\venv\share\taskdash\install_task.ps1 `
     -InstallDir C:\TaskDash -Python C:\TaskDash\venv\Scripts\taskdash.exe -User DOMAIN\svc-taskdash
 ```
+
+The TaskDash PowerShell scripts are not signed. If Group Policy sets the execution policy to
+`AllSigned`, `-ExecutionPolicy Bypass` cannot override it and PowerShell refuses the script. Ask
+your IT department for an exception for this one file.
 
 It registers nothing. It prints the task it would register:
 

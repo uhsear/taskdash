@@ -127,6 +127,16 @@ sent only when `alerting.heartbeat_hour` is set. The example config sets it to 7
 
 ## Release notes
 
+### 1.1.0 (not yet released)
+
+The first public release. TaskDash no longer fails silently: a failed alert e-mail, a turned-off or
+wrapped Task Scheduler log, an unreadable task and a slow first run each show in the run result. A
+new `taskdash test-alert` command checks the e-mail path. Secret scrubbing covers more forms and
+TaskDash's own log. `metrics.log_roots` can confine log reads. Each release carries Sigstore
+signatures, a hash-pinned lock file and an SBOM. Before you upgrade, note that the default
+collector task name is now `TaskDash Collector`; set `scheduler.collector_task_name` if your task
+has another name. See [CHANGELOG.md](../CHANGELOG.md).
+
 ### 1.0.2 (2026-10-19)
 
 Paged reads from the hosted tables are ordered by object ID. This keeps certificate checks on for

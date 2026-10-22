@@ -6,6 +6,8 @@ All notable changes to TaskDash are listed here. The format follows
 
 ## [Unreleased]
 
+## [1.1.0] - not yet released
+
 ### Added
 
 - `taskdash preflight` has a `health check` line. It warns, without failing, when
