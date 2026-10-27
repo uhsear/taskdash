@@ -54,7 +54,7 @@ def world(monkeypatch):
 
 
 def _run(tmp_path):
-    return publish._run_publish(_args(), {}, tmp_path, publish.utc_now(),
+    return publish._run_publish(_args(), {"logging": {"log_dir": str(tmp_path)}}, tmp_path, publish.utc_now(),
                                 {"armed": False, "recorded": False})
 
 

@@ -88,7 +88,7 @@ def fake_world(monkeypatch):
 def test_unreadable_tasks_are_recorded_on_a_successful_run(fake_world, tmp_path):
     args = publish.parse_args(["--apply"])
     args.target = "prod"
-    code = publish._run_publish(args, {}, tmp_path, publish.utc_now(),
+    code = publish._run_publish(args, {"logging": {"log_dir": str(tmp_path)}}, tmp_path, publish.utc_now(),
                                 {"armed": False, "recorded": False})
     assert code == 0
     (row,) = fake_world["rows"]

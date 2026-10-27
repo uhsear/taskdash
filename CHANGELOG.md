@@ -288,9 +288,8 @@ All notable changes to TaskDash are listed here. The format follows
   has such a folder, its tasks now appear. The PowerShell query drops the Microsoft tasks itself,
   so they are never sent to Python, and the "Collected N task row(s)" line counts fewer rows. A
   Microsoft task that `Get-ScheduledTaskInfo` cannot read no longer appears in the unreadable-task
-  warning; an error from the task listing itself still does. The query now pipes each task to `Get-ScheduledTaskInfo` and, for a monthly trigger, to `Export-ScheduledTask`
-  instead of passing its name, because a name with `[` and `]` was read as a pattern. A monthly task
-  with brackets in its name now shows its months and days. `taskdash preflight`
+  warning; an error from the task listing itself still does. The query now pipes each task to `Get-ScheduledTaskInfo` instead of passing its name, because a
+  name with `[` and `]` was read as a pattern. `taskdash preflight`
   still passes the task check on a computer whose only tasks are under `\Microsoft\`, even when
   the listing reports an error for one of them, so the installer is not blocked. No table field changed.
 

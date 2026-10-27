@@ -275,8 +275,9 @@ $rows = foreach ($task in $tasks) {
         $xmlTriggers = @()
         if (@($triggerList | Where-Object { $_.CimClass.CimClassName -eq 'MSFT_TaskTrigger' }).Count) {
             try {
-                # Piped for the same reason as Get-ScheduledTaskInfo: -TaskName reads [ ] as a pattern.
-                $xml = [xml]($task | Export-ScheduledTask)
+                # By name, not piped: a piped task fails with "The parameter is incorrect", and
+                # -TaskName here is literal (a [ ] or * name matches only itself; checked on Windows 11).
+                $xml = [xml](Export-ScheduledTask -TaskName $task.TaskName -TaskPath $task.TaskPath)
                 $xmlTriggers = @((Select-FirstNode $xml.DocumentElement "*[local-name()='Triggers']").ChildNodes |
                     Where-Object { $_.NodeType -eq 'Element' })
             } catch {

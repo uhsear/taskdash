@@ -6,6 +6,7 @@ registers anything."""
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 import shutil
 import subprocess
@@ -36,8 +37,11 @@ def _function(name):
 def _ps(tmp_path, body):
     script = tmp_path / "snippet.ps1"
     script.write_text(body, encoding="utf-8")
+    # Under a pwsh 7 parent (the GitHub runner's default shell) PSModulePath lists pwsh's modules,
+    # and Windows PowerShell then cannot load Get-Acl or Get-FileHash. Without it, 5.1 uses its own.
+    env = {k: v for k, v in os.environ.items() if k.upper() != "PSMODULEPATH"}
     return subprocess.run([POWERSHELL, "-NoProfile", "-NonInteractive", "-File", str(script)],
-                          capture_output=True, text=True, timeout=120)
+                          capture_output=True, text=True, timeout=120, env=env)
 
 
 @needs_powershell

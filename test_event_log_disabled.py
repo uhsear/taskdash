@@ -65,7 +65,7 @@ def test_a_disabled_log_still_publishes_alerts_and_records_the_run_then_exits_1(
         fake_world, tmp_path):
     progress = {"armed": False, "recorded": False}
     with pytest.raises(SystemExit) as exc:
-        publish._run_publish(_args(), {}, tmp_path, publish.utc_now(), progress)
+        publish._run_publish(_args(), {"logging": {"log_dir": str(tmp_path)}}, tmp_path, publish.utc_now(), progress)
 
     assert DISABLED_MESSAGE in str(exc.value)
     assert [len(c["inventory"]) for c in fake_world["published"]] == [1], "inventory is published"
@@ -80,14 +80,14 @@ def test_a_publish_failure_wins_over_the_disabled_log_message(fake_world, monkey
     monkeypatch.setattr(publish, "publish",
                         lambda *a, **k: (_ for _ in ()).throw(SystemExit("AGOL write failed")))
     with pytest.raises(SystemExit, match="AGOL write failed"):
-        publish._run_publish(_args(), {}, tmp_path, publish.utc_now(),
+        publish._run_publish(_args(), {"logging": {"log_dir": str(tmp_path)}}, tmp_path, publish.utc_now(),
                              {"armed": False, "recorded": False})
     assert fake_world["rows"][0]["error_text"] == "AGOL write failed"
 
 
 def test_a_dry_run_with_a_disabled_log_still_exits_nonzero(fake_world, tmp_path):
     with pytest.raises(SystemExit, match="is disabled"):
-        publish._run_publish(_args(apply=False), {}, tmp_path, publish.utc_now(),
+        publish._run_publish(_args(apply=False), {"logging": {"log_dir": str(tmp_path)}}, tmp_path, publish.utc_now(),
                              {"armed": False, "recorded": False})
     assert fake_world["published"] == []
 

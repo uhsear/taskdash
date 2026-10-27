@@ -55,13 +55,13 @@ def test_the_query_filters_microsoft_inside_powershell_and_pipes_the_task():
     assert "Get-ScheduledTaskInfo -TaskName" not in script, "-TaskName can treat [ ] as wildcards"
 
 
-def test_the_monthly_trigger_export_is_piped_too():
-    # Export-ScheduledTask is from the same module: -TaskName 'Job[1]' would export nothing, or the
-    # XML of a task named Job1, and put that task's months and days on the wrong row.
+def test_the_monthly_trigger_export_passes_the_name_not_the_task():
+    # A piped task fails with "The parameter is incorrect" on a real Task Scheduler, so every
+    # monthly task lost its months and days. Export-ScheduledTask -TaskName is literal: '[x]abc'
+    # and 'abc*' do not match a task named xabc. The live seeded CI test checks both monthly tasks.
     script = collect.POWERSHELL_TASK_QUERY
-    assert "[xml]($task | Export-ScheduledTask)" in script
-    assert "Export-ScheduledTask -TaskName" not in script
-    assert "Export-ScheduledTask -TaskPath" not in script
+    assert "Export-ScheduledTask -TaskName $task.TaskName -TaskPath $task.TaskPath" in script
+    assert "| Export-ScheduledTask" not in script
 
 
 @pytest.mark.parametrize("exclude", [True, False])
