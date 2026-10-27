@@ -127,7 +127,7 @@ sent only when `alerting.heartbeat_hour` is set. The example config sets it to 7
 
 ## Release notes
 
-### 1.1.0 (not yet released)
+### 1.1.0 (2026-10-27)
 
 The first public release. TaskDash no longer fails silently: a failed alert e-mail, a turned-off or
 wrapped Task Scheduler log, an unreadable task and a slow first run each show in the run result. A

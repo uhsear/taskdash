@@ -6,7 +6,7 @@ All notable changes to TaskDash are listed here. The format follows
 
 ## [Unreleased]
 
-## [1.1.0] - not yet released
+## [1.1.0] - 2026-10-27
 
 ### Added
 
