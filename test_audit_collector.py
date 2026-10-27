@@ -38,7 +38,7 @@ def mem_agol(monkeypatch):
     table = _MemTable()
     monkeypatch.setattr(publish, "object_id_field", lambda t: "OBJECTID")
     monkeypatch.setattr(publish, "fetch_keys", lambda t, rows, keys, oid: {
-        tuple(normalize_text(r.get(k)) for k in keys): o for o, r in t.rows.items()})
+        publish.folded_key(r, keys): o for o, r in t.rows.items()})
     monkeypatch.setattr(publish, "get_tables", lambda item: {publish.TABLE_COLLECTOR_RUNS: table})
     monkeypatch.setattr(publish, "purge_older_than", lambda *a, **k: 0)
     return table
@@ -247,8 +247,8 @@ def test_a_full_fail_run_recover_cycle_writes_one_row_each_under_the_same_key(mo
     table = _MemTable()
     monkeypatch.setattr(publish, "object_id_field", lambda t: "OBJECTID")
     monkeypatch.setattr(publish, "fetch_keys", lambda t, rows, keys, oid: {
-        tuple(normalize_text(r.get(k)) for k in keys): o for o, r in t.rows.items()})
-    key = ["host_name", "task_full_name", "change_kind", "changed_utc"]
+        publish.folded_key(r, keys): o for o, r in t.rows.items()})
+    key =["host_name", "task_full_name", "change_kind", "changed_utc"]
     passes = [_stored(0, "Success", "Ready"), _stored(1, "Error", "Ready", "boom"),
               _stored(0, "Running", "Running"), _stored(0, "Success", "Ready")]
     history = {}

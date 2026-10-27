@@ -63,6 +63,12 @@ The limits are 1.5 and 3 times `scheduler.collector_interval_minutes`. If the ti
 with the text `no data`, the service has no saved data yet. With more than one host, the tile shows
 the host that saved data longest ago.
 
+The tile leaves out a host that has made no collector run for `scheduler.heartbeat_ignore_after_days`
+days, 7 by default. So a retired or renamed computer does not show **Down** for ever. A collector that
+runs but fails to publish still counts, because every failed run also leaves a row. If every host has
+been silent that long, the tile shows **Down** with the text `no data`. To remove a computer for good,
+see "Retire a computer" in the configuration guide.
+
 If the tile shows **Late** or **Down**, every other number on the dashboard is old. Go to step 6
 and find out why the collector stopped.
 
@@ -239,8 +245,10 @@ be normal. Then add `"overdue_grace_minutes": 45` to the entry of that task in t
 other number also works. The number replaces `scheduler.overdue_grace_minutes` for that task only.
 
 **Planned maintenance.** The config key `alerting.maintenance_windows` stops alert e-mails during a
-time window. It applies to the tasks whose names match a pattern. It does not change the dashboard:
-the task still shows as a problem. See [CONFIGURE.md](CONFIGURE.md).
+time window. It applies to the tasks whose names match a pattern. The task still shows as a problem
+on the dashboard, and its `Why` text ends with `In maintenance until <end>`. An entry with `"end": null`
+mutes the task until you remove it, and its `Why` text ends with `Muted (alerts off)`.
+See [CONFIGURE.md](CONFIGURE.md).
 
 ### 6. Check the collector itself
 
@@ -257,18 +265,36 @@ The command only reads. It prints two lines:
 
 ```text
 Local: taskdash_20261017_202547.log: <time> - INFO - TaskDash publish complete.
-Service: last collector run started 2026-10-17 20:25:47 UTC, exit_status success
+Service: last collector run started 2026-10-17 20:25:47 UTC, exit_status success; last success 47 min ago (host 'COLLECTOR-1')
 ```
 
 - The **Local** line gives the newest log file in the `Logs` folder and its last line. A run that
   ended well has the last line `TaskDash publish complete.`
 - The **Service** line gives the start time of the newest row in the **CollectorRuns** table and
   its `exit_status`. The values are `success` and `failed`. The time is in UTC.
+- The **Service** line also gives the age of the newest successful run.
+- By default, the **Service** line covers only the runs of this install's host. To read the runs of
+  another host, add `--host NAME`. To read every host, add `--host all`.
 - To print only the **Local** line, without a sign-in to ArcGIS, add `--offline`.
 
 The `Logs` folder is in `C:\TaskDash`, unless `logging.log_dir` names another folder.
 
-The command prints a result and does not judge it. It returns `0` also when the last run failed.
+The exit code of the command tells a script what to do:
+
+| Code | Meaning | What to do |
+|---|---|---|
+| `0` | The newest run succeeded, and its age is less than twice the collector interval. | Nothing. |
+| `1` | The newest run failed. | Read the newest log. See [TROUBLESHOOTING.md](TROUBLESHOOTING.md). |
+| `2` | There is no run for the host, or the newest success is too old. | Check that the collector task runs. |
+| `3` | The command could not sign in or read the service. | Read the message. See [TROUBLESHOOTING.md](TROUBLESHOOTING.md). |
+
+The collector interval is `scheduler.collector_interval_minutes`, 60 minutes by default. So the
+default limit is 120 minutes. With `--offline`, the exit code is `0` unless the config cannot be read.
+
+**Remove old backups and logs.** Run `& $td status --prune`. The command lists the old backup files
+and old logs that TaskDash wrote. It removes nothing. To remove the listed files, run
+`& $td status --prune --apply`. Add `--keep N` to change how many backups stay. The default is 10.
+See [CONFIGURE.md](CONFIGURE.md) for the file names.
 
 **In the dashboard,** open the **Collector & Changes** tab. The **Collector runs** table lists the
 newest 48 runs of the collector task.

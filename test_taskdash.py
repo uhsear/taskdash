@@ -1327,7 +1327,7 @@ def test_read_run_events_flags_a_full_incremental_read(monkeypatch):
 
 
 def test_a_stalled_incremental_read_fails_loudly(monkeypatch):
-    monkeypatch.setattr(collect, "collect_tasks", lambda timeout: [])
+    monkeypatch.setattr(collect, "collect_tasks", lambda timeout, *_: [])
     monkeypatch.setattr(publish, "read_run_events", lambda *a: ([{"event_id": 999}], True))
     with pytest.raises(SystemExit, match="stalled"):
         publish.collect_everything({"host_name_override": "H"}, None, min_record_id=500)
@@ -1387,6 +1387,7 @@ def test_publish_merges_before_writing_runs(monkeypatch):
 
     monkeypatch.setattr(publish, "query_all_rows", fake_query_all_rows)
     monkeypatch.setattr(publish, "upsert_by_key", fake_upsert)
+    monkeypatch.setattr(publish, "_newest_runs_outside_window", lambda *a: [])  # tables here are ints
     monkeypatch.setattr(publish, "sync_inventory", lambda *a, **k: {"added": 0, "updated": 0, "deleted": 0})
     monkeypatch.setattr(publish, "purge_older_than", lambda *a, **k: 0)
     monkeypatch.setattr(publish, "get_tables", lambda item: {"TaskRuns": 1, "TaskInventory": 2,
@@ -1449,7 +1450,7 @@ def test_starts_that_never_happened_are_not_counted_as_runs(frozen_now):
 def test_collection_reads_the_audit_clock_before_the_slow_queries(monkeypatch):
     order = []
     monkeypatch.setattr(publish, "utc_now", lambda: order.append("clock") or NOW)
-    monkeypatch.setattr(collect, "collect_tasks", lambda timeout: order.append("tasks") or [])
+    monkeypatch.setattr(collect, "collect_tasks", lambda timeout, *_: order.append("tasks") or [])
     monkeypatch.setattr(publish, "read_run_events", lambda *a: (order.append("events") or [], False))
     captured = {}
     real = collect.build_inventory_rows
@@ -1531,7 +1532,7 @@ def test_a_newer_failed_launch_fails_the_task_even_with_a_clean_last_result(froz
     publish.enrich_inventory([task], publish.summarize_runs(runs), {})
     assert (task["health_status"], task["last_run_failed"], task["needs_attention"]) == ("Error", 1, 1)
     assert task["attention_reason"].startswith("Last run: Account not signed in. ")
-    assert publish.alert_signature([task])[0].startswith("FAILED: Parcel Refresh")
+    assert publish.alert_signature([task])[0].startswith("FAILED: \\Parcel Refresh")
 
 
 def test_an_old_failed_run_does_not_override_a_newer_clean_last_run(frozen_now):

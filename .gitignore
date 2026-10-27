@@ -25,3 +25,6 @@ __pycache__/
 
 # Per-machine Claude Code settings.
 .claude/settings.local.json
+
+# Written by taskdash setup --apply; ids and titles only, but per-install state.
+taskdash_setup_manifest.json

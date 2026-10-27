@@ -23,7 +23,9 @@ from typing import Any, Dict, List, Optional
 
 import taskdash_common as common
 import taskdash_synthetic as generator
-from taskdash_common import DEFAULT_CONFIG_FILE, TASKDASH_VERSION, atomic_write_json, emit, normalize_text
+from taskdash_common import (
+    DEFAULT_CONFIG_FILE, TASKDASH_VERSION, atomic_write_json, emit, normalize_text, see_troubleshooting,
+)
 
 TITLE_PREFIX = "DEMO_"
 FOLDER = "TaskDash_Demo"
@@ -99,14 +101,16 @@ def refuse_shared_ids(demo_arcgis: Dict[str, Any], real: Dict[str, Any]) -> None
     if shared:
         raise SystemExit(f"The demo config uses item id(s) {', '.join(sorted(shared))} that the real config "
                          "also uses, so publishing would overwrite real data. Delete the demo folder's "
-                         "TaskDash.config.json and run `taskdash demo --apply` again.")
+                         "TaskDash.config.json and run `taskdash demo --apply` again.\n"
+                         + see_troubleshooting("The demo and the real install share an item"))
 
 
 def run_publish(publish: Any, argv: List[str]) -> None:
     code = publish.main(argv)
     if code:
         raise SystemExit(f"The demo collect run exited with code {code}. Read the newest log in "
-                         f"{common.home_dir() / 'demo' / 'Logs'}, fix the cause, then re-run `taskdash demo`.")
+                         f"{common.home_dir() / 'demo' / 'Logs'}, fix the cause, then re-run `taskdash demo`.\n"
+                         + see_troubleshooting("The demo collect run failed"))
 
 
 def check_run(demo: Path, fixtures: List[Path]) -> None:
@@ -136,14 +140,15 @@ def apply_run(demo: Path, fixtures: List[Path], real: Dict[str, Any]) -> None:
         raise SystemExit("--apply signs in only through the real config's arcgis.url and arcgis.profile, "
                          "and one of them is empty. A username or password is never copied to the demo. "
                          "Store a profile as INSTALL.md step 3 describes, set arcgis.profile, then re-run "
-                         "`taskdash demo --apply`.")
+                         "`taskdash demo --apply`.\n" + see_troubleshooting("The demo needs a real sign-in"))
     refuse_shared_ids(read_demo_arcgis(config_path), real)
     stored = read_demo_arcgis(config_path)
     missing = [key for key in setup.INSTALL_KEYS if not normalize_text(stored.get(key))]
     if 0 < len(missing) < len(setup.INSTALL_KEYS):
         raise SystemExit(f"The demo config lacks arcgis.{', arcgis.'.join(missing)}. A failed demo setup "
                          f"left a partial install. Delete the {TITLE_PREFIX} items in the {FOLDER} folder "
-                         f"and {config_path}, then re-run `taskdash demo --apply`.")
+                         f"and {config_path}, then re-run `taskdash demo --apply`.\n"
+                         + see_troubleshooting("The demo install is incomplete"))
     if missing:
         setup.main(["--config", str(config_path), "--apply", "--folder", FOLDER, "--title-prefix", TITLE_PREFIX])
         refuse_shared_ids(read_demo_arcgis(config_path), real)

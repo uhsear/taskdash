@@ -136,8 +136,8 @@ def test_definition_change_needs_the_prior_inventory_the_fixture_carries(host1, 
 def test_shared_cause_incident_names_one_cause(host2):
     inventory = host2["inventory"]
     current = publish.alert_signature(inventory)
-    assert sorted(current) == ["FAILED: Archive Copy", "FAILED: Export Packager",
-                               "FAILED: Mirror Sync", "FAILED: Report Builder"]
+    assert sorted(current) == ["FAILED: \\AppHost02\\Archive Copy", "FAILED: \\AppHost02\\Export Packager",
+                               "FAILED: \\AppHost02\\Mirror Sync", "FAILED: \\AppHost02\\Report Builder"]
     assert len({r["last_result_text"] for r in inventory if r["last_run_failed"]}) == 1
     incident = publish.shared_cause(inventory, current, 3, causes=publish.failure_causes(inventory))
     assert incident["count"] == 4

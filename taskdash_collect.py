@@ -24,6 +24,7 @@ from taskdash_common import (
     round_hours,
     run_powershell_json,
     runtime_dir,
+    see_troubleshooting,
     short_duration,
     safe_float,
     safe_int,
@@ -144,7 +145,7 @@ SCRIPT_TYPE_BY_EXT = {
 
 POWERSHELL_TASK_QUERY = r"""
 $ErrorActionPreference = "Stop"
-[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+if ($ExecutionContext.SessionState.LanguageMode -eq 'FullLanguage') { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 }
 
 function Convert-ToIsoUtcOrNull {
     param($Value)
@@ -172,9 +173,18 @@ function Get-TriggerTypeName {
     return $stripped
 }
 
+# Select-Xml, not an XPath method on the node: a method call on an XmlNode fails in ConstrainedLanguage.
+function Select-FirstNode {
+    param($Node, [string]$XPath)
+    if (-not $Node) { return $null }
+    $hit = Select-Xml -Xml $Node -XPath $XPath | Select-Object -First 1
+    if ($hit) { return $hit.Node }
+    return $null
+}
+
 function Get-XmlList {
     param($Parent, [string]$Name)
-    $node = if ($Parent) { $Parent.SelectSingleNode("*[local-name()='$Name']") } else { $null }
+    $node = Select-FirstNode $Parent "*[local-name()='$Name']"
     if (-not $node) { return "" }
     # <Day>15</Day> and <Week>Last</Week> carry text; <January/> and <Monday/> are named.
     return (@($node.ChildNodes | Where-Object { $_.NodeType -eq 'Element' } | ForEach-Object {
@@ -184,7 +194,7 @@ function Get-XmlList {
 $problems = @()
 function Add-ReadProblem {
     param([string]$Name, [string]$Message)
-    $script:problems += [pscustomobject]@{ name = $Name; message = $Message }
+    $script:problems += [ordered]@{ name = $Name; message = $Message }
 }
 
 # One corrupt or ACL-denied definition (e.g. 0x80041321, "task image is corrupt") used to make
@@ -195,9 +205,16 @@ foreach ($err in @($taskListErrors)) {
     $target = if ($err.TargetObject) { [string]$err.TargetObject } else { "(unnamed task)" }
     Add-ReadProblem $target ([string]$err.Exception.Message)
 }
+$excludeMicrosoft = __EXCLUDE_MICROSOFT__
+$excludedCount = 0
 $rows = foreach ($task in $tasks) {
+    # The whole folder name: \Microsoft\ and its subfolders, not \MicrosoftSync\. Dropped here so
+    # the built-in tasks are never read, converted to JSON or sent to Python. They are counted so
+    # Python can tell "only built-in tasks" from "the listing failed".
+    if ($excludeMicrosoft -and $task.TaskPath -like '\Microsoft\*') { $excludedCount += 1; continue }
     $info = $null
-    try { $info = Get-ScheduledTaskInfo -TaskName $task.TaskName -TaskPath $task.TaskPath } catch {
+    # Piped, not -TaskName: a name is then never read as a pattern, so [ and ] in a name are safe.
+    try { $info = $task | Get-ScheduledTaskInfo } catch {
         Add-ReadProblem "$($task.TaskPath)$($task.TaskName)" "Get-ScheduledTaskInfo failed, so the task is left out: $($_.Exception.Message)"
         # Skipped, not listed with blank run fields: a failing task would read as never run.
         continue
@@ -223,7 +240,7 @@ $rows = foreach ($task in $tasks) {
             if ($_.Execute) { $parts += $_.Execute }
             if ($_.Arguments) { $parts += $_.Arguments }
             if ($_.WorkingDirectory) { $parts += "(wd=$($_.WorkingDirectory))" }
-            $detail = [pscustomobject]@{
+            $detail = [ordered]@{
                 index = [int]$actionIndex
                 execute = [string]$_.Execute
                 arguments = [string]$_.Arguments
@@ -258,8 +275,9 @@ $rows = foreach ($task in $tasks) {
         $xmlTriggers = @()
         if (@($triggerList | Where-Object { $_.CimClass.CimClassName -eq 'MSFT_TaskTrigger' }).Count) {
             try {
-                $xml = [xml](Export-ScheduledTask -TaskName $task.TaskName -TaskPath $task.TaskPath)
-                $xmlTriggers = @($xml.DocumentElement.SelectSingleNode("*[local-name()='Triggers']").ChildNodes |
+                # Piped for the same reason as Get-ScheduledTaskInfo: -TaskName reads [ ] as a pattern.
+                $xml = [xml]($task | Export-ScheduledTask)
+                $xmlTriggers = @((Select-FirstNode $xml.DocumentElement "*[local-name()='Triggers']").ChildNodes |
                     Where-Object { $_.NodeType -eq 'Element' })
             } catch {
                 $xmlTriggers = @()
@@ -271,11 +289,11 @@ $rows = foreach ($task in $tasks) {
             $rep = $_.Repetition
             $calendar = $null
             if ($_.CimClass.CimClassName -eq 'MSFT_TaskTrigger' -and $triggerIndex -lt $xmlTriggers.Count) {
-                $calendar = $xmlTriggers[$triggerIndex].SelectSingleNode(
-                    "*[local-name()='ScheduleByMonth' or local-name()='ScheduleByMonthDayOfWeek']")
+                $calendar = Select-FirstNode $xmlTriggers[$triggerIndex] `
+                    "*[local-name()='ScheduleByMonth' or local-name()='ScheduleByMonthDayOfWeek']"
             }
             $triggerIndex += 1
-            [pscustomobject]@{
+            [ordered]@{
                 type = [string](Get-TriggerTypeName $_)
                 start = [string]$_.StartBoundary
                 end = [string]$_.EndBoundary
@@ -295,7 +313,7 @@ $rows = foreach ($task in $tasks) {
         })
     } catch { $triggerDetails = @() }
 
-    [pscustomobject]@{
+    [ordered]@{
         task_name = [string]$task.TaskName
         task_path = [string]$task.TaskPath
         task_full_name = [string]("{0}{1}" -f $task.TaskPath, $task.TaskName)
@@ -326,23 +344,23 @@ $rows = foreach ($task in $tasks) {
     }
 }
 
-[pscustomobject]@{ tasks = @($rows); errors = @($problems) } | ConvertTo-Json -Depth 6 -Compress
+[ordered]@{ tasks = @($rows); errors = @($problems); excluded = [int]$excludedCount } | ConvertTo-Json -Depth 6 -Compress
 """
 
 
 POWERSHELL_LOG_HEALTH_QUERY_TEMPLATE = r"""
 $ErrorActionPreference = "Stop"
-[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+if ($ExecutionContext.SessionState.LanguageMode -eq 'FullLanguage') { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 }
 $LogName = "__LOG_NAME__"
 try {
     $log = Get-WinEvent -ListLog $LogName -ErrorAction Stop
-    [pscustomobject]@{
+    [ordered]@{
         exists = $true
         is_enabled = [bool]$log.IsEnabled
         error_message = ""
     } | ConvertTo-Json -Compress
 } catch {
-    [pscustomobject]@{
+    [ordered]@{
         exists = $false
         is_enabled = $false
         error_message = [string]$_.Exception.Message
@@ -353,7 +371,7 @@ try {
 
 POWERSHELL_HISTORY_QUERY_TEMPLATE = r"""
 $ErrorActionPreference = "Stop"
-[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+if ($ExecutionContext.SessionState.LanguageMode -eq 'FullLanguage') { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 }
 
 $LogName = "Microsoft-Windows-TaskScheduler/Operational"
 $DaysBack = __DAYS_BACK__
@@ -380,6 +398,44 @@ function Get-XmlDataMap {
             $name = [string]$node.Name
             if ($name) { $map[$name] = [string]$node.'#text' }
         }
+    }
+    return $map
+}
+
+# ConstrainedLanguage refuses $event.ToXml() (a method on a type outside the allowed list), so
+# there the fields come from $event.Properties by position. Each row lists the field names of that
+# event's template in order, as printed by ToXml() on real events; an event with no row (or more
+# values than names) keeps only the fields it has names for. 330 has no sample: TaskName only.
+$FullLanguage = $ExecutionContext.SessionState.LanguageMode -eq 'FullLanguage'
+$PropertyNames = @{
+    100 = @('TaskName', 'UserContext', 'InstanceId')
+    101 = @('TaskName', 'UserContext', 'ResultCode')
+    102 = @('TaskName', 'UserContext', 'InstanceId')
+    103 = @('TaskName', 'InstanceId', 'UserContext', 'ResultCode')
+    111 = @('TaskName', 'InstanceId')
+    153 = @('TaskName')
+    200 = @('TaskName', 'ActionName', 'TaskInstanceId', 'EnginePID')
+    201 = @('TaskName', 'TaskInstanceId', 'ActionName', 'ResultCode', 'EnginePID')
+    202 = @('TaskName', 'TaskInstanceId', 'ActionName', 'ResultCode', 'EnginePID')
+    203 = @('TaskName', 'TaskInstanceId', 'ActionName', 'ResultCode')
+    322 = @('TaskName', 'TaskInstanceId')
+    329 = @('TaskName', 'TaskInstanceId')
+    330 = @('TaskName')
+    332 = @('TaskName', 'UserName')
+}
+
+function Get-PropertyDataMap {
+    param($Record)
+    $map = @{}
+    $names = $PropertyNames[[int]$Record.Id]
+    if (-not $names) { return $map }
+    $values = @($Record.Properties)
+    for ($i = 0; $i -lt $names.Count -and $i -lt $values.Count; $i++) {
+        $value = $values[$i].Value
+        # The event XML prints a GUID in braces; a bare GUID would not match the Full-mode rows.
+        $text = [string]$value
+        if ($value -is [guid]) { $text = "{" + $text + "}" }
+        $map[[string]$names[$i]] = $text
     }
     return $map
 }
@@ -419,9 +475,12 @@ try {
 
 $rows = foreach ($event in $events) {
     $xmlEvent = $null
-    try { [xml]$xmlEvent = $event.ToXml() } catch { $xmlEvent = $null }
-
-    $dataMap = Get-XmlDataMap $xmlEvent
+    if ($FullLanguage) {
+        try { [xml]$xmlEvent = $event.ToXml() } catch { $xmlEvent = $null }
+        $dataMap = Get-XmlDataMap $xmlEvent
+    } else {
+        $dataMap = Get-PropertyDataMap $event
+    }
     $instanceId = [string]$dataMap['InstanceId']
     if (-not $instanceId) { $instanceId = [string]$dataMap['TaskInstanceId'] }
 
@@ -435,7 +494,7 @@ $rows = foreach ($event in $events) {
     }
     $eventTimeUtc = if ($systemTimeRaw) { $systemTimeRaw } else { Convert-ToIsoUtcOrNull $event.TimeCreated }
 
-    [pscustomobject]@{
+    [ordered]@{
         event_id = [int]$event.Id
         event_record_id = [int64]$event.RecordId
         event_time_utc = $eventTimeUtc
@@ -454,7 +513,7 @@ if ($MinRecordId -gt 0) {
     # A failure here only loses the gap check, so it must not fail the read that already succeeded.
     $oldest = $null
     try { $oldest = Get-WinEvent -LogName $LogName -MaxEvents 1 -Oldest -ErrorAction Stop } catch { $oldest = $null }
-    $marker = [pscustomobject]@{ oldest_record_id = if ($oldest) { [int64]$oldest.RecordId } else { $null } }
+    $marker = [ordered]@{ oldest_record_id = if ($oldest) { [int64]$oldest.RecordId } else { $null } }
     @($rows | Where-Object { $null -ne $_ }) + $marker | ConvertTo-Json -Depth 6 -Compress
 } else {
     $rows | ConvertTo-Json -Depth 6 -Compress
@@ -467,21 +526,24 @@ if ($MinRecordId -gt 0) {
 unreadable_tasks: List[str] = []
 
 
-def collect_tasks(timeout_seconds: int = 180) -> List[Dict[str, Any]]:
-    rows = run_powershell_json(POWERSHELL_TASK_QUERY, timeout_seconds)
+def collect_tasks(timeout_seconds: int = 180, exclude_microsoft: bool = True) -> List[Dict[str, Any]]:
+    script = POWERSHELL_TASK_QUERY.replace("__EXCLUDE_MICROSOFT__", "$true" if exclude_microsoft else "$false")
+    rows = run_powershell_json(script, timeout_seconds)
     payload = rows[0] if rows else {}
     errors = [e for e in payload.get("errors") or [] if isinstance(e, dict)]
     tasks = [t for t in payload.get("tasks") or [] if isinstance(t, dict)]
     unreadable_tasks.extend(
         f"{normalize_text(e.get('name'))}: {normalize_text(e.get('message'))}" for e in errors)
-    if errors and not tasks:
+    excluded = payload.get("excluded")
+    if errors and not tasks and not (isinstance(excluded, int) and excluded > 0):
         # SilentlyContinue turns a failed listing (service stopped, no access to the root) into
         # errors and zero tasks. Carrying on would publish an empty inventory and mail a false
         # "recovered", so this stays the loud failure it was before per-task errors were tolerated.
+        # Built-in tasks the filter dropped prove the listing worked, so they are not "zero tasks".
         raise SystemExit(
             f"Cannot list scheduled tasks: {'; '.join(unreadable_tasks[-len(errors):])}. Check that "
             f"the Task Scheduler service is running and that the task account can read the task "
-            f"folders, then run again.")
+            f"folders, then run again.\n" + see_troubleshooting("TaskDash cannot list any scheduled task"))
     if errors:
         emit(f"WARNING: {len(errors)} scheduled task problem(s); the readable tasks are still "
              f"collected: {'; '.join(unreadable_tasks[-len(errors):])}. Repair or re-create the "
@@ -506,7 +568,8 @@ def check_event_log_health(
     if not info.get("exists", False):
         raise SystemExit(
             f"Cannot read event log '{log_name}': {info.get('error_message') or 'not found'}. "
-            f"Run this collector elevated, or confirm the channel exists on this host."
+            f"Run this collector elevated, or confirm the channel exists on this host.\n"
+            + see_troubleshooting("The Task Scheduler log cannot be read")
         )
     if not info.get("is_enabled", False):
         raise EventLogDisabled(
@@ -565,7 +628,7 @@ def event_gap_warning(min_record_id: int, oldest: Optional[int]) -> str:
 POWERSHELL_NEWEST_RECORD_QUERY = r"""
 $ErrorActionPreference = "Stop"
 $newest = Get-WinEvent -LogName "Microsoft-Windows-TaskScheduler/Operational" -MaxEvents 1 -ErrorAction SilentlyContinue
-[pscustomobject]@{ record_id = if ($newest) { [int64]$newest.RecordId } else { $null } } | ConvertTo-Json -Compress
+[ordered]@{ record_id = if ($newest) { [int64]$newest.RecordId } else { $null } } | ConvertTo-Json -Compress
 """
 
 
@@ -926,7 +989,10 @@ def should_include_task(row: Dict[str, Any], scheduler_config: Dict[str, Any]) -
     task_name = normalize_text(row.get("task_name"))
     task_path = normalize_text(row.get("task_path"))
 
-    if scheduler_config.get("exclude_microsoft_tasks", True) and task_path.startswith("\\Microsoft"):
+    # Whole folder name, as the PowerShell query does: \MicrosoftSync\ is not a Microsoft folder.
+    folder = task_path.lower()
+    if scheduler_config.get("exclude_microsoft_tasks", True) and (
+            folder == "\\microsoft" or folder.startswith("\\microsoft\\")):
         return False
     if not scheduler_config.get("include_disabled", True) and not row.get("enabled"):
         return False

@@ -1,5 +1,6 @@
 # Builds the wheel for a v* tag and attaches it to a GitHub Release. The release also carries a
-# hash-pinned requirements.lock, a CycloneDX SBOM, and SHA256SUMS.txt that lists all three.
+# hash-pinned requirements.lock, a CycloneDX SBOM, the one-window installer Install-TaskDash.ps1,
+# and SHA256SUMS.txt that lists the wheel and those three files.
 # The repository is private, so the release is visible only to people with access to it.
 # After the private release exists, the maintainer copies the release files to the public
 # repository uhsear/taskdash-releases by hand. This workflow does not do the copy: it would need
@@ -28,9 +29,10 @@ jobs:
         with:
           python-version: "3.11"
 
-      # The tests import arcgis but replace its network calls with fakes.
+      # The tests import arcgis but replace its network calls with fakes. pyyaml lets the
+      # workflow-parsing tests run; without it they would skip.
       - name: Install test dependencies
-        run: python -m pip install "arcgis>=2.4,<3" pytest
+        run: python -m pip install "arcgis>=2.4,<3" pytest "pyyaml>=6,<7"
 
       - name: Run the full suite
         run: python -m pytest -q -p no:cacheprovider
@@ -93,7 +95,10 @@ jobs:
       - name: Write the checksums
         shell: powershell
         run: |
-          $lines = Get-ChildItem dist\*.whl, dist\requirements.lock, dist\*.cdx.json | ForEach-Object {
+          # The quick install in docs/INSTALL.md downloads this script from the release page. Listing it
+          # in SHA256SUMS.txt (which the sign job signs) lets the reader check it like the wheel.
+          Copy-Item Install-TaskDash.ps1 dist\
+          $lines = Get-ChildItem dist\*.whl, dist\requirements.lock, dist\*.cdx.json, dist\Install-TaskDash.ps1 | ForEach-Object {
             "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower())  $($_.Name)"
           }
           # LF, not the CRLF Out-File writes: `sha256sum -c` on Linux reads the CR into the file name.
@@ -106,6 +111,7 @@ jobs:
             dist/*.whl
             dist/requirements.lock
             dist/*.cdx.json
+            dist/Install-TaskDash.ps1
             dist/SHA256SUMS.txt
           if-no-files-found: error
 
@@ -172,5 +178,5 @@ jobs:
         run: |
           $flags = @()
           if ($env:TAG.Contains("-")) { $flags += "--prerelease" }
-          gh release create $env:TAG dist\taskdash-*.whl dist\requirements.lock dist\*.cdx.json dist\SHA256SUMS.txt dist\*.sigstore.json --title "TaskDash $env:TAG" --generate-notes @flags
+          gh release create $env:TAG dist\taskdash-*.whl dist\requirements.lock dist\*.cdx.json dist\Install-TaskDash.ps1 dist\SHA256SUMS.txt dist\*.sigstore.json --title "TaskDash $env:TAG" --generate-notes @flags
           if ($LASTEXITCODE) { throw "gh release create exited $LASTEXITCODE." }

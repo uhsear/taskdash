@@ -1,0 +1,157 @@
+# Proves the suite and a live dry-run collect on more than the one runner install.yml uses: two
+# Windows Server images, three Pythons, ConstrainedLanguage, German and Finnish cultures, two
+# daylight-saving time zones, and a 500-task synthetic host. It runs on a version tag, once a week
+# and on demand, not on every push, because it starts 14 Windows jobs. It uses no secret and never
+# signs in to ArcGIS Online: a dry run never connects.
+#
+# Runner images: windows-2019 is not listed. GitHub retired that image on 30 June 2025, and a job
+# that asks for it no longer starts. windows-latest points at windows-2025. Check the current
+# labels at https://github.com/actions/runner-images#available-images before you add or drop one.
+#
+# ConstrainedLanguage: the environment variable __PSLockdownPolicy=4 puts every new PowerShell in
+# ConstrainedLanguage, but only as a machine variable; a process variable does nothing (measured
+# with Windows PowerShell 5.1). It is a test aid, not a security control: real enforcement comes
+# from AppLocker or WDAC, which a runner cannot set up per job. The leg writes the variable to
+# the registry, so the runner's own PowerShell would lock down too; every step from that point
+# uses cmd, and a test asserts the mode, so a leg that stayed in FullLanguage fails.
+name: ci-matrix
+
+on:
+  push:
+    tags: ["v*"]
+  schedule:
+    - cron: "17 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # The full suite on every image and Python it supports. 2 x 3 = 6 legs.
+  suite:
+    name: suite (${{ matrix.os }}, Python ${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, windows-2025]
+        python: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python }}
+
+      # The tests import arcgis but replace its network calls with fakes. pyyaml lets
+      # test_h4_ci_matrix.py parse the workflow files.
+      - name: Install test dependencies
+        run: python -m pip install "arcgis>=2.4,<3" pytest "pyyaml>=6,<7"
+
+      - name: Run the full suite
+        run: python -m pytest -q -p no:cacheprovider -rs
+
+  # One leg per environment. Only the listed legs run; there is no cross product. Each leg sets its
+  # zone, culture and language mode, and a test asserts that the leg really runs in them. The
+  # live tests register six odd tasks, read them back with a real collect, and remove them.
+  environment:
+    name: environment (${{ matrix.leg }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { leg: "live-2022", os: windows-2022, zone: "UTC", offset: "0", culture: "en-US", language_mode: "FullLanguage", targets: "" }
+          - { leg: "live-2025", os: windows-2025, zone: "UTC", offset: "0", culture: "en-US", language_mode: "FullLanguage", targets: "" }
+          - { leg: "de-DE", os: windows-2025, zone: "UTC", offset: "0", culture: "de-DE", language_mode: "FullLanguage", targets: "" }
+          - { leg: "fi-FI", os: windows-2025, zone: "UTC", offset: "0", culture: "fi-FI", language_mode: "FullLanguage", targets: "" }
+          # Standard offsets: time.timezone ignores daylight saving. New York changes clocks in
+          # March and November, Sydney in October and April, so one leg is always in summer time.
+          - { leg: "tz-new-york", os: windows-2025, zone: "Eastern Standard Time", offset: "-18000", culture: "en-US", language_mode: "FullLanguage", targets: "" }
+          - { leg: "tz-sydney", os: windows-2025, zone: "AUS Eastern Standard Time", offset: "36000", culture: "en-US", language_mode: "FullLanguage", targets: "" }
+          # The suite starts its own PowerShell scripts, and a locked-down PowerShell rejects them
+          # for reasons that are not TaskDash's, so this leg runs only the files that matter.
+          - { leg: "constrained-language", os: windows-2025, zone: "UTC", offset: "0", culture: "en-US", language_mode: "ConstrainedLanguage", targets: "test_h4_ci_legs.py test_h4_live_seeded.py test_h4_constrained_language.py" }
+    env:
+      TASKDASH_EXPECT_UTC_OFFSET_S: ${{ matrix.offset }}
+      TASKDASH_EXPECT_CULTURE: ${{ matrix.culture }}
+      TASKDASH_EXPECT_LANGUAGE_MODE: ${{ matrix.language_mode }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set the time zone
+        shell: cmd
+        run: tzutil /s "${{ matrix.zone }}"
+
+      # Set-Culture changes the user's format settings for every process started after it.
+      # Set-WinSystemLocale would also need a restart, so the non-Unicode language stays as it is.
+      - name: Set the culture
+        shell: powershell
+        run: Set-Culture -CultureInfo "${{ matrix.culture }}"
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Install test dependencies
+        shell: cmd
+        run: python -m pip install "arcgis>=2.4,<3" pytest "pyyaml>=6,<7"
+
+      # The Task Scheduler Operational log is off on a new runner, and a collect without it exits 1.
+      - name: Register the seeded tasks and enable the task log
+        shell: powershell
+        run: |
+          $manifest = Join-Path $env:RUNNER_TEMP "seeded.json"
+          .\tests\ci\seed_tasks.ps1 -Action Register -ManifestPath $manifest
+          wevtutil sl Microsoft-Windows-TaskScheduler/Operational /e:true
+          if ($LASTEXITCODE) { throw "wevtutil exited $LASTEXITCODE. Run the step elevated." }
+          "TASKDASH_LIVE_SEEDED=$manifest" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Lock PowerShell into ConstrainedLanguage
+        if: ${{ matrix.language_mode == 'ConstrainedLanguage' }}
+        shell: cmd
+        run: reg add "HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment" /v __PSLockdownPolicy /t REG_SZ /d 4 /f
+
+      - name: Run the tests
+        shell: cmd
+        run: python -m pytest -q -p no:cacheprovider -rs ${{ matrix.targets }}
+
+      # Both cleanup steps run after a failure. The lock comes off first, so the next step is in FullLanguage.
+      - name: Remove the ConstrainedLanguage lock
+        if: ${{ always() && matrix.language_mode == 'ConstrainedLanguage' }}
+        shell: cmd
+        run: reg delete "HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment" /v __PSLockdownPolicy /f
+
+      - name: Remove the seeded tasks
+        if: always()
+        shell: powershell
+        run: .\tests\ci\seed_tasks.ps1 -Action Remove -ManifestPath (Join-Path $env:RUNNER_TEMP "seeded.json")
+
+  # The opt-in 500-task test. It asserts that the offline passes finish inside 15 minutes.
+  scale:
+    runs-on: windows-2025
+    timeout-minutes: 30
+    env:
+      TASKDASH_SCALE_TASKS: "500"
+      TASKDASH_SCALE_BUDGET_SECONDS: "900"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Install test dependencies
+        run: python -m pip install "arcgis>=2.4,<3" pytest
+
+      # -s shows the seconds each pass took.
+      - name: Run the scale test
+        run: python -m pytest -q -p no:cacheprovider -s test_h4_scale_fixture.py

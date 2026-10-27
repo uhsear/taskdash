@@ -18,7 +18,7 @@ TaskDash reads three sources on the computer:
 - The run history in the Windows event log `Microsoft-Windows-TaskScheduler/Operational`.
 - The log files of each task, which TaskDash mines for counts, durations and error lines.
 
-It writes the rows to five hosted tables. It never changes a task. A read-only view of those
+It writes the rows to six hosted tables. It never changes a task. A read-only view of those
 tables feeds the dashboard. If you turn on e-mail alerts, TaskDash sends an e-mail when a task fails
 or is overdue, and when it recovers. It can also send one daily check e-mail.
 
@@ -35,6 +35,9 @@ After the install, use these guides:
 
 - [CONFIGURE.md](CONFIGURE.md) describes every setting.
 - [USE.md](USE.md) shows how to read the dashboard and the alert e-mails.
+- [UPGRADE.md](UPGRADE.md) moves an install to a new release, or back to the previous one.
+- [ROTATE.md](ROTATE.md) changes the ArcGIS, mail or task account password.
+- [APPROVAL.md](APPROVAL.md) is a one-page sheet for your IT and security review.
 - [TROUBLESHOOTING.md](TROUBLESHOOTING.md) lists each error message and its fix.
 
 ## Requirements
@@ -65,10 +68,10 @@ The computer that runs TaskDash needs these components:
 - **PowerShell:** Windows PowerShell (`powershell.exe`). TaskDash calls it to read the Task
   Scheduler, and the task installer is a PowerShell script.
 - **Python:** 64-bit Python 3.11 from python.org, installed for all users. This is the tested version.
-  The package declares Python 3.9 or later.
+  The package declares Python 3.11 or later.
 - **The `arcgis` package:** version 2.4 or later and earlier than 3. The wheel installs it.
-- **The `keyring` package:** only if you turn on e-mail alerts with a mail user name. It is
-  an optional extra, `taskdash[smtp]`. The mail password comes from the Windows keyring.
+- **The `keyring` package:** the install guide's `pip install` line adds it with the `smtp` extra.
+  TaskDash reads it only if you set a mail user name. The mail password comes from the Windows keyring.
 - **A Windows account for the task:** a member of the local Administrators group, with a password.
   A standard account sees only some of the tasks.
 - **ArcGIS Pro:** TaskDash does not need it. Install it only where the tasks you monitor run arcpy.
@@ -89,12 +92,13 @@ items in one folder, named `TaskDash` by default. The group is not in the folder
 | Name | Item type | Minimum user type | Shared with |
 |---|---|---|---|
 | TaskDash (dashboard) | Dashboard | Viewer, not tested; Creator to create it | The viewers group |
-| TaskDash (service) | Hosted feature layer with five tables | Creator | Nobody (owner only) |
+| TaskDash (service) | Hosted feature layer with six tables | Creator | Nobody (owner only) |
 | TaskInventory | Table in the service | Creator | Nobody (owner only) |
 | TaskRuns | Table in the service | Creator | Nobody (owner only) |
 | TaskMetrics | Table in the service | Creator | Nobody (owner only) |
 | CollectorRuns | Table in the service | Creator | Nobody (owner only) |
 | TaskChanges | Table in the service | Creator | Nobody (owner only) |
+| MetricChange | Table in the service | Creator | Nobody (owner only) |
 | TaskDash_view | Hosted feature layer view, query only | Viewer, not tested; Creator to create it | The viewers group |
 | TaskDash viewers | Group, private, by invitation | Viewer, not tested; Creator to create it | Not applicable |
 | Alert e-mail | E-mail, not an ArcGIS item | None | The addresses in `alerting.to` |
@@ -113,10 +117,11 @@ What each table holds:
 | TaskMetrics | metric value mined from a task's log files | 90 days |
 | CollectorRuns | run of the TaskDash collector, with its timing, counts and outcome | 90 days |
 | TaskChanges | detected change in a task's state | 365 days |
+| MetricChange | metric series, with its latest value and its usual value; the dashboard's Metric Change reads it | 90 days |
 
 These periods are the defaults of `retention.runs_days` (TaskRuns and CollectorRuns),
-`retention.metrics_days` and `retention.changes_days`. TaskDash removes older rows. It also removes
-an inventory row when its task is gone.
+`retention.metrics_days` (TaskMetrics and MetricChange) and `retention.changes_days`. TaskDash
+removes older rows. It also removes an inventory row when its task is gone.
 
 The alert e-mail is off by default. It needs `alerting.enabled` set to `true`, at least one address
 in `alerting.to`, and a mail server in the `smtp` section of the config. It names the host, the
@@ -126,6 +131,15 @@ links to the dashboard. It removes secrets from the log lines it quotes. The dai
 sent only when `alerting.heartbeat_hour` is set. The example config sets it to 7.
 
 ## Release notes
+
+### 1.2.0 (not yet released)
+
+Easier install and upkeep, and less work per hourly run. `Install-TaskDash.ps1` installs in one
+window, and `taskdash signin` and `taskdash preflight --as-task` set up and check the task account.
+New commands remove an install, retire a renamed computer and prune old dashboards. The hourly run
+reads 30 days of runs, sends only changed metric files, and Metric Change reads a small new table.
+Rules files can read comma decimals. Before you upgrade, note that TaskDash now needs Python 3.11 or
+later. See [UPGRADE.md](UPGRADE.md) and [CHANGELOG.md](../CHANGELOG.md).
 
 ### 1.1.0 (2026-10-27)
 

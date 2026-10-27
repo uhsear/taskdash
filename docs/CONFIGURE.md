@@ -21,7 +21,9 @@ install guide.
 TaskDash does not install `workflow_descriptions.json` or a rules file. You create them.
 
 In a wheel install, "its own folder" is the folder named by the `TASKDASH_HOME` environment
-variable. If `TASKDASH_HOME` is not set, it is the current folder. That folder also holds `Logs` and
+variable. If `TASKDASH_HOME` is not set, it is the current folder. If the current folder has no
+config, TaskDash uses the folder that contains the virtual environment running it, when that folder
+holds `TaskDash.config.json`. That folder also holds `Logs` and
 the saved state. The scheduled task from the install guide does not set `TASKDASH_HOME`. It starts in
 `C:\TaskDash`, so the task and your own commands use the same folder only when you run
 `Set-Location C:\TaskDash` first, as the install guide says. If you set `TASKDASH_HOME` for your own
@@ -69,8 +71,9 @@ By default, TaskDash monitors every task except the built-in tasks under `\Micro
 list, set keys in the `scheduler` object. TaskDash applies the filters in this order, and a task must
 pass all of them:
 
-1. `scheduler.exclude_microsoft_tasks`: when `true`, skip every task whose folder path starts with
-   `\Microsoft`.
+1. `scheduler.exclude_microsoft_tasks`: when `true`, skip every task in the folder `\Microsoft\` and
+   its subfolders. A folder such as `\MicrosoftSync\` is not skipped. PowerShell drops these tasks
+   before it sends the list to TaskDash.
 2. `scheduler.include_disabled`: when `false`, skip disabled tasks.
 3. `scheduler.task_name_regex`, `scheduler.task_path_regex` and `scheduler.action_regex`: keep only
    tasks whose name, folder path or action text matches the regex. An empty value matches all tasks.
@@ -96,6 +99,11 @@ Examples:
 
 This example keeps tasks whose name starts with `Parcel ` or `Address `. It then skips names that
 contain `test`, in any case. It also skips tasks that run a VBScript file.
+
+`TaskDash.config.example.json` ships a starting `scheduler.exclude_task_name_regex` for new
+installs. It skips the Microsoft Edge update, Google update and OneDrive update, reporting and startup tasks.
+If you copied the example config, remove or edit that value to monitor those tasks. A config
+without the key, such as an existing install, skips nothing by name.
 
 `scheduler.exclude_command_target_types` takes type names, not file extensions. The names are not
 case-sensitive. These are the types:
@@ -322,10 +330,17 @@ allowed in a rules file:
 | `display_names` | object of `key` to text | The label of a metric key on the dashboard. |
 | `display_acronyms` | list of words | Words that the dashboard writes in upper case. |
 | `secret_words` | list of words | Key words whose value TaskDash hides in `key=value` and `key: value` text, such as `Passwort`. They add to the built-in English words. |
+| `decimal_separator` | `"."` or `","` | How the logs write decimals. The default `"."` reads `1,234.5`. Set `","` if the logs write `1.234,5`. See the rule below. |
 | `log_preamble`, `section_pattern` | see `rules\default.json` | How TaskDash strips the timestamp and level from a log line, and finds a section header. |
 
 Follow these rules:
 
+- If you set `decimal_separator` to `","`, a `,` between digits starts the decimals. A `.` groups
+  thousands only when the number starts with one to three digits, not `0`, and every group after
+  each `.` has exactly three digits. `1,5` reads as 1.5, `1.234` as 1234 and `1.234,5` as 1234.5.
+  Any other dotted number, such as `1.5`, `0.512` or `1.2345`, stays a plain decimal. The setting
+  applies to every log, but not to `TASKDASH` metric lines, which always use `3.5` and `1,234`.
+  A later rules file overrides an earlier one. Any other value stops the run with a rules error.
 - Every entry in a numbered section needs a whole-number `order`. TaskDash applies entries from the
   lowest `order` to the highest.
 - No two entries in one section may share an `order`, across all loaded files. The default file uses
@@ -397,9 +412,9 @@ To turn on alerts:
    the install guide. The hourly
    task needs the copy of the task account. Your own `preflight` run needs your copy. For the task
    account, open a window with `runas`. In each window, run this command and type the password at
-   the prompt. This step needs the `keyring` package. If you installed the plain wheel, run
-   `C:\TaskDash\venv\Scripts\python.exe -m pip install "$whl[smtp]"` first. The `$whl` variable is
-   the wheel path from step 1 of the install guide.
+   the prompt. This step needs the `keyring` package. The install guide's `pip install` line
+   already added it. If a cloned ArcGIS Pro environment lacks it, run
+   `C:\TaskDash\proenv\python.exe -m pip install keyring`.
 
    ```powershell
    C:\TaskDash\venv\Scripts\python.exe -m keyring set taskdash-smtp <smtp.user>
@@ -499,13 +514,48 @@ Each window has a task regex, a start time and an end time:
 Always write the offset, such as `-05:00`, or `Z` for UTC. A time without an offset is read as UTC.
 
 While a window is active, TaskDash holds the alerts for the matching tasks. The e-mail lists them
-under `In maintenance (not alerted)`, and the log names them. The dashboard does not know about
-windows and still shows these tasks as problems. If a task still fails when the window ends, the next
-e-mail includes it.
+under `In maintenance (not alerted)`, and the log names them. If a task still fails when the window
+ends, the next e-mail includes it.
+
+The task's `Why` text on the dashboard ends with `In maintenance until <end>`. A task that needs
+attention shows its own reason first, so the table cell reads, for example, `Last run failed (+1 more)`.
+The detail card lists every reason. A healthy task shows the note alone.
 
 TaskDash logs a window that has ended, and ignores it. Remove old windows from the list. An entry
 with a time that TaskDash cannot read, or a regex that is not valid, produces a `WARNING` line and
 TaskDash skips it.
+
+### Mute one task until you remove the entry
+
+If you set `end` to `null`, the window never ends. The matching tasks send no failure, overdue or
+recovery alerts until you delete the entry. Also leave out `start` to mute them from now on:
+
+```json
+"alerting": {
+  "maintenance_windows": [
+    { "task": "^Legacy Sync$", "end": null, "reason": "Retired in the next release" }
+  ]
+}
+```
+
+An entry with no `end` key does not mute anything. TaskDash logs a `WARNING` and skips it, as it did
+before this feature existed. You must write `"end": null` on purpose. An entry with a real `end` but
+no `start` is also skipped, so an old config does not start muting after the upgrade.
+
+The `Why` text of a muted task ends with `Muted (alerts off)`. Muted tasks stay out of the shared-cause
+group in the e-mail. Every run that publishes writes one `WARNING` line with the number of muted
+tasks, such as `2 task(s) are muted`. If you see that line and no longer need the mute, delete the entry.
+
+An entry may hold only `task`, `start`, `end` and `reason`, plus notes whose key starts with `_`.
+It must have a non-empty `task`. The config still loads if it does not. TaskDash writes a `WARNING`
+line that reads `alerting.maintenance_windows[0] has an unknown key` or `has no non-empty "task"`.
+
+If an entry has a null `end` or no `start` and also has an unknown key, TaskDash ignores the whole entry.
+The key may be a misspelled `end` or `start`, such as `End` or `Start`. The entry would then mute the
+task for ever, or start at once. Fix the key, then run again. An unknown key in an entry that has
+both a `start` and an `end` is ignored, and the entry still works.
+
+A `task` value must be text. A number or `true` matches nothing.
 
 ## Choose what viewers see
 
@@ -596,8 +646,8 @@ your organization or groups.
 
 The dashboard help text carries values from the config. These keys change it:
 `scheduler.collector_interval_minutes`, `scheduler.overdue_grace_minutes`,
-`scheduler.collector_task_name`, `alerting.heartbeat_hour`, `retention.runs_days` and
-`retention.metrics_days`. The collector-late and collector-down thresholds also come from
+`scheduler.collector_task_name`, `scheduler.heartbeat_ignore_after_days`, `alerting.heartbeat_hour`,
+`retention.runs_days` and `retention.metrics_days`. The collector-late and collector-down thresholds also come from
 `scheduler.collector_interval_minutes`. They are 1.5 and 3 times the interval.
 
 If you change one of these keys, rebuild the dashboard. TaskDash saves the current definition to
@@ -611,6 +661,96 @@ check first:
 
 The key `scheduler.collector_interval_minutes` does not change the schedule of the hourly task. It
 only tells TaskDash how often the task runs.
+
+## Retire a computer
+
+Several computers can publish to one service. Every row carries the name of its computer. If you
+take one out of service, remove its inventory rows so the dashboard stops listing its tasks.
+
+1. On the old computer, stop and remove the collector task. If you skip this, the next run adds
+   the rows again. Run `Unregister-ScheduledTask -TaskName "TaskDash Collector" -Confirm:$false`
+   in an elevated PowerShell window. Use the task name you chose if it differs.
+2. On a computer that stays, count what would change. Use the name in the **Host** column:
+
+   ```powershell
+   & $td collect --retire-host OLD-COMPUTER
+   ```
+
+   The output counts the rows of that computer in each table. Only the inventory rows would go.
+3. If the counts are right, delete the inventory rows:
+
+   ```powershell
+   & $td collect --retire-host OLD-COMPUTER --apply
+   ```
+
+   The history tables keep their rows for that computer. They age out under the `retention` keys.
+4. Rebuild the dashboard, as in "Rebuild the dashboard". The heartbeat then reads the new filter.
+
+`--retire-host` refuses the name of the computer that runs it. It also refuses an empty name or one
+with `*`, `%` or `?`. The name must match the stored name exactly, including the case.
+
+If you cannot delete the rows yet, the heartbeat leaves out the old computer after
+`scheduler.heartbeat_ignore_after_days` days without a collector run. The default is 7.
+
+## Rename the computer
+
+A computer reports its name in every row. After you rename it, the next run publishes new inventory
+rows under the new name. The old name's inventory rows stay and show as stale tasks. The key
+`host_previous_names` makes the next run move those rows to the new name instead.
+
+1. Rename the computer, then restart it. Windows keeps the old name until the restart. Until then,
+   the new name in the config makes every hourly run stop. Run `Disable-ScheduledTask -TaskName
+   "TaskDash Collector"` in an administrator window before you rename. Run `Enable-ScheduledTask
+   -TaskName "TaskDash Collector"` after step 5. Note the time of the last run under the old name.
+   TaskDash moves no rows until 2 x `scheduler.collector_interval_minutes` have passed since then
+   (120 minutes at the default of 60). It reads a newer run as another computer that still uses the name.
+2. Open the config. If `host_name_override` holds the old name, set it to `""` or to the new name.
+   Otherwise `collect --apply` stops, because the override differs from the computer name.
+3. Add the old name to `host_previous_names`. Use the name as it shows in the **Host** column:
+
+   ```json
+   "host_previous_names": ["OLD-COMPUTER"]
+   ```
+
+4. Run the check mode. It writes nothing and stops with a message if the key is wrong:
+
+   ```powershell
+   & $td collect
+   ```
+
+5. Wait until the time from step 1 has passed. Open PowerShell as administrator, then publish:
+
+   ```powershell
+   & $td collect --apply
+   ```
+
+   The log shows one line, such as `TaskInventory: adopted 12 row(s) from OLD-COMPUTER as host
+   'NEW-COMPUTER'; dropped 0 duplicate(s).` The number is how many inventory rows moved.
+   TaskDash moves only the tasks that this run publishes. A task that exists only under the old name
+   stays there, so the sync never counts it as a stale task of the new name.
+   If the log shows a `WARNING: host_previous_names lists` line instead, TaskDash moved nothing.
+   Wait for the time in step 1, then run the command again. Keep the key until a run logs
+   `adopted N row(s)` and no such warning.
+6. After that run, remove the old name from `host_previous_names`, or set it to `[]`.
+   Do not leave the key set after a new computer takes the old name. TaskDash skips an old name
+   whose collector ran within 2 x `scheduler.collector_interval_minutes`, and warns, so a live
+   computer keeps its rows. Remove the key anyway.
+
+The step moves the inventory rows only. The history tables (`TaskRuns`, `TaskMetrics`,
+`TaskChanges` and `CollectorRuns`) keep the old name, and their rows age out under the `retention`
+keys. The dashboard then shows the old name in those tables until they age out.
+
+The first `collect --apply` under the new name also finds no stored watermark for that name. It reads
+the whole event-log window again and stores each run under the new name. `TaskRuns` then holds two
+copies of every run in that window, one under each name, until the old rows age out. Run counts and
+failure lists on the dashboard are higher for up to `history.days_back` days. If you need run counts
+that stay correct, use `host_name_override` instead.
+
+To keep the old name instead, set `host_name_override` to the old name and leave
+`host_previous_names` empty. Every row then keeps one name. TaskDash warns on each run that the
+override differs from the computer name. `collect --apply` also stops unless you pass
+`--allow-host-mismatch`. The hourly task from the install guide does not pass that flag, so add it
+to the task's arguments first.
 
 ---
 
@@ -627,7 +767,8 @@ rejects a key of the wrong type.
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|
-| `host_name_override` | string | empty | Name that this computer reports in every row. If empty, TaskDash uses the computer name. Set it to keep history after a rename. `collect --apply` refuses to run when the value differs from the computer name, unless you pass `--allow-host-mismatch`. The example config sets `TASK-HOST-01`. |
+| `host_name_override` | string | empty | Name that this computer reports in every row. If empty, TaskDash uses the computer name. Set it to keep history after a rename. `collect --apply` refuses to run when the value differs from the computer name, unless you pass `--allow-host-mismatch`. `taskdash preflight` warns on the `host name` line when the value differs. To fix it, clear the key. After a rename, set it to the new name and add the old name to `host_previous_names`. The example config leaves it empty. |
+| `host_previous_names` | list of strings | empty | Earlier names of this computer. Each `collect --apply` moves the inventory rows stored under these names to the current name, and logs how many. The history tables keep the old name. A name must not be empty or equal to the current name. Use it for one run after a rename, then empty it. See "Rename the computer". |
 | `powershell_timeout_seconds` | number | `180` | Seconds to wait for each PowerShell call before TaskDash stops it. |
 
 ### `arcgis`
@@ -664,7 +805,7 @@ rejects a key of the wrong type.
 | `alerting.realert_hours` | number | `24` | Hours before TaskDash repeats an alert for a problem that has not cleared. |
 | `alerting.shared_cause_min_tasks` | number | `3` | Number of failed tasks that makes one incident e-mail. `0` turns the grouping off. |
 | `alerting.incident_digest_hours` | number | `6` | Hours between digests of new failures during an open incident. `0` turns the digest off. |
-| `alerting.maintenance_windows` | list of objects | empty list | Windows that hold alerts. Each object has `task`, `start`, `end` and `reason`. |
+| `alerting.maintenance_windows` | list of objects | empty list | Windows that hold alerts. Each object has `task`, `start`, `end` and `reason`. With `"end": null`, the window mutes the tasks until you remove it. |
 
 ### `scheduler`
 
@@ -681,6 +822,7 @@ rejects a key of the wrong type.
 | `scheduler.collector_task_name` | string | `TaskDash Collector` | Full name of the task that runs the collector. It must match the `-TaskName` of `install_task.ps1`. The default is the installer's default task name. Set this key only if you registered the task under another name. |
 | `scheduler.collector_interval_minutes` | number | `60` | Minutes between collector runs. The dashboard calls the collector late after 1.5 intervals and down after 3. It must be above 0. |
 | `scheduler.overdue_grace_minutes` | number | `15` | Minutes a task may run late before it is overdue. |
+| `scheduler.heartbeat_ignore_after_days` | number | `7` | Days. The dashboard heartbeat leaves out a computer that has made no collector run for this long, so a retired or renamed computer does not show as down. It must be above 0. Rebuild the dashboard after you change it. |
 
 ### `history`
 
@@ -707,7 +849,7 @@ rejects a key of the wrong type.
 |---|---|---|---|
 | `upload.chunk_size` | number | `200` | Most rows sent to ArcGIS Online in one request. |
 | `retention.runs_days` | number | `90` | Days to keep rows in the runs table and the collector run table. |
-| `retention.metrics_days` | number | `90` | Days to keep rows in the metrics table. |
+| `retention.metrics_days` | number | `90` | Days to keep rows in the metrics table and the MetricChange table. |
 | `retention.changes_days` | number | `365` | Days to keep rows in the changes table. |
 | `logging.log_dir` | string | empty | Folder for the run logs and `alert_state.json`. If empty, the `Logs` folder in the TaskDash folder. |
 | `logging.max_log_age_days` | number | `30` | Days to keep TaskDash's own log files. `0` or less keeps all. |
@@ -760,7 +902,8 @@ The other flags are for setup, upgrades and repair. The table below marks them.
 | `--check-anonymous` | off | Query every table of the service and view without a sign-in. Exit code 0 means all refused. Reads only. It runs alone and cannot combine with `--apply`. |
 | `--migrate` | off | Report, or with `--apply` add, tables, fields and indexes that the service lacks, and fix the fields of the view. It publishes nothing. After you upgrade TaskDash or change a privacy switch, run it. Preflight tells you when it is due. |
 | `--scrub-history` | off | Count the stored rows that still hold a value the privacy switches hide or the secret scrubber redacts. With `--apply`, blank or redact them. Maintenance: run it after you turn on a privacy switch. It runs alone. |
-| `--refresh-metrics` | off | Report stored metric rows under keys the log miner no longer makes, and outdated metric names. With `--apply`, delete and rename them. Maintenance: run it after a rules change or an upgrade, on the task computer. It runs alone. |
+| `--refresh-metrics` | off | Report stored metric rows under keys the log miner no longer makes, and outdated metric names. With `--apply`, delete and rename them, and make the next run send every metric row again. Maintenance: run it after a rules change or an upgrade, on the task computer. It runs alone. |
+| `--retire-host` | none | Count the stored rows of the computer you name, then exit. With `--apply`, delete that computer's inventory rows only. The history tables keep theirs and age out by retention. Run it from another computer. It refuses the name of the computer that runs it, an empty name and a wildcard. It runs alone. See "Retire a computer". |
 | `--refresh-result-text` | off | Report stored run rows whose result text is out of date. With `--apply`, update that text. Maintenance: needed only if an upgrade changes the wording. It runs alone. |
 | `--create-service` | off | Print what the hosted service would hold. With `--apply`, create it and print its item ID. A new install does not need it, because `taskdash setup` does this. |
 | `--service-name` | `TaskDash` | Name of the service that `--create-service` creates. |
@@ -781,6 +924,81 @@ the config already holds `arcgis.item_id`, `arcgis.view_item_id` or `arcgis.dash
 | `--title-prefix` | empty | Text put before every item title. |
 | `--group-title` | `<prefix>TaskDash viewers` | Title of the viewers group. |
 
+With `--apply`, setup also saves `taskdash_setup_manifest.json` beside the config. It lists the ID,
+type, title and creation order of every item that setup created, the group ID and the folder name. It
+holds no secret. Setup saves it even when it stops partway, so `taskdash remove` can find the items.
+
+### `taskdash remove`
+
+This command undoes `taskdash setup`. It reads `taskdash_setup_manifest.json` beside the config,
+signs in, and lists the items it would delete. It changes nothing without `--apply`.
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--apply` | off | Delete the listed items that still exist and that the signed-in account owns. |
+| `--config` | `TaskDash.config.json` in the TaskDash folder | Path of the config file. The manifest must be in the same folder. |
+
+The order is the reverse of creation: the dashboard, the group, the view, the service, and then the
+folder if it is empty. The command turns off delete protection on each item just before it deletes
+that item. If the delete fails, it turns protection back on. It never deletes an item that the
+manifest does not list. It also checks that each item still has the type and title that the manifest
+records, and it finds the folder by the manifest's folder ID.
+
+The command skips an item, reports why, and goes on in these cases: another account owns the item,
+the item's type or title changed, ArcGIS refuses to turn off delete protection or to delete, the
+service's view was skipped, or the folder still holds other items. An
+item that is already gone is reported and is not an error. The exit code is 1 when `--apply` skipped
+an item, and 0 otherwise.
+
+The command does not touch the Windows task or any file. It prints the `Unregister-ScheduledTask`
+command with the collector task name (`scheduler.collector_task_name`) and the `pip uninstall`
+command. Run them yourself, as the Undo section of [INSTALL.md](INSTALL.md) describes.
+
+### `taskdash signin`
+
+This command stores the ArcGIS sign-in that TaskDash reads, as step 3 of the install guide
+describes. It reads `arcgis.url`, `arcgis.profile` and `arcgis.username` from the config. It asks for
+the user name, and offers `arcgis.username` as the default. It asks for the URL when `arcgis.url` is
+empty, and then tells you to set it in the config. It reads the password with a hidden prompt. The
+password is never an argument, and TaskDash never prints or logs it.
+
+The command signs in and prints one line for each check: the sign-in, the account (`users.me` must
+not be empty), and the privileges that `taskdash preflight` also needs. Without `--apply` it saves
+nothing and exits 0 when every check passes. It exits 1 when one fails.
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--apply` | off | After the checks pass, save the profile under the name in `arcgis.profile`, and sign in with it to prove it works. It replaces a profile of the same name. With `--for-task-account`, write the hand-off file instead. |
+| `--for-task-account` | off | After the checks pass, seal the sign-in into a hand-off file for the task account, instead of saving a profile for you. Without `--apply` it prints the plan and writes nothing. See "Hand the sign-in to the task account". |
+| `--task-user` | the account of the collector task | With `--for-task-account`, the account that gets the sign-in, written `DOMAIN\name`. Needed only when the collector task is not registered yet. |
+| `--config` | `TaskDash.config.json` in the TaskDash folder | Path of the config file. |
+
+The profile belongs to the Windows account that ran the command. Run the command once as you and
+once as the task account, or use `--for-task-account` for the second run. Only a built-in ArcGIS
+account without multifactor authentication works today. The command stops with a message when
+`arcgis.profile` is empty.
+
+#### Hand the sign-in to the task account
+
+Each Windows account has its own Credential Manager, so you cannot save the task account's sign-in
+from your own window. `--for-task-account --apply` avoids `runas`. After the checks pass, it asks
+for the mail password too, when `smtp.user` is set. Then it writes `taskdash_handoff.bin` in the
+TaskDash folder.
+
+- The file holds the ArcGIS URL, user name and password, and the mail password. Windows seals them for
+  this computer (DPAPI, machine scope), so the file never holds plain text.
+- The file's permissions allow only the task account, SYSTEM and Administrators. They do not inherit
+  from the folder. The task account may read and delete it.
+- The next `taskdash collect --apply` run by the task account saves the ArcGIS profile and the mail
+  password into that account's own stores. It checks that the profile signs in, and then deletes the
+  file. A run by any other account leaves the file alone.
+- If saving or checking fails, TaskDash keeps the file, logs the error, and the run fails like a
+  sign-in failure. See "The hand-off sign-in was kept" in [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
+- A new `--for-task-account --apply` run replaces an older file.
+
+The command needs pywin32, which the `arcgis` package installs. The `runas` method of step 3 in
+[INSTALL.md](INSTALL.md) still works as a fallback.
+
 ### `taskdash preflight`
 
 This command checks the config, the account, the computer and the ArcGIS items. It changes nothing,
@@ -791,8 +1009,48 @@ except with `--enable-event-log --apply`.
 | `--config` | `TaskDash.config.json` in the TaskDash folder | Path of the config file. |
 | `--offline` | off | Skip the checks that need the network. They print `[--]`. |
 | `--enable-event-log` | off | Show the state of the Task Scheduler log and the command that enables it. It runs alone, without the other checks. |
-| `--apply` | off | With `--enable-event-log`, run the command. It needs an administrator window. |
+| `--apply` | off | With `--enable-event-log`, run the command. It needs an administrator window. With `--as-task`, register the temporary task and run it. |
 | `--max-size-mb` | the larger of the current size and 64 | With `--enable-event-log`, set the log size in megabytes. |
+| `--config-diff` | off | Compare the config keys with the keys TaskDash knows. It runs alone and cannot combine with `--offline` or `--enable-event-log`. |
+| `--as-task` | off | Run the preflight checks as the task account, in a temporary task, without `runas`. Without `--apply` it prints the plan and changes nothing. It runs alone. It accepts `--config` and `--offline`, and passes them to the run. See "Run preflight as the task account". |
+| `--task-user` | the account of the collector task | With `--as-task`, the account to run as, written `DOMAIN\name`. Needed only when the collector task is not registered yet. |
+| `--consume-handoff` | off | Store the sign-in from the hand-off file, and delete the file, before the `credentials` check. `--as-task` adds it to the run it starts. A plain `taskdash preflight` never touches the file. Do not use it by hand. |
+
+`--config-diff` prints three lists and changes nothing:
+
+- **Unknown keys.** TaskDash ignores these. A misspelled key is the usual cause.
+- **Renamed keys.** Each line reads `old -> new`. Move the value to the new name.
+- **Absent keys.** TaskDash uses the default for each. Each line reads `key (default: value)`. The
+  value comes from the TaskDash code. The values in `TaskDash.config.example.json` are placeholders,
+  so the list does not copy them. A key that holds a password shows its name only.
+
+The command never prints a value from your config. It exits 0 even when it lists problems. It
+exits 1 only when it cannot read the config. The message then says to fix the file and run again.
+
+#### Run preflight as the task account
+
+`--as-task` shows what preflight sees when the collector task runs it. It replaces the `runas`
+window. Without `--apply` it prints the plan and changes nothing: the name of the temporary task, the
+account, the command, and the output file. The task name is `TaskDash preflight check` and a random
+suffix.
+
+With `--apply`, run it in a PowerShell window opened as administrator. The command does these steps:
+
+1. It reads the account and the logon type of the collector task (`scheduler.collector_task_name`).
+   It only reads that task. It never changes, runs or deletes it.
+2. It asks for the password of the account at a hidden prompt, for the Password logon type. The
+   Interactive logon type needs no password. The password goes to Task Scheduler through its COM
+   interface. It is never a command line argument and TaskDash never prints it.
+3. It creates an empty output file in the log folder. Only the task account, you, the Administrators
+   group and SYSTEM can read it.
+4. It registers a temporary task from the same `taskdash_task.xml` template as the collector task,
+   without the hourly trigger. It runs the task once and waits up to 300 seconds.
+5. It prints the preflight output, and exits 0 when preflight passed.
+6. It deletes the temporary task and the output file. This happens even when the run fails or times out.
+
+If the collector task is not registered yet, pass `--task-user DOMAIN\name`. The check then uses the
+Password logon type. Add `--offline` to skip the network checks. A failed run prints the reason, and
+[TROUBLESHOOTING.md](TROUBLESHOOTING.md) explains each message.
 
 ### `taskdash dashboard`
 
@@ -803,22 +1061,52 @@ to rebuild the dashboard.
 | Flag | Default | Meaning |
 |---|---|---|
 | `--apply` | off | Create or update the dashboard item. |
-| `--target` | `test` | `prod` updates the dashboard in `arcgis.dashboard_id`. `test` builds `TaskDash_TEST`. Use `prod` for your install. |
+| `--target` | `test` if `arcgis.test_item_id` is set, otherwise `prod` | `prod` updates the dashboard in `arcgis.dashboard_id`. `test` builds `TaskDash_TEST`. The command prints one line naming the target it chose. With `--apply` and no test service, it stops. Pass `--target prod` to update production. |
 | `--title` | the standard title for the target | Dashboard title. |
 | `--config` | `TaskDash.config.json` in the TaskDash folder | Path of the config file. |
 | `--offline` | off | Build and check the definition with placeholder IDs. It never signs in and cannot combine with `--apply`. It writes `dashboard_taskdash.json`. For checks without ArcGIS. |
 | `--source-dashboard` | empty | Existing dashboard to copy widget structure from. A fallback for when `dashboard_templates.json` is lost. A normal install does not need it. |
 
+A rebuild replaces any hand edits you made in the Dashboards editor. Before `--apply` updates an
+existing dashboard, the command prints a line saying so. It then saves the current definition as
+`dashboard_backup_<item id>_<time>.json` in the log folder. To keep a hand edit, copy it from that file.
+
 ### `taskdash status`
 
-This command is read-only. It prints the last result in the newest local log, and the newest row of
-the collector run table.
+This command is read-only, except with `--prune --apply`. It prints the last result in the newest
+local log, the newest row of the collector run table, and the age of the newest successful run.
+
+The exit code tells a script what to do. `0` means the newest run succeeded and is fresh. `1` means
+the newest run failed. `2` means there is no run, or the newest success is older than twice
+`scheduler.collector_interval_minutes` (120 minutes by default). `3` means the command could not
+sign in or read the service. `--offline` returns `0` unless it cannot read the config.
 
 | Flag | Default | Meaning |
 |---|---|---|
 | `--offline` | off | Print only the local line. It never signs in and works without a config. |
 | `--target` | `prod` | Which service to read: `prod` or `test`. |
+| `--host` | this install's host: `host_name_override`, else the computer name | Read the runs of this host only. `--host all` reads every host. |
+| `--prune` | off | List old TaskDash backups and logs, instead of the status. It removes nothing without `--apply`. |
+| `--apply` | off | With `--prune`: remove the files that `--prune` lists. |
+| `--keep` | `10` | With `--prune`: how many to keep of each kind. This covers dashboard backups for each dashboard, config backups, bootstrap logs and crash records. |
 | `--config` | `TaskDash.config.json` in the TaskDash folder | Path of the config file. |
+
+`--prune` looks only at files with TaskDash's own names, and it skips links. It lists these files:
+
+- `dashboard_backup_<item id>_<time>.json` in the log folder, except the newest `--keep` of each dashboard.
+- `<config name>.bak_setup_<time>`, which `taskdash setup --apply` writes beside the config, except the newest `--keep`.
+- `collector_runs_pending_prod.json` and `collector_runs_pending_test.json` in the log folder. The file
+  must hold no saved rows and be unchanged for 7 days. With `--apply`, the command first takes the
+  collector's run lock. If a collector run holds the lock, or the lock cannot be checked, the command
+  skips every pending file, says so, and you run it again later. Without `--apply`, it does not take the lock.
+- Bootstrap logs older than 7 days: `bootstrap.log` and `bootstrap_<id>.log` in the `Logs` folder beside
+  the config file, except the newest `--keep`. The task launcher writes a bootstrap log there on every
+  run, whatever `logging.log_dir` says, so that folder is in use. A log younger than 7 days is never listed.
+- `bootstrap_FAIL_<id>.log` in that same folder, except the newest `--keep`. The file must be
+  older than 7 days. These files are the only record of a failure before logging starts.
+
+The command needs the config. If it cannot find the config, it stops with a message and prunes nothing.
+Pass `--config` with the path, or run the command from the TaskDash folder.
 
 ### `taskdash test-alert`
 

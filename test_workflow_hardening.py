@@ -149,6 +149,20 @@ def test_lock_and_sbom_are_in_the_checksums_the_artifact_and_the_release():
     assert r"dist\requirements.lock" in release and r"dist\*.cdx.json" in release
 
 
+def test_the_one_window_installer_is_a_release_asset_and_in_the_checksums():
+    # INSTALL.md tells the user to download Install-TaskDash.ps1 from the release page, so the
+    # workflow must publish it and SHA256SUMS.txt (which the sign job signs) must list it.
+    jobs = _jobs(_text("release.yml"))
+    build = jobs["build"]
+    assert re.search(r"Copy-Item Install-TaskDash\.ps1 dist\\", build)
+    assert build.index("Copy-Item Install-TaskDash.ps1") < build.index("WriteAllText")
+    listing = re.search(r"\$lines = Get-ChildItem (.+) \|", build).group(1)
+    assert r"dist\Install-TaskDash.ps1" in listing
+    assert "dist/Install-TaskDash.ps1" in build
+    release = re.search(r"gh release create .+", jobs["publish"]).group(0)
+    assert r"dist\Install-TaskDash.ps1" in release
+
+
 def test_install_guide_documents_the_locked_install():
     guide = (WORKFLOWS.parent.parent / "docs" / "INSTALL.md").read_text(encoding="utf-8")
     for needle in ("python.exe -m pip install --require-hashes -r", "requirements.lock",

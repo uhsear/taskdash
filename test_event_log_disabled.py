@@ -37,7 +37,7 @@ def fake_world(monkeypatch):
         seen["events_read_from"].append(args)
         return _disabled_log()
 
-    monkeypatch.setattr(collect, "collect_tasks", lambda timeout: [_task()])
+    monkeypatch.setattr(collect, "collect_tasks", lambda timeout, *_: [_task()])
     monkeypatch.setattr(collect, "collect_run_events", read_events)
     monkeypatch.setattr(collect, "load_descriptions", lambda: {})
     monkeypatch.setattr(publish, "connect_agol", lambda cfg: object())

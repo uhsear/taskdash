@@ -152,7 +152,7 @@ def test_status_reads_the_newest_collector_run_through_the_service(monkeypatch, 
     gis = SimpleNamespace(content=SimpleNamespace(get=lambda item_id: SimpleNamespace(id=item_id)))
     monkeypatch.setattr(common, "connect_agol", lambda cfg: gis)
     monkeypatch.setattr(common, "get_tables", lambda item: {common.TABLE_COLLECTOR_RUNS: table})
-    assert cli.main(["status"]) == 0
+    assert cli.main(["status"]) == 2  # the fixed 2026-01-01 run is long stale; H2-9 exit codes are in test_h2_status.py
     out = capsys.readouterr().out
     assert "2026-01-01 00:00:00 UTC, exit_status success" in out
     assert queries[0]["order_by_fields"] == "started_utc DESC" and queries[0]["result_record_count"] == 1

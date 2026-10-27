@@ -62,7 +62,8 @@ def test_a_timed_out_incremental_read_names_its_own_budget(monkeypatch, tmp_path
     with pytest.raises(SystemExit) as exc:
         publish.read_run_events(HISTORY, 60, 500, 0, tmp_path / "budget.json")
     assert "history.max_events_per_run" in str(exc.value)
-    assert not (tmp_path / "budget.json").exists(), "only the first-run budget is halved"
+    saved = json.loads((tmp_path / "budget.json").read_text(encoding="utf-8"))
+    assert saved == {"configured": 5000, "max_events": 2500}   # H3-0: the incremental read halves too
 
 
 def test_repeated_first_runs_that_time_out_still_advance_within_a_bounded_number_of_runs(
@@ -153,7 +154,7 @@ def test_the_saved_budget_stays_when_publish_fails(publish_world):
 
 def test_preview_alert_never_touches_the_saved_budget(monkeypatch, tmp_path):
     _fake_powershell(monkeypatch, slow_above=0)
-    monkeypatch.setattr(collect, "collect_tasks", lambda timeout: [_task()])
+    monkeypatch.setattr(collect, "collect_tasks", lambda timeout, *_: [_task()])
     monkeypatch.setattr(collect, "load_descriptions", lambda: {})
     config = {"logging": {"log_dir": str(tmp_path)}}
     publish.collect_everything(config, None, max_events=30000, first_run_budget=False)
@@ -188,7 +189,7 @@ def test_a_corrupt_budget_file_is_ignored(monkeypatch, tmp_path):
 def test_collect_everything_defers_a_read_timeout_so_inventory_and_alerts_still_go_out(
         monkeypatch, tmp_path):
     _fake_powershell(monkeypatch, slow_above=0)
-    monkeypatch.setattr(collect, "collect_tasks", lambda timeout: [_task()])
+    monkeypatch.setattr(collect, "collect_tasks", lambda timeout, *_: [_task()])
     monkeypatch.setattr(collect, "load_descriptions", lambda: {})
     config = {"logging": {"log_dir": str(tmp_path)}}
 

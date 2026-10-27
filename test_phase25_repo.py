@@ -94,5 +94,12 @@ def test_example_config_documents_every_key_and_stays_private_by_default():
     assert ids and all(v == "" for v in ids)
 
 
+def test_example_config_points_at_no_organization():
+    example = _example()
+    assert example["host_name_override"] == ""
+    assert example["arcgis"]["url"] == "" and example["arcgis"]["service_description"] == ""
+    assert example["alerting"]["dashboard_url"] == ""
+
+
 def test_example_config_passes_the_loader():
     assert common.load_config(EXAMPLE)["rules"]["profiles"] == []

@@ -10,7 +10,9 @@ Target: one folder holding the hosted service (5 tables), its read-only view, a 
 
 Only the view and the dashboard are shared, and only with the new group. The service is never
 shared, and nothing is ever shared with everyone or the organization. Setup never updates an
-item it did not create in the same run.
+item it did not create in the same run. It turns on delete protection for the service, the view and
+the dashboard; turn it off in ArcGIS Online before deleting one of them, or run `taskdash remove`.
+It also saves taskdash_setup_manifest.json next to the config, which `taskdash remove` reads.
 """
 
 from __future__ import annotations
@@ -20,7 +22,7 @@ import json
 import shutil
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import taskdash_dashboard as dashboard
 import taskdash_publish as publish
@@ -34,6 +36,7 @@ from taskdash_common import (
     load_config,
     normalize_text,
     runtime_dir,
+    see_troubleshooting,
 )
 
 # A set key means this config already belongs to an install; setup would orphan it.
@@ -41,6 +44,8 @@ INSTALL_KEYS = ("item_id", "view_item_id", "dashboard_id")
 FEATURE_SERVICE = "Feature Service"
 DASHBOARD = "Dashboard"
 GROUP_TAGS = "taskdash,monitoring"
+# Saved next to the config, which setup already writes to; `taskdash remove` reads it.
+MANIFEST_FILE = "taskdash_setup_manifest.json"
 
 Created = List[Tuple[str, str, str]]
 
@@ -74,17 +79,22 @@ def refuse_existing_install(config: Dict[str, Any]) -> None:
     used = [f"arcgis.{k}" for k in INSTALL_KEYS if normalize_text(agol.get(k))]
     if used:
         raise SystemExit(f"The config already sets {', '.join(used)}, so an install exists. Setup is "
-                         f"for a new install: use a config without those keys, or maintain this one "
-                         f"with taskdash_publish.py --migrate and taskdash_dashboard.py.")
+                         f"for a new install. To keep this install, maintain it with 'taskdash collect "
+                         f"--migrate --apply' and 'taskdash dashboard --target prod' (folder install: "
+                         f"python taskdash_publish.py --migrate --apply and python taskdash_dashboard.py). "
+                         f"To start again, delete the ArcGIS items and empty those keys: see 'The config "
+                         f"already holds an install' in docs/TROUBLESHOOTING.md.")
 
 
 def refuse_name_clashes(gis: Any, args: argparse.Namespace) -> None:
     """Stop before any write when a planned name is taken, so setup cannot adopt or update it."""
     if not normalize_text(args.folder).strip("/"):
-        raise SystemExit("--folder must be a folder name. Pass e.g. --folder TaskDash.")
+        raise SystemExit("--folder must be a folder name. Pass e.g. --folder TaskDash.\n"
+                         + see_troubleshooting("The folder name is empty"))
     if gis.content.folders.get(folder=args.folder) is not None:
         raise SystemExit(f"The folder '{args.folder}' already exists for this account. Choose "
-                         f"another with --folder, or delete the empty folder in ArcGIS Online.")
+                         f"another with --folder, or delete the empty folder in ArcGIS Online.\n"
+                         + see_troubleshooting("The folder already exists"))
     owner = gis.users.me.username
     titles = planned_titles(args.title_prefix)
     for title, item_type in ((titles["service"], FEATURE_SERVICE), (titles["view"], FEATURE_SERVICE),
@@ -93,17 +103,20 @@ def refuse_name_clashes(gis: Any, args: argparse.Namespace) -> None:
             if item.title == title and item.type == item_type:
                 raise SystemExit(f"{item_type} '{title}' already exists ({item.id}). Setup never "
                                  f"reuses an item: pass --title-prefix to pick other titles, or "
-                                 f"delete that item in ArcGIS Online.")
+                                 f"delete that item in ArcGIS Online.\n"
+                                 + see_troubleshooting("An item with the planned title already exists"))
     # Hosted service names are unique across the organization, so another account's service
     # blocks create_service after the folder exists; the owner search above cannot see it.
     for title in (titles["service"], titles["view"]):
         if not gis.content.is_service_name_available(title, "featureService"):
             raise SystemExit(f"Another account in this organization already has a hosted service named "
-                             f"'{title}'. Pass --title-prefix to pick other names.")
+                             f"'{title}'. Pass --title-prefix to pick other names.\n"
+                             + see_troubleshooting("Another account holds the service name"))
     for group in gis.groups.search(f'title:"{args.group_title}"'):
         if group.title == args.group_title:
             raise SystemExit(f"A group titled '{args.group_title}' already exists ({group.id}). "
-                             f"Choose another with --group-title, or delete the group.")
+                             f"Choose another with --group-title, or delete the group.\n"
+                             + see_troubleshooting("The viewers group already exists"))
 
 
 def print_plan(args: argparse.Namespace, config: Dict[str, Any]) -> None:
@@ -122,6 +135,7 @@ def print_plan(args: argparse.Namespace, config: Dict[str, Any]) -> None:
     emit(f"Plan: private group '{args.group_title}' (invitation only); the view and the dashboard "
          f"are shared with it and with nobody else.")
     emit(f"Plan: dashboard '{titles['dashboard']}' reading the view, in the same folder.")
+    emit("Plan: delete protection on the service, the view and the dashboard.")
     emit("Plan: config keys written: " + ", ".join(f"arcgis.{k}" for k in INSTALL_KEYS))
 
 
@@ -176,13 +190,14 @@ def create_group(gis: Any, args: argparse.Namespace, created: Created) -> Any:
                               snippet="TaskDash viewers", access="private", is_invitation_only=True)
     if group is None:
         raise SystemExit(f"ArcGIS did not create the group '{args.group_title}'. Check that the "
-                         f"account may create groups, then re-run; delete anything listed above first.")
+                         f"account may create groups, then re-run; delete anything listed above first.\n"
+                         + see_troubleshooting("The group could not be created"))
     created.append((args.group_title, "Group", group.id))
     return group
 
 
 def create_dashboard_item(gis: Any, view: Any, folder: Any, group: Any, config: Dict[str, Any],
-                          path: Path, args: argparse.Namespace, created: Created) -> str:
+                          path: Path, args: argparse.Namespace, created: Created) -> Any:
     """Build exactly as taskdash_dashboard.main does for prod, reading the view."""
     title = planned_titles(args.title_prefix)["dashboard"]
     templates = dashboard.load_templates(gis, "")
@@ -195,23 +210,52 @@ def create_dashboard_item(gis: Any, view: Any, folder: Any, group: Any, config: 
     item = gis.content.get(dash_id)
     if item is None:
         raise SystemExit(f"The new dashboard {dash_id} is not visible to this account. Find it in "
-                         f"ArcGIS Online, move it into '{args.folder}' and share it with the group.")
+                         f"ArcGIS Online, move it into '{args.folder}' and share it with the group.\n"
+                         + see_troubleshooting("The new dashboard is not visible"))
     moved = item.move(folder) or {}
     if not moved.get("success", True):
-        raise SystemExit(f"Could not move dashboard {dash_id} into '{args.folder}': {moved}")
+        raise SystemExit(f"Could not move dashboard {dash_id} into '{args.folder}': {moved}\n"
+                         + see_troubleshooting("The dashboard could not be moved"))
     publish.share_item(item, groups=[group])
-    return dash_id
+    return item
 
 
-def print_created(created: Created) -> None:
-    emit("Created by this run (delete these in ArcGIS Online to undo):" if created
-         else "This run created nothing.")
+def protect_items(items: List[Any], protected: List[str]) -> None:
+    """Turn on delete protection, so a stray click in ArcGIS Online cannot remove the install.
+    Last, after the sharing checks: protection makes the undo list need one more step."""
+    for item in items:
+        if not (item.protect(enable=True) or {}).get("success"):
+            raise SystemExit(f"Could not turn on delete protection for item {item.id}. Turn it on by hand "
+                             f"(Item > Settings > Delete protection), or ask an administrator to.\n"
+                             + see_troubleshooting("Delete protection could not be turned on"))
+        protected.append(item.id)
+
+
+def print_created(created: Created, protected: Sequence[str] = ()) -> None:
+    emit("Created by this run (to undo, turn off delete protection first, then delete these in "
+         "ArcGIS Online):" if protected else "Created by this run (delete these in ArcGIS Online to undo):"
+         if created else "This run created nothing.")
     for title, kind, item_id in created:
-        emit(f"    {kind:16s} {item_id}  {title}")
+        note = "  (delete protection on)" if item_id in protected else ""
+        emit(f"    {kind:16s} {item_id}  {title}{note}")
+
+
+def write_manifest(config_path: Path, args: argparse.Namespace, created: Created) -> None:
+    """Save the created list as the only record `taskdash remove` trusts. It holds ids, types and
+    titles, never a secret, and is written even after a partial run so the undo can still find them."""
+    if not created:
+        return
+    manifest = {"manifest_version": 1, "taskdash_version": TASKDASH_VERSION, "folder": args.folder,
+                "group_id": next((item_id for _, kind, item_id in created if kind == "Group"), ""),
+                "items": [{"order": order, "id": item_id, "type": kind, "title": title}
+                          for order, (title, kind, item_id) in enumerate(created, 1)]}
+    target = config_path.with_name(MANIFEST_FILE)
+    atomic_write_json(target, manifest)
+    emit(f"Manifest of the created items saved to {target}. `taskdash remove` reads it.")
 
 
 def apply_setup(gis: Any, config: Dict[str, Any], path: Path, args: argparse.Namespace,
-                created: Created) -> None:
+                created: Created, protected: List[str]) -> None:
     backup_config(path)
     folder = gis.content.folders.create(args.folder)
     created.append((args.folder, "Folder", (folder.properties or {}).get("id", "")))
@@ -221,8 +265,9 @@ def apply_setup(gis: Any, config: Dict[str, Any], path: Path, args: argparse.Nam
     # The Group object, not its id: the old Item.share() looked an id up in the search index, which
     # did not list a group created seconds ago ("Cannot find group with id", first TDI_ run).
     publish.share_item(view, groups=[group])
-    create_dashboard_item(gis, view, folder, group, config, path, args, created)
+    dash = create_dashboard_item(gis, view, folder, group, config, path, args, created)
     publish.require_no_anonymous_access(publish.table_urls(item, view))
+    protect_items([item, view, dash], protected)
 
 
 def setup(gis: Any, config: Dict[str, Any], path: Path, args: argparse.Namespace) -> int:
@@ -233,10 +278,12 @@ def setup(gis: Any, config: Dict[str, Any], path: Path, args: argparse.Namespace
         emit("DRY RUN - nothing written. Re-run with --apply.")
         return 0
     created: Created = []
+    protected: List[str] = []
     try:
-        apply_setup(gis, config, path, args, created)
+        apply_setup(gis, config, path, args, created, protected)
     finally:
-        print_created(created)
+        print_created(created, protected)
+        write_manifest(path, args, created)
     emit("Setup complete. The service is private; the view and dashboard are shared with the "
          f"group '{args.group_title}' only. Add members to that group to give them access.")
     return 0

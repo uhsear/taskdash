@@ -50,7 +50,7 @@ def test_an_empty_errors_list_gives_no_warning(monkeypatch, capsys):
 
 def test_a_task_whose_info_cannot_be_read_is_skipped_not_listed_as_never_run():
     script = collect.POWERSHELL_TASK_QUERY
-    catch = script.split("Get-ScheduledTaskInfo -TaskName", 1)[1].split("$actionCount = 0", 1)[0]
+    catch = script.split("$task | Get-ScheduledTaskInfo", 1)[1].split("$actionCount = 0", 1)[0]
     assert "Add-ReadProblem" in catch and "continue" in catch
 
 

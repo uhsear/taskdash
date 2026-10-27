@@ -3,10 +3,61 @@
 TaskDash watches the scheduled tasks on one Windows computer. Every hour it publishes their health,
 run history and log metrics to ArcGIS Online. A dashboard shows the result.
 
+If your IT or security team must approve the install, give them [APPROVAL.md](APPROVAL.md) first.
+It lists the endpoints, accounts, files and data.
+
 This guide takes you from nothing to a working dashboard. Plan for about one hour. Run every step
 on the computer whose tasks you want to watch, at its console or through Remote Desktop. A
 PowerShell remoting session (`Enter-PSSession`) does not work: Windows gives it no access to the
 saved sign-in, and TaskDash fails with "A specified logon session does not exist".
+
+## Quick install
+
+If you meet the Requirements below, two commands do steps 1 to 8 for you. From the release page
+(<https://github.com/uhsear/taskdash-releases/releases/latest>), download these three files into your
+`Downloads` folder: `Install-TaskDash.ps1`, the wheel, and `SHA256SUMS.txt`. The script checks the
+wheel against `SHA256SUMS.txt`. To check the script too, compare the output of `Get-FileHash` on it
+with its line in `SHA256SUMS.txt`. Open PowerShell as administrator, with your daily account.
+Replace `<version>` with the wheel's version and `DOMAIN\svc-taskdash` with the task account. Run
+the check first. It changes nothing:
+
+```powershell
+powershell.exe -ExecutionPolicy Bypass -File "$env:USERPROFILE\Downloads\Install-TaskDash.ps1" -InstallDir C:\TaskDash -Wheel "$env:USERPROFILE\Downloads\taskdash-<version>-py3-none-any.whl" -TaskAccount DOMAIN\svc-taskdash
+```
+
+It prints what each step would do. If a line stops with `ERROR`, fix it and run the check again.
+When the check passes, run the same command with `-Apply` added at the end:
+
+```powershell
+powershell.exe -ExecutionPolicy Bypass -File "$env:USERPROFILE\Downloads\Install-TaskDash.ps1" -InstallDir C:\TaskDash -Wheel "$env:USERPROFILE\Downloads\taskdash-<version>-py3-none-any.whl" -TaskAccount DOMAIN\svc-taskdash -Apply
+```
+
+With `-Apply`, the script runs these steps in order and stops at the first one that fails. Then it
+lists what it created so far.
+
+1. It checks that the window is elevated.
+2. It creates `C:\TaskDash`, locks its permissions, makes the virtual environment and installs the
+   wheel (step 1 below). If `SHA256SUMS.txt` (or a file named like the wheel plus `.sha256`) is
+   beside the wheel, the wheel's SHA-256 value must match it first. A `SHA256SUMS.txt` that does not
+   list the wheel stops the script.
+3. It copies the example config to `TaskDash.config.json` if there is none (step 2).
+4. It runs `taskdash signin` twice, once for this account and once for the task account (step 3).
+   It asks for the ArcGIS user name and password each time. The script never reads the password.
+5. It runs `taskdash preflight`, after it turns on the Task Scheduler event log (step 5).
+6. It runs `taskdash setup`, then `taskdash setup --apply` (step 6).
+7. It runs `install_task.ps1` with `-EnableEventLog` and `-StartNow` (steps 7 and 8). It asks for the
+   task account's password.
+8. It runs `taskdash status`.
+
+If your organization has its own ArcGIS Online address, copy the example config to
+`C:\TaskDash\TaskDash.config.json` first and set `arcgis.url`, as step 2 shows. The script keeps an
+existing config.
+
+Run the same `-Apply` command again after a failure, or on a working install. Each step that is
+already done prints `nothing to do`. The script does not change an installed version: to move to
+another release, follow [UPGRADE.md](UPGRADE.md). If a message stops the script, see "The
+one-window installer stops" in [TROUBLESHOOTING.md](TROUBLESHOOTING.md). The numbered steps below
+describe the same work by hand.
 
 ## Requirements
 
@@ -50,13 +101,13 @@ saved sign-in, and TaskDash fails with "A specified logon session does not exist
   file `taskdash-<version>-py3-none-any.whl` into your `Downloads` folder. Keep only one TaskDash
   wheel in that folder. If this computer cannot reach GitHub, download the file on another computer
   and copy it into `Downloads`. The release page is public, so you need no GitHub account.
-  - The release also lists `SHA256SUMS.txt`. It has one line each for the wheel, `requirements.lock`
-    and the `.cdx.json` SBOM. To check the download, compare its value with the
+  - The release also lists `SHA256SUMS.txt`. It has one line each for the wheel, `requirements.lock`,
+    the `.cdx.json` SBOM and `Install-TaskDash.ps1`. To check the download, compare its value with the
     output of `Get-FileHash $env:USERPROFILE\Downloads\taskdash-*.whl`.
   - Optional: check who built the files. The release lists a `.sigstore.json` bundle for the wheel
     and for `SHA256SUMS.txt`. Download both bundles into `Downloads`. In a separate virtual
     environment, install the checker with `python -m pip install sigstore`. Then run this command
-    for each file. Replace `<tag>` with the release tag, for example `v1.1.0`, and `<file>` with the
+    for each file. Replace `<tag>` with the release tag, for example `v1.2.0`, and `<file>` with the
     file name:
 
     ```powershell
@@ -67,6 +118,9 @@ saved sign-in, and TaskDash fails with "A specified logon session does not exist
     the file. Any other output means you must not install the file. Ask the TaskDash maintainer.
 
 TaskDash is tested on one computer with 29 tasks that run at most hourly. Larger installs may work.
+
+To move an installed TaskDash to a new release, or back to the previous one, follow
+[UPGRADE.md](UPGRADE.md) instead of this guide.
 
 ## 1. Install TaskDash
 
@@ -81,7 +135,7 @@ icacls C:\TaskDash /inheritance:r /grant:r "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:
 py -3.11 -m venv C:\TaskDash\venv
 $whl = (Get-ChildItem "$env:USERPROFILE\Downloads\taskdash-*.whl" | Select-Object -First 1).FullName
 $whl
-C:\TaskDash\venv\Scripts\python.exe -m pip install $whl
+C:\TaskDash\venv\Scripts\python.exe -m pip install "$whl[smtp]"
 C:\TaskDash\venv\Scripts\taskdash.exe --version
 ```
 
@@ -91,17 +145,11 @@ hour as an administrator. The line removes those inherited permissions. It allow
 Administrators group, you and the task account. Step 4 checks the result.
 
 The `$whl` line prints the full path of the wheel. If it prints nothing, the wheel is not in
-`Downloads`. Then set the path yourself, for example `$whl = "D:\Files\taskdash-1.1.0-py3-none-any.whl"`.
+`Downloads`. Then set the path yourself, for example `$whl = "D:\Files\taskdash-1.2.0-py3-none-any.whl"`.
 Keep the original file name; pip rejects a renamed wheel, such as one with ` (1)` in its name.
 
-If you want e-mail alerts that sign in to a mail server, install the `smtp` extra instead. It adds
-the `keyring` package. Run this in place of the `pip install $whl` line:
-
-```powershell
-C:\TaskDash\venv\Scripts\python.exe -m pip install "$whl[smtp]"
-```
-
-You can also add it later by running that line again. Alerts without a mail sign-in need no extra.
+The `pip install` line includes the `smtp` extra, which adds the small `keyring` package. TaskDash
+reads it only when you set `smtp.user`. Always use this line, whether or not you want mail alerts.
 
 ### Optional: locked install
 
@@ -128,7 +176,7 @@ lists the same packages. Keep it if your organization asks for one.
 The install takes a few minutes. It ends with a line that starts `Successfully installed` and
 names `taskdash-<version>`. Lines that start `[notice] A new release of pip is available` are
 harmless; you do not need to upgrade pip. The last command prints `TaskDash <version>`, for example
-`TaskDash 1.1.0`.
+`TaskDash 1.2.0`.
 
 TaskDash keeps its config, logs and state in the folder it starts in. **Run these two lines in every
 new PowerShell window before you use `$td`:**
@@ -172,6 +220,8 @@ The first line must be `[ok] config: config loaded, no warnings`. If it is `[!!]
 line names each key to fix. A JSON syntax error names the line and column; a missing comma is the
 usual cause. The other lines do not matter yet.
 
+To find a mistyped key, run `& $td preflight --config-diff`. It lists the keys TaskDash ignores.
+
 ## 3. Store the ArcGIS sign-in
 
 TaskDash never keeps your ArcGIS password in the config. It reads a saved sign-in, called a profile.
@@ -179,35 +229,67 @@ The password goes into Windows Credential Manager. Each Windows account has its 
 Manager, so you store the profile twice: once for yourself, and once for the task account. Use the
 same ArcGIS account both times.
 
-**For yourself,** in your normal PowerShell window, run the create command. Replace `ARCGIS_URL`
-with your `arcgis.url` and `ARCGIS_USER` with the ArcGIS account name. Type the ArcGIS password at
-the `Password:` prompt; it does not echo.
+**For yourself,** in your normal PowerShell window, run the check first. It asks for the ArcGIS user
+name and password, signs in, and checks the account and its privileges. It saves nothing:
 
 ```powershell
-C:\TaskDash\venv\Scripts\python.exe -c "import getpass; from arcgis.gis import ProfileManager; ProfileManager().create('taskdash', 'ARCGIS_URL', 'ARCGIS_USER', getpass.getpass())"
+& $td signin
 ```
 
-Then run the check command. It prints the ArcGIS account name:
+Type the ArcGIS password at the prompt; it does not echo. If a line starts with `[!!]`, fix it and run
+the command again. Each line ends with the fix. When every line starts with `[ok]`, store the sign-in:
 
 ```powershell
-C:\TaskDash\venv\Scripts\python.exe -c "from arcgis.gis import GIS; print(GIS(profile='taskdash').users.me.username)"
+& $td signin --apply
 ```
 
-If the check fails or prints `None`, the URL, the user name or the password is wrong. Run the create
-command again with the right values; it replaces the profile.
+The command saves the profile under the name in `arcgis.profile`, and then signs in with the saved
+profile to prove it works. If you run it again, it replaces the profile.
 
-**For the task account,** open a PowerShell window as that account. Windows asks for its password:
+If `arcgis.url` is empty, the command offers `https://www.arcgis.com`. After the sign-in it prints
+your organization's own URL and the line to put in the config. With `--apply` it writes only
+`arcgis.url`, after it saves a backup of the config.
+
+**For the task account,** stay in your own window. You do not need to sign in as that account. Run
+the check first. It asks for the same ArcGIS password, signs in, and prints the account it will
+hand the sign-in to. It writes nothing:
+
+```powershell
+& $td signin --for-task-account --task-user DOMAIN\svc-taskdash
+```
+
+If you set `smtp.user` in the config, the next command also asks for the mail password. Press Enter
+to skip it. When every line starts with `[ok]`, write the hand-off file:
+
+```powershell
+& $td signin --for-task-account --task-user DOMAIN\svc-taskdash --apply
+```
+
+The command seals the passwords into `C:\TaskDash\taskdash_handoff.bin`. Windows seals them for this
+computer, and the file's permissions allow only the task account, SYSTEM and Administrators. The next
+run of TaskDash as the task account saves the sign-in into that account's own Credential Manager,
+checks that it signs in, and deletes the file. The check in step 5 does this, and so does the first
+run in step 8. The log line is `Stored the sign-in from taskdash_handoff.bin for DOMAIN\svc-taskdash
+and removed the file.` The file stays until that run succeeds. [CONFIGURE.md](CONFIGURE.md) lists the details.
+
+### If the hand-off fails
+
+If `signin --for-task-account` fails, or the run that should store the sign-in fails, see "The
+hand-off sign-in was kept" in [TROUBLESHOOTING.md](TROUBLESHOOTING.md). To skip the hand-off, open a
+PowerShell window as the task account. Windows asks for its password:
 
 ```powershell
 runas /user:DOMAIN\svc-taskdash powershell.exe
 ```
 
-In the new window, run the create command and the check command above. If `runas` says the account
+In the new window, run `& $td signin` and `& $td signin --apply`, as you did for yourself. Run
+`$td = "C:\TaskDash\venv\Scripts\taskdash.exe"` first, because the new window does not have `$td`.
+If `runas` says the account
 cannot log on here, the account lacks the "Allow log on locally" right on this computer, or a Group
 Policy sets "Deny log on locally" for it. A "Deny" setting always wins over "Allow". Run
 `gpresult /h C:\gp.html` and look under **User Rights Assignment** to see which applies. Ask your
-domain administrator for a temporary exception for the task account while you run the two commands.
-Close the window when you are done.
+domain administrator for a temporary exception for the task account while you run the commands.
+Close the window when you are done. Then delete `C:\TaskDash\taskdash_handoff.bin` if it exists.
 
 ## 4. Check the folder permissions
 
@@ -235,23 +317,74 @@ Each line starts with a mark:
 
 - `[ok]` means the check passed.
 - `[!!]` means a problem. The line ends with the fix.
-- `[--]` means the check does not apply to your config, such as `smtp` while alerting is off.
+- `[--]` means the check does not apply to your config, such as `smtp` while alerting is off. It also
+  means the thing to check is not set up yet. A `[--]` line never counts as a problem, and it never
+  changes the exit code.
 
 The last line counts the problems, such as `Preflight: 3 problem(s), 0 warning(s).` At this point
-these three lines are expected, because steps 6 and 7 have not run yet:
+these lines are expected as `[--]`, because steps 6 and 7 have not run yet:
 
-- `[!!] service: SystemExit: No arcgis.item_id in the config. A new install runs ...`
-- `[!!] sharing: the service was not read ...`
-- `[!!] collector logon type: collector task 'TaskDash Collector' not found. ...`
+- `[--] service: no arcgis.item_id configured yet. ...`
+- `[--] sharing: no arcgis.item_id configured yet. ...`
+- `[--] collector logon type: collector task 'TaskDash Collector' is not registered yet. ...`
+- `[--] collector account: collector task 'TaskDash Collector' is not registered yet. ...`
 
-`[--] view: no arcgis.view_item_id configured ...` and
-`[--] collector account: collector task 'TaskDash Collector' is not registered yet` are also expected.
+After step 6 sets `arcgis.item_id`, a missing collector task is no longer `[--]`. The two lines then
+start `[!!] ... WARNING: collector task 'TaskDash Collector' is not registered, or this window cannot
+see it`. That is a warning and does not change the exit code. Step 7 registers the task.
+
+`[--] view: no arcgis.view_item_id configured ...` and `[--] dashboard: no arcgis.dashboard_id
+configured` are also expected.
+
+A `base python` line that starts with `WARNING` means the Python that made the virtual environment is
+under `C:\Users`. The task account may not be able to run it. Install Python for all users as the
+Python requirement above describes, then run step 1 again.
+
+A `language mode` line that starts with `WARNING` means AppLocker or WDAC runs PowerShell in
+ConstrainedLanguage mode. TaskDash still collects there. See "The language mode line warns" in
+[TROUBLESHOOTING.md](TROUBLESHOOTING.md).
+
+An `install folder` line that is `[!!]` means that Users, Authenticated Users or Everyone can write
+to the install folder. Run the `icacls` command on that line from an elevated prompt. Step 4 shows
+the result.
 
 A `health check` line that starts with `WARNING` means `alerting.healthcheck_url` is empty. It is not
 a failure, and preflight still exits 0. See "Set up an outside health check" after step 8.
 
+A `host name` line that starts with `WARNING` means `host_name_override` differs from this computer's
+name. Clear the key, or see "Rename the computer" in [CONFIGURE.md](CONFIGURE.md) if you renamed it.
+
+A `dashboard` or `delete protection` line that starts with `WARNING` is not a failure either. Setup
+turns delete protection on, so it warns on an older install only. See "The dashboard line warns" in
+[TROUBLESHOOTING.md](TROUBLESHOOTING.md).
+
 A `tested scale` line that starts with `WARNING` is not a problem. It says that this computer has
 more tasks than the tested install, or tasks that repeat more often than hourly.
+
+### Run the checks as the task account
+
+The checks above run as you. The collector task runs as the task account, which can see other files
+and another Credential Manager. To see what the task account sees, without `runas`, run the check
+as a temporary task. First print the plan. This changes nothing.
+
+```powershell
+& $td preflight --as-task
+```
+
+If the plan names the right account, open PowerShell as administrator. Run the two lines from step 1
+that set the folder and `$td`. Then run the check:
+
+```powershell
+& $td preflight --as-task --apply
+```
+
+TaskDash asks for the password of the task account. It prints the preflight output, and it deletes
+the temporary task and its output file. If you used the hand-off in step 3, this is the first run as
+the task account. The output shows the line that starts `Stored the sign-in` before the
+`credentials` result. The collector task is not changed. Before step 7 registers
+the collector task, add `--task-user DOMAIN\svc-taskdash`. The options are in
+[CONFIGURE.md](CONFIGURE.md). If the check fails, see "The as-task check does not run" in
+[TROUBLESHOOTING.md](TROUBLESHOOTING.md).
 
 ### The event log line
 
@@ -295,17 +428,20 @@ Setup does the following:
 3. It creates the hosted service `TaskDash`, its read-only view `TaskDash_view`, a private group
    `TaskDash viewers` and the dashboard `TaskDash`.
 4. It writes the three item IDs into the config. Each one prints as `Config: arcgis.<key> = <id>`.
+5. It turns on delete protection for the service, the view and the dashboard.
+6. It saves `taskdash_setup_manifest.json` beside the config. The file lists the items that setup
+   created. It holds no secret. `taskdash remove` reads it to undo the install.
 
 The end of the output looks like this:
 
 ```text
 Open: https://myorg.maps.arcgis.com/apps/dashboards/<dashboard id>
-Created by this run (delete these in ArcGIS Online to undo):
+Created by this run (to undo, turn off delete protection first, then delete these in ArcGIS Online):
     Folder           <id>  TaskDash
-    Feature Service  <id>  TaskDash
-    Feature Service  <id>  TaskDash_view
+    Feature Service  <id>  TaskDash  (delete protection on)
+    Feature Service  <id>  TaskDash_view  (delete protection on)
     Group            <id>  TaskDash viewers
-    Dashboard        <id>  TaskDash
+    Dashboard        <id>  TaskDash  (delete protection on)
 Setup complete. The service is private; the view and dashboard are shared with the group 'TaskDash viewers' only. Add members to that group to give them access.
 ```
 
@@ -315,7 +451,9 @@ To use other names, pass `--folder`, `--title-prefix` or `--group-title`.
 
 If setup stops partway, it still lists what it created. To recover:
 
-1. In ArcGIS Online, delete only the items in that list, in the order of Undo step 2.
+1. Run `& $td remove`, then `& $td remove --apply`, as Undo step 2 describes. Setup saves the
+   manifest even when it stops partway. If you prefer, turn off delete protection in ArcGIS Online
+   on the items marked in that list. Then delete only the items in that list, by hand.
 2. Copy the newest `TaskDash.config.json.bak_setup_*` file over `TaskDash.config.json`.
 3. Run `& $td setup --apply` again.
 
@@ -352,6 +490,30 @@ password and prints `Registered 'TaskDash Collector'. Principal.LogonType = Pass
 
 The script uses the Password logon type. It refuses S4U ("Do not store password"), because an S4U
 task cannot read the saved sign-in from step 3.
+
+With `-Apply`, the script stops before it registers anything if the window is not elevated, or if the
+task account is not in the local Administrators group. Check mode prints the same problem as a
+`WARNING` and still exits 0. If the account belongs to the group only through another group, the
+script warns and continues, because it cannot read nested membership.
+
+Two optional switches save the manual commands in step 5 and step 8. Both only print their plan in
+check mode:
+
+| Switch | What it does with `-Apply` |
+|---|---|
+| `-EnableEventLog` | Runs `taskdash preflight --enable-event-log --apply` before it registers the task. It uses the `taskdash.exe` from `-Python`, or `<InstallDir>\venv\Scripts\taskdash.exe`. If that command fails, nothing is registered. |
+| `-StartNow` | Starts the task once after it registers, waits up to 10 minutes, and prints what `LastTaskResult` means. It exits with an error unless the result is `0`. |
+
+For example, this command does steps 5 (event log), 7 and 8 in one run:
+
+```powershell
+powershell.exe -ExecutionPolicy Bypass -File C:\TaskDash\venv\share\taskdash\install_task.ps1 `
+    -InstallDir C:\TaskDash -Python C:\TaskDash\venv\Scripts\taskdash.exe -User DOMAIN\svc-taskdash `
+    -EnableEventLog -StartNow -Apply
+```
+
+Run it in check mode first, without `-Apply`. If `-StartNow` ends with an error, the task stays
+registered. Use the `LastTaskResult` list in step 8 to find the cause.
 
 ### Why the task account must be an administrator
 
@@ -390,9 +552,8 @@ What `LastTaskResult` means:
   its last line.
 - `267011` (0x41303): the task never started. See "Why the task account must be an
   administrator" in step 7.
-- `2147943726` (0x8007052E): Windows rejected the task account's password. Delete the task with
-  `Unregister-ScheduledTask -TaskName "TaskDash Collector" -Confirm:$false`, then run step 7 with
-  `-Apply` again and type the right password.
+- `2147943726` (0x8007052E): Windows rejected the task account's password. Run step 7 again with
+  `-Replace -Apply` added, and type the right password. [ROTATE.md](ROTATE.md) describes it.
 - Any other value: read the task's **History** tab in Task Scheduler, as described below.
 
 If the state is still `Running` after 10 minutes, open the newest log file in `C:\TaskDash\Logs`
@@ -411,18 +572,21 @@ When the run succeeded, check the result **in your normal window**:
 
 ```text
 Local: taskdash_20261017_202547.log: <time> - INFO - TaskDash publish complete.
-Service: last collector run started 2026-10-17 20:25:47 UTC, exit_status success
+Service: last collector run started 2026-10-17 20:25:47 UTC, exit_status success; last success 47 min ago (host 'COLLECTOR-1')
 ```
+
+The exit code of `status` is `0` when the newest run succeeded and is fresh. See [USE.md](USE.md) for the other codes.
 
 Preflight now shows `[ok]` for the service, the view, sharing, the collector logon type and the
 collector account. The collector account line checks that the task account is in the local
 Administrators group. If that line starts `[!!] collector account: WARNING:`, the account is not a
 direct member, and preflight names the groups that may include it. Confirm that one of them does.
 
-If the collector logon type line still says `collector task 'TaskDash Collector' not found`, your
-normal window may not be allowed to see a task that runs as another account. Run
-`& $td preflight --offline` in the administrator window. That line must be
-`[ok] collector logon type: task 'TaskDash Collector' logs on as Password`.
+If the collector logon type line still says `WARNING: collector task 'TaskDash Collector' is not
+registered, or this window cannot see it`, your normal window may not be allowed to see a task that
+runs as another account. Run `& $td preflight --offline` in the administrator window. That line must
+be `[ok] collector logon type: task 'TaskDash Collector' logs on as Password`. If it still warns, set
+`scheduler.collector_task_name` to the real name of the task.
 
 ### Set up an outside health check
 
@@ -447,9 +611,24 @@ and read the view. Nobody else can, and nobody can edit the data through the vie
 
 1. In PowerShell as administrator, run
    `Unregister-ScheduledTask -TaskName "TaskDash Collector" -Confirm:$false`.
-2. In ArcGIS Online, delete in this order: the `TaskDash` dashboard, the `TaskDash_view` view, the
-   `TaskDash` service, the `TaskDash viewers` group, and then the empty `TaskDash` folder. Delete
-   the view before the service, because the view reads the service's data.
+2. Delete the ArcGIS items. Sign in as the account that ran setup. First run the check. It lists
+   what it would delete and changes nothing. If the list is right, run it again with `--apply`:
+
+   ```powershell
+   & $td remove
+   & $td remove --apply
+   ```
+
+   The command reads `taskdash_setup_manifest.json`, which setup saved beside the config. It deletes
+   only the items in that file, only the ones you own, and only the ones that still exist. It turns
+   off delete protection on each item first. It prints and skips any item it cannot delete. The
+   order is the dashboard, the group, the view, the service, and then the folder if it is empty.
+
+   If setup ran before version 1.2, or the manifest is lost, delete by hand instead. In ArcGIS
+   Online, turn off delete protection on the dashboard, the view and the service. Then delete in
+   this order: the `TaskDash` dashboard, the `TaskDash_view` view, the `TaskDash` service, the
+   `TaskDash viewers` group, and then the empty `TaskDash` folder. Delete the view before the
+   service, because the view reads the service's data.
 3. Remove the saved sign-in for each Windows account that stored one in step 3. Run this once in
    your normal window, and once in a `runas` window as the task account:
 
@@ -457,7 +636,20 @@ and read the view. Nobody else can, and nobody can edit the data through the vie
    C:\TaskDash\venv\Scripts\python.exe -c "from arcgis.gis import ProfileManager; ProfileManager().delete('taskdash')"
    ```
 
-4. Close every window that is in `C:\TaskDash`. Then delete the `C:\TaskDash` folder.
+4. If you set `smtp.user` in `CONFIGURE.md`, remove the saved mail password the same way. Use the
+   same two windows. Replace `<smtp.user>` with the value of `smtp.user`:
+
+   ```powershell
+   C:\TaskDash\venv\Scripts\python.exe -m keyring del taskdash-smtp <smtp.user>
+   ```
+
+5. Uninstall the package from the same environment:
+
+   ```powershell
+   C:\TaskDash\venv\Scripts\python.exe -m pip uninstall taskdash
+   ```
+
+6. Close every window that is in `C:\TaskDash`. Then delete the `C:\TaskDash` folder.
 
 The undo leaves three changes in place, because other software may use them:
 

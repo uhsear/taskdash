@@ -43,6 +43,12 @@ class FakeItem:
     def update(self, **kw):
         self.log.append(("item.update", self.id))
 
+    def protect(self, enable=True):
+        self.log.append(("protect", self.id, enable))
+        return {"success": self.protect_ok}
+
+    protect_ok = True
+
     def delete(self):
         self.log.append(("item.delete", self.id))
 
@@ -228,7 +234,7 @@ def test_apply_runs_in_order_and_shares_with_the_group_only(tmp_path, monkeypatc
     names = [c[0] for c in log]
     assert names == ["folder.create", "create_service", "apply_migration", "create_view", "view.folder", "group.create",
                      "group.kw", "share", "load_templates", "layer_ids", "validate", "post_dashboard",
-                     "move", "share", "anonymous"]
+                     "move", "share", "anonymous", "protect", "protect", "protect"]
     assert ("create_service", "TaskDash", "TaskDash") in log
     # item_id was already in the config when the view was created.
     assert ("create_view", "svc1", "svc1") in log
@@ -244,6 +250,31 @@ def test_apply_runs_in_order_and_shares_with_the_group_only(tmp_path, monkeypatc
     assert "Created by this run" in out
     for item_id in ("f1", "svc1", "view1", "g1", "dash1"):
         assert item_id in out
+
+
+def test_apply_turns_on_delete_protection_for_service_view_and_dashboard(tmp_path, monkeypatch, capsys):
+    log = []
+    path, args = _args(tmp_path, apply=True)
+    gis = FakeGis(log)
+    _patch_publish_and_dashboard(monkeypatch, gis, path, log)
+    setup.setup(gis, json.loads(path.read_text()), path, args)
+    assert [c for c in log if c[0] == "protect"] == [
+        ("protect", "svc1", True), ("protect", "view1", True), ("protect", "dash1", True)]
+    printed = capsys.readouterr().out
+    assert printed.count("(delete protection on)") == 3
+    group_line = next(line for line in printed.splitlines() if "g1" in line and "Group" in line)
+    assert "delete protection" not in group_line
+
+
+def test_a_protect_call_that_fails_stops_setup_and_says_what_to_do(tmp_path, monkeypatch, capsys):
+    log = []
+    path, args = _args(tmp_path, apply=True)
+    gis = FakeGis(log)
+    _, view, _ = _patch_publish_and_dashboard(monkeypatch, gis, path, log)
+    view.protect_ok = False
+    with pytest.raises(SystemExit, match="Item > Settings > Delete protection"):
+        setup.setup(gis, json.loads(path.read_text()), path, args)
+    assert "Created by this run" in capsys.readouterr().out
 
 
 def test_config_write_back_keeps_other_keys_and_order_and_backs_up(tmp_path, monkeypatch):

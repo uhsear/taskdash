@@ -193,7 +193,8 @@ def test_heartbeat_reads_the_stalest_host_and_refreshes(build):
     assert heartbeat["datasets"][0]["dataSource"] == {"type": "arcadeDataSource", "itemId": source["itemId"]}
     assert heartbeat["valueType"] == "feature" and heartbeat["valueField"] == dash.HEARTBEAT_SOURCE_FIELD
     assert source["refreshInterval"] == dash.HEARTBEAT_REFRESH_MINUTES
-    assert '"collected_at_utc ASC"' in source["script"] and '"TESTITEM"' in source["script"]
+    # The oldest collected_at_utc over the hosts that ran lately (H2-3), not over every stored row.
+    assert "t < ms" in source["script"] and '"TESTITEM"' in source["script"]
     assert "collected_at_utc" in _schema("TaskInventory")
     fallback = _by_name(build(heartbeat_arcade_refresh=False))["Collector Heartbeat"]["datasets"][0]
     assert fallback["statisticDefinitions"][0]["statisticType"] == "min"
@@ -394,6 +395,53 @@ def test_main_is_check_by_default_and_backs_up_before_it_overwrites(monkeypatch,
     assert calls == [] and (tmp_path / dash.OUTPUT_JSON).exists()
     assert dash.main(["--target", "test", "--apply"]) == 0
     assert calls == [("backup", "TEST1"), ("post", "TEST1")]
+
+
+def _run_main(monkeypatch, tmp_path, arcgis, existing, argv):
+    seen = []
+    monkeypatch.setattr(dash, "load_config", lambda path=None: {"arcgis": arcgis})
+    monkeypatch.setattr(dash, "connect_agol", lambda config: SimpleNamespace(url="https://example.maps.arcgis.com"))
+    monkeypatch.setattr(dash, "load_templates", lambda gis, source: _templates())
+    monkeypatch.setattr(dash, "resolve_layer_ids", lambda gis, item_id, target: dict(dash.DEFAULT_LAYER_IDS))
+    monkeypatch.setattr(dash, "resolve_dashboard", lambda gis, target, agol, title="": (existing, "T"))
+    monkeypatch.setattr(dash, "backup_dashboard", lambda item, log_dir: None)
+    monkeypatch.setattr(dash, "post_dashboard", lambda *a, **k: "ID")
+    monkeypatch.setattr(dash, "write_definition", lambda definition, item_id, layer_ids: seen.append(item_id))
+    monkeypatch.setattr(dash, "validate_definition", lambda *a, **k: None)
+    monkeypatch.setattr(publish, "resolve_log_dir", lambda config: tmp_path / "Logs")
+    assert dash.main(argv) == 0
+    return seen[0]
+
+
+def test_no_target_uses_test_only_when_the_config_has_a_test_service(monkeypatch, tmp_path, capsys):
+    both = {"item_id": "PRODSVC", "test_item_id": "TESTSVC"}
+    assert _run_main(monkeypatch, tmp_path, both, None, []) == "TESTSVC"
+    assert "No --target given: using test" in capsys.readouterr().out
+    assert _run_main(monkeypatch, tmp_path, {"item_id": "PRODSVC"}, None, []) == "PRODSVC"
+    assert "No --target given: using prod" in capsys.readouterr().out
+    assert _run_main(monkeypatch, tmp_path, both, None, ["--target", "prod"]) == "PRODSVC"
+    assert "No --target given" not in capsys.readouterr().out
+
+
+def test_hand_edit_warning_appears_only_on_apply_over_an_existing_item(monkeypatch, tmp_path, capsys):
+    arcgis = {"item_id": "PRODSVC"}
+    existing = _item("D1", "TaskDash")
+    _run_main(monkeypatch, tmp_path, arcgis, existing, ["--target", "prod", "--apply"])
+    assert "replaces any hand edits" in capsys.readouterr().out
+    _run_main(monkeypatch, tmp_path, arcgis, existing, [])
+    assert "hand edits" not in capsys.readouterr().out
+    _run_main(monkeypatch, tmp_path, arcgis, None, ["--target", "prod", "--apply"])
+    assert "hand edits" not in capsys.readouterr().out
+
+
+def test_apply_without_target_never_posts_to_prod_when_there_is_no_test_service(monkeypatch, tmp_path):
+    posted = []
+    monkeypatch.setattr(dash, "load_config", lambda path=None: {"arcgis": {"item_id": "PRODSVC"}})
+    monkeypatch.setattr(dash, "connect_agol", lambda config: posted.append("signed in"))
+    monkeypatch.setattr(dash, "post_dashboard", lambda *a, **k: posted.append("post"))
+    with pytest.raises(SystemExit, match="--target prod --apply"):
+        dash.main(["--apply"])
+    assert posted == []
 
 
 # ------------------------------------------------------------------ render fixes (TaskDash_TEST, 1920 px)

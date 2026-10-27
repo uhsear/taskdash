@@ -9,8 +9,8 @@ description = "Windows scheduled-task monitor that publishes to ArcGIS Online ho
 readme = "README.md"
 # An SPDX expression needs setuptools 77 or later; LICENSE and NOTICE ship in the wheel by default.
 license = "Apache-2.0"
-# removesuffix (3.9) is the newest language feature the code uses; ArcGIS Pro's own env is newer.
-requires-python = ">=3.9"
+# CI, the lock and the install guide all use 3.11; ArcGIS Pro's own env is 3.11 or newer.
+requires-python = ">=3.11"
 # Ranges, not pins: Pro ships its own arcgis and a pin would fight it. requests comes with arcgis.
 dependencies = ["arcgis>=2.4,<3"]
 
@@ -24,15 +24,19 @@ taskdash = "taskdash_cli:main"
 [tool.setuptools]
 # Flat layout on purpose: a folder deploy and the wheel run the same files.
 py-modules = [
+    "taskdash_astask",
     "taskdash_cli",
     "taskdash_collect",
     "taskdash_common",
     "taskdash_dashboard",
     "taskdash_demo",
+    "taskdash_handoff",
     "taskdash_metrics",
     "taskdash_preflight",
     "taskdash_publish",
+    "taskdash_remove",
     "taskdash_setup",
+    "taskdash_signin",
     "taskdash_synthetic",
 ]
 
@@ -47,5 +51,6 @@ version = {attr = "taskdash_common.TASKDASH_VERSION"}
     "TaskDash.config.example.json",
     "taskdash_task.xml",
     "install_task.ps1",
+    "Install-TaskDash.ps1",
 ]
 "share/taskdash/rules" = ["rules/default.json"]

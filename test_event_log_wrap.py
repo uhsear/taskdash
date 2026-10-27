@@ -58,7 +58,7 @@ def fake_world(monkeypatch, tmp_path):
         collect.oldest_record_id = seen["oldest"]
         return list(seen["events"])
 
-    monkeypatch.setattr(collect, "collect_tasks", lambda timeout=180: [])
+    monkeypatch.setattr(collect, "collect_tasks", lambda timeout=180, *_: [])
     monkeypatch.setattr(collect, "collect_run_events", read)
     monkeypatch.setattr(collect, "load_descriptions", lambda: {})
     monkeypatch.setattr(collect, "newest_record_id", lambda timeout=180: 2000)

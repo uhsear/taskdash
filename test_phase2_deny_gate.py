@@ -24,7 +24,7 @@ def _targets():
     paths += [str(ROOT / "rules" / "default.json"), str(ROOT / "dashboard_templates.json"),
               str(ROOT / "run_taskdash.cmd"), str(ROOT / "TaskDash.config.example.json"),
               str(ROOT / "tests"), str(ROOT / "taskdash_task.xml"), str(ROOT / "install_task.ps1"),
-              str(ROOT / ".github" / "workflows" / "install.yml")]
+              str(ROOT / "Install-TaskDash.ps1"), str(ROOT / ".github" / "workflows" / "install.yml")]
     return paths
 
 

@@ -13,11 +13,14 @@ import logging
 import os
 import re
 import stat
+import statistics
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
-from taskdash_common import data_dir, emit, home_dir, normalize_text, parse_iso_datetime, utc_now
+from taskdash_common import (
+    data_dir, emit, home_dir, normalize_text, parse_iso_datetime, see_troubleshooting, utc_now,
+)
 
 DEFAULT_MAX_LOG_FILES_PER_TASK = 40
 DEFAULT_MAX_LINES_PER_FILE = 5000
@@ -203,6 +206,34 @@ def parse_number(text: str) -> Optional[float]:
         return None
 
 
+# Rules profile setting decimal_separator. "," means the log writes 1.234,5 for 1234.5: "." groups
+# thousands and "," starts the decimals. configure_rules sets it; "." leaves every line untouched.
+DECIMAL_SEPARATOR = "."
+_NUMBER_TOKEN_RE = re.compile(r"(?<![\d.,])\d+(?:[.,]\d+)*")
+_SWAP_SEPARATORS = str.maketrans(".,", ",.")
+# "." groups thousands only as 1-3 digits not starting with 0, then groups of exactly three:
+# 1.234 and 12.345.678,9 swap; 1.5, 0.512 and 1.2345 do not, so a dot decimal is never read as x10.
+_GROUPED_NUMBER_RE = re.compile(r"[1-9]\d{0,2}(?:\.\d{3})+(?:,\d+)?")
+_COMMA_DECIMAL_RE = re.compile(r"\d+,\d+")
+
+
+def _swap_number(token: str) -> str:
+    if _GROUPED_NUMBER_RE.fullmatch(token):
+        return token.translate(_SWAP_SEPARATORS)
+    if _COMMA_DECIMAL_RE.fullmatch(token):
+        return token.replace(",", ".")
+    return token
+
+
+def _to_dot_decimal(line: str) -> str:
+    """Rewrite each number in a comma-decimal log line to the 1,234.5 form the patterns read.
+    A separator counts only between digits, so "rows: 5, done" and "end." keep their punctuation.
+    TASKDASH lines are not rewritten: their documented value format is always dot-decimal."""
+    if DECIMAL_SEPARATOR == ".":
+        return line
+    return _NUMBER_TOKEN_RE.sub(lambda m: _swap_number(m.group()), line)
+
+
 def normalize_metric_key(label: str) -> str:
     clean = re.sub(r"[^a-z0-9]+", "_", label.strip().lower()).strip("_")
     return clean[:80] if clean else ""
@@ -340,7 +371,7 @@ def _phrase_pairs(line: str, extra_rules: Sequence[Tuple[re.Pattern, str]] = ())
 
 def extract_metrics_from_line(line: str, extra_rules: Sequence[Tuple[re.Pattern, str]] = ()) -> List[Tuple[str, float]]:
     """Return (raw label, value) pairs from one log line; the first pair per label wins."""
-    line = LOG_PREAMBLE_RE.sub("", line, count=1)
+    line = _to_dot_decimal(LOG_PREAMBLE_RE.sub("", line, count=1))
     results: List[Tuple[str, float]] = []
     seen: set[str] = set()
     duration, duration_label = _line_duration(line)
@@ -385,6 +416,42 @@ def metric_series_key(host_name: Any, task_full_name: Any, metric_key: Any) -> s
     filtered on task_name alone), so a Metric change row click needs a single key to draw one
     line. The Metric change Arcade builds the same text: keep the two in step."""
     return f"{host_name}|{task_full_name}|{metric_key}"
+
+
+METRIC_CHANGE_HISTORY = 30     # earlier values in the usual value, about one month of daily runs
+METRIC_CHANGE_MIN_HISTORY = 3  # fewer earlier values give no usual value
+
+
+def compute_metric_change(rows: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """One row per host + task + metric: its newest value, and the median ("usual") of up to
+    METRIC_CHANGE_HISTORY values before it. The dashboard's Metric Change source worked this out
+    in the browser from every TaskMetrics row; the collector now stores it in the MetricChange
+    table. The flag rules stay in that Arcade, so the lowest and highest earlier value and the
+    earlier count are kept too. `rows` are TaskMetrics rows as a query returns them, with
+    observed_at_utc in epoch milliseconds. A series with fewer than METRIC_CHANGE_MIN_HISTORY
+    earlier values has no usual value, lowest or highest."""
+    series: Dict[str, List[Dict[str, Any]]] = {}
+    for row in rows:
+        if row.get("metric_value") is None or row.get("observed_at_utc") is None:
+            continue
+        key = metric_series_key(row.get("host_name"), row.get("task_full_name"), row.get("metric_key"))
+        series.setdefault(key, []).append(row)
+    computed = []
+    for key, found in series.items():
+        found.sort(key=lambda r: r["observed_at_utc"], reverse=True)
+        head = found[0]
+        earlier = sorted(r["metric_value"] for r in found[1:METRIC_CHANGE_HISTORY + 1])
+        enough = len(earlier) >= METRIC_CHANGE_MIN_HISTORY
+        computed.append({
+            "series_key": key, "host_name": head.get("host_name"), "task_name": head.get("task_name"),
+            "task_full_name": head.get("task_full_name"), "metric_key": head.get("metric_key"),
+            "display_name": head.get("display_name"), "latest_value": head["metric_value"],
+            "latest_at_utc": head["observed_at_utc"], "history_count": len(earlier),
+            "usual_value": statistics.median(earlier) if enough else None,
+            "lowest_value": earlier[0] if enough else None,
+            "highest_value": earlier[-1] if enough else None,
+        })
+    return computed
 
 
 def metric_display_name(metric_key: str) -> str:
@@ -434,7 +501,7 @@ _IGNORECASE_RULES = {"prose_count_rules", "fixed_value_rules", "noise_metric_key
 _NON_STRING_FIELDS = {"keys": "a non-empty list of strings", "value": "a number"}
 _DICT_RULE_SECTIONS = {"log_preamble", "display_names", "cause_text"}
 _RULE_SECTIONS = {*_ORDERED_RULE_FIELDS, *_DICT_RULE_SECTIONS, "section_pattern", "display_acronyms",
-                  "secret_words"}
+                  "secret_words", "decimal_separator"}
 _PREAMBLE_KEYS = ("timestamp", "separator", "levels")
 
 # Config metrics.tasks, keyed by task_full_name like metrics.log_directory_overrides:
@@ -447,7 +514,8 @@ TASK_SETTINGS: Dict[str, Dict[str, Any]] = {}
 
 
 def _rules_error(where: str, problem: str, fix: str) -> SystemExit:
-    return SystemExit(f"Rules problem in {where}: {problem}. Fix: {fix}, then re-run.")
+    return SystemExit(f"Rules problem in {where}: {problem}. Fix: {fix}, then re-run.\n"
+                      + see_troubleshooting("A rules file has a problem"))
 
 
 def _compile_rule(where: str, pattern: Any, flags: int = 0, group: Any = None) -> re.Pattern:
@@ -528,6 +596,7 @@ def _check_rule_dict(where: str, section: str, value: Any) -> None:
 def _merge_rule_files(paths: Sequence[Path]) -> Dict[str, Any]:
     merged: Dict[str, Any] = {name: {} for name in (*_ORDERED_RULE_FIELDS, *_DICT_RULE_SECTIONS)}
     merged["display_acronyms"], merged["secret_words"], merged["section_pattern"] = set(), set(), None
+    merged["decimal_separator"] = "."
     for path in paths:
         for section, value in _read_rules_file(path).items():
             if section.startswith("_"):
@@ -541,6 +610,11 @@ def _merge_rule_files(paths: Sequence[Path]) -> Dict[str, Any]:
             elif section in _DICT_RULE_SECTIONS:
                 _check_rule_dict(where, section, value)
                 merged[section].update(value)
+            elif section == "decimal_separator":
+                if value not in (".", ","):
+                    raise _rules_error(where, f"the value must be \".\" or \",\", got {value!r}",
+                                       'set "decimal_separator" to "." (1,234.5) or "," (1.234,5)')
+                merged[section] = value
             elif section in ("display_acronyms", "secret_words"):
                 # A blank secret word would make every "=value" in a log look like a secret.
                 if not (isinstance(value, list) and all(isinstance(s, str) and s.strip() for s in value)):
@@ -571,6 +645,7 @@ def load_rules(profiles: Tuple[str, ...] = ()) -> Dict[str, Any]:
         "section_re": _compile_rule(*merged["section_pattern"], 0, "name"),
         "display_acronyms": set(merged["display_acronyms"]),
         "secret_words": set(merged["secret_words"]),
+        "decimal_separator": merged["decimal_separator"],
         "display_names": dict(merged["display_names"]),
         "cause_text": {cause: tuple(text) for cause, text in merged["cause_text"].items()},
     }
@@ -653,7 +728,8 @@ def configure_rules(config: Dict[str, Any]) -> None:
     this module's tables. load_config calls this, so a bad rule stops the run before any work."""
     rules = load_rules(tuple((config.get("rules") or {}).get("profiles") or ()))
     task_settings = _compile_task_settings((config.get("metrics") or {}).get("tasks") or {})
-    global LOG_PREAMBLE_RE, LOG_LEVEL_RE, SECTION_RE
+    global LOG_PREAMBLE_RE, LOG_LEVEL_RE, SECTION_RE, DECIMAL_SEPARATOR
+    DECIMAL_SEPARATOR = rules["decimal_separator"]
     LOG_PREAMBLE_RE, LOG_LEVEL_RE, SECTION_RE = rules["log_preamble_re"], rules["log_level_re"], rules["section_re"]
     for table in (PROSE_COUNT_RULES, FIXED_VALUE_RULES, CANONICAL_METRIC_RULES, NOISE_METRIC_KEY_PATTERNS,
                   MEANINGFUL_METRIC_TOKENS, METRIC_CHANGE_LOWER_IS_BETTER, CAUSE_PATTERNS):

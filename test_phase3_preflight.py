@@ -6,7 +6,9 @@ Every check runs against fakes: no network, no sign-in, no real wevtutil, no Tas
 from __future__ import annotations
 
 import json
+import os
 import smtplib
+import socket
 import ssl
 from types import SimpleNamespace
 
@@ -24,7 +26,9 @@ ALL_PRIVILEGES = [key for key, _ in pf.REQUIRED_PRIVILEGES]
 
 def make_ctx(config=None, **extra):
     args = SimpleNamespace(config="", offline=False)
-    return pf.Context(args, config={"rules": {"profiles": []}, **(config or {})}, **extra)
+    config = dict(config or {})
+    config["arcgis"] = {"item_id": "svc1", **config.get("arcgis", {})}  # a set-up install; "" means not yet
+    return pf.Context(args, config={"rules": {"profiles": []}, **config}, **extra)
 
 
 def write_config(tmp_path, body=None):
@@ -54,8 +58,8 @@ def view_tables(config):
 
 
 class FakeItem:
-    def __init__(self, item_id="svc1", access="private", stamp=SCHEMA_VERSION):
-        self.id, self.access = item_id, access
+    def __init__(self, item_id="svc1", access="private", stamp=SCHEMA_VERSION, protected=True):
+        self.id, self.access, self.protected = item_id, access, protected
         self.properties = {} if stamp is None else {"taskdash_schema_version": stamp}
 
     def update(self, *a, **k):
@@ -171,12 +175,24 @@ def test_event_log_unreadable_is_a_crash_line(monkeypatch):
 # --------------------------------------------------------------------------- 5 tasks
 
 def test_tasks_counted_and_empty_fails(monkeypatch):
-    monkeypatch.setattr(taskdash_collect, "collect_tasks", lambda timeout: [{"task_name": "A"}, {"task_name": "B"}])
+    monkeypatch.setattr(taskdash_collect, "collect_tasks", lambda timeout, *_: [{"task_name": "A"}, {"task_name": "B"}])
     ctx = make_ctx()
     status, message = pf.check_tasks(ctx)
     assert status == pf.OK and "2 task" in message and len(ctx.tasks) == 2
-    monkeypatch.setattr(taskdash_collect, "collect_tasks", lambda timeout: [])
+    monkeypatch.setattr(taskdash_collect, "collect_tasks", lambda timeout, *_: [])
     assert pf.check_tasks(make_ctx())[0] == pf.FAIL
+
+
+def test_a_host_with_only_microsoft_tasks_passes_the_task_check(monkeypatch):
+    calls = []
+
+    def fake(timeout, exclude=True):
+        calls.append(exclude)
+        return [] if exclude else [{"task_name": "\\Microsoft\\Windows\\X"}]
+
+    monkeypatch.setattr(taskdash_collect, "collect_tasks", fake)
+    status, message = pf.check_tasks(make_ctx())
+    assert status == pf.OK and "no task outside" in message and calls == [True, False]
 
 
 # --------------------------------------------------------------------------- 6 log folders
@@ -289,9 +305,21 @@ def test_service_ok_and_unstamped_note(monkeypatch):
     assert status == pf.OK and "next --migrate --apply stamps it" in message
 
 
-def test_service_newer_stamp_fails(monkeypatch):
-    status, message = pf.check_service(service_ctx(monkeypatch, item=FakeItem(stamp=SCHEMA_VERSION + 1)))
-    assert status == pf.FAIL and "Upgrade TaskDash" in message
+def test_service_newer_stamp_warns_with_the_advice_collect_gives(monkeypatch, capsys):
+    # After a rollback collect keeps publishing, so preflight must not call it a failure.
+    item = FakeItem(stamp=SCHEMA_VERSION + 1)
+    status, message = pf.check_service(service_ctx(monkeypatch, item=item))
+    assert status == pf.WARN and message.startswith("WARNING")
+    publish.warn_if_service_schema_newer(item)
+    assert message == capsys.readouterr().out.strip()
+    assert "Install the newer TaskDash" in message
+
+
+def test_service_newer_stamp_does_not_hide_schema_drift(monkeypatch):
+    tables = service_tables()
+    del tables[publish.TABLE_COLLECTOR_RUNS]
+    status, _ = pf.check_service(service_ctx(monkeypatch, tables, FakeItem(stamp=SCHEMA_VERSION + 1)))
+    assert status == pf.FAIL
 
 
 def test_service_drift_missing_table_field_and_unique_index(monkeypatch):
@@ -306,10 +334,23 @@ def test_service_drift_missing_table_field_and_unique_index(monkeypatch):
     assert "--migrate --apply" in message
 
 
-def test_service_missing_item_id_is_a_crash_line():
-    ctx = make_ctx(gis=FakeGis())
-    status, message = pf.run_check(pf.check_service, ctx)
-    assert status == pf.FAIL and "No arcgis.item_id" in message
+def test_service_without_an_item_id_is_not_set_up_yet_not_a_failure():
+    for ctx in (make_ctx({"arcgis": {"item_id": ""}}, gis=FakeGis()), make_ctx({"arcgis": {"item_id": ""}})):
+        status, message = pf.run_check(pf.check_service, ctx)
+        assert status == pf.SKIP and "arcgis.item_id" in message and "taskdash setup --apply" in message
+
+
+@pytest.mark.parametrize("key", ["view_item_id", "dashboard_id"])
+def test_other_install_keys_without_an_item_id_fail_as_a_damaged_install(key):
+    status, message = pf.run_check(pf.check_service, make_ctx({"arcgis": {"item_id": "", key: "x1"}}))
+    assert status == pf.FAIL and f"arcgis.{key}" in message and "arcgis.item_id" in message
+    assert "The service is not in the config" in message
+
+
+def test_sharing_without_an_item_id_is_not_set_up_yet_but_a_missing_read_still_fails():
+    status, message = pf.check_sharing(make_ctx({"arcgis": {"item_id": ""}}, gis=FakeGis()))
+    assert status == pf.SKIP and "arcgis.item_id" in message
+    assert pf.check_sharing(make_ctx(gis=FakeGis()))[0] == pf.FAIL
 
 
 # --------------------------------------------------------------------------- 9 view and sharing
@@ -381,6 +422,95 @@ def test_sharing_without_view_ignores_source_access_but_still_tests_anonymous(mo
     assert pf.check_sharing(ctx)[0] == pf.OK and len(seen) == len(publish.TABLE_SPECS)
 
 
+def fake_dashboard(view_id="view1", access="org", item_id="dash1"):
+    """A Dashboard item whose layer data sources name view_id; reading is all it supports."""
+    dash = FakeItem(item_id, access)
+    source = {"dataSource": {"type": "layerDataSource", "itemId": view_id, "layerId": 0}}
+    data = {"desktopView": {"widgets": [{"datasets": [source]}]}, "mobileView": {"widgets": []}}
+    dash.get_data = lambda: data
+    return dash
+
+
+def dashboard_ctx(dash, view_id="view1"):
+    config = {"arcgis": {"dashboard_id": "dash1", "view_item_id": view_id}}
+    return make_ctx(config, gis=FakeGis(items={"dash1": dash} if dash else {}))
+
+
+def test_dashboard_skipped_without_dashboard_id():
+    assert pf.check_dashboard(make_ctx(gis=FakeGis()))[0] == pf.SKIP
+
+
+def test_dashboard_ok_when_it_reads_the_view_and_is_not_public():
+    status, message = pf.check_dashboard(dashboard_ctx(fake_dashboard()))
+    assert status == pf.OK and "dash1" in message
+
+
+def test_dashboard_missing_warns_with_the_fix():
+    status, message = pf.check_dashboard(dashboard_ctx(None))
+    assert status == pf.WARN and message.startswith("WARNING") and "arcgis.dashboard_id" in message
+    assert "taskdash dashboard --target prod --apply" in message
+
+
+def test_dashboard_shared_with_everyone_warns():
+    status, message = pf.check_dashboard(dashboard_ctx(fake_dashboard(access="public")))
+    assert status == pf.WARN and "everyone" in message
+
+
+def test_dashboard_reading_another_item_than_the_view_warns():
+    status, message = pf.check_dashboard(dashboard_ctx(fake_dashboard(view_id="svc9")))
+    assert status == pf.WARN and "do not read the view view1" in message
+
+
+@pytest.mark.parametrize("widget", [{}, {"datasets": [{}]}, {"datasets": [{"dataSource": None}]},
+                                    {"datasets": None}])
+def test_a_hand_edited_widget_without_datasets_warns_instead_of_failing(widget):
+    dash = fake_dashboard()
+    data = {"desktopView": {"widgets": [widget]}}
+    dash.get_data = lambda: data
+    status, message = pf.check_dashboard(dashboard_ctx(dash))
+    assert status == pf.WARN and "do not read the view view1" in message
+
+
+def test_a_dashboard_desktop_view_without_widgets_warns():
+    dash = fake_dashboard()
+    dash.get_data = lambda: {"desktopView": {"sidebar": {}}}
+    assert pf.check_dashboard(dashboard_ctx(dash))[0] == pf.WARN
+
+
+def test_dashboard_without_a_view_does_not_judge_its_data_sources():
+    config = {"arcgis": {"dashboard_id": "dash1"}}
+    ctx = make_ctx(config, gis=FakeGis(items={"dash1": fake_dashboard(view_id="svc9")}))
+    assert pf.check_dashboard(ctx)[0] == pf.OK
+
+
+def protection_ctx(service_protected=True, view_protected=True):
+    view = FakeItem("view1", "org", protected=view_protected)
+    ctx = make_ctx({"arcgis": {"view_item_id": "view1"}}, gis=FakeGis(items={"view1": view}))
+    ctx.item = FakeItem("svc1", protected=service_protected)
+    return ctx
+
+
+def test_delete_protection_ok_when_service_and_view_are_protected():
+    assert pf.check_delete_protection(protection_ctx())[0] == pf.OK
+
+
+def test_delete_protection_off_warns_naming_each_item_and_the_fix():
+    status, message = pf.check_delete_protection(protection_ctx(False, False))
+    assert status == pf.WARN and message.startswith("WARNING")
+    assert "service svc1" in message and "view view1" in message
+    assert "Item > Settings > Delete protection" in message and "taskdash setup" in message
+
+
+def test_delete_protection_warns_for_the_one_item_that_is_off():
+    message = pf.check_delete_protection(protection_ctx(view_protected=False))[1]
+    assert "view view1" in message and "service svc1" not in message
+
+
+def test_delete_protection_skipped_when_no_item_was_read():
+    ctx = make_ctx(gis=FakeGis())
+    assert pf.check_delete_protection(ctx)[0] == pf.SKIP
+
+
 # --------------------------------------------------------------------------- 10 logon type
 
 def task(name, logon, **extra):
@@ -406,10 +536,10 @@ def test_logon_password_and_interactive_are_ok(logon):
     assert pf.check_logon_type(ctx)[0] == pf.OK
 
 
-def test_logon_task_not_found_names_the_installer_and_honours_the_configured_name():
-    ctx = make_ctx(tasks=[task("Other", "Password")])
+def test_logon_task_not_registered_yet_skips_names_the_installer_and_honours_the_configured_name():
+    ctx = make_ctx({"arcgis": {"item_id": ""}}, tasks=[task("Other", "Password")])
     status, message = pf.check_logon_type(ctx)
-    assert status == pf.FAIL and "install_task.ps1" in message and "'TaskDash Collector'" in message
+    assert status == pf.SKIP and "install_task.ps1" in message and "'TaskDash Collector'" in message
     ctx = make_ctx({"scheduler": {"collector_task_name": "Custom Collector"}},
                    tasks=[task("custom collector", "Password")])
     assert pf.check_logon_type(ctx)[0] == pf.OK
@@ -417,6 +547,16 @@ def test_logon_task_not_found_names_the_installer_and_honours_the_configured_nam
 
 def test_logon_without_task_list_fails():
     assert pf.check_logon_type(make_ctx())[0] == pf.FAIL
+
+
+@pytest.mark.parametrize("check", [pf.check_logon_type, pf.check_admin_account])
+def test_a_set_up_install_with_no_visible_collector_task_warns_instead_of_passing(check):
+    # Once the service exists the task should too. A standard window cannot see another account's
+    # task, and a wrong scheduler.collector_task_name looks the same, so [--] would hide both.
+    status, message = check(make_ctx(tasks=[task("Other", "Password")]))
+    assert status == pf.WARN and message.startswith("WARNING:")
+    assert "'TaskDash Collector'" in message and "administrator" in message
+    assert "scheduler.collector_task_name" in message
 
 
 # --------------------------------------------------------------------------- 10b collector account
@@ -462,7 +602,7 @@ def test_admin_system_task_and_unregistered_task_need_no_group_read(monkeypatch)
     monkeypatch.setattr(pf, "read_admin_members", lambda: pytest.fail("must not read the group"))
     assert pf.check_admin_account(admin_ctx("SYSTEM"))[0] == pf.OK
     assert pf.check_admin_account(admin_ctx(""))[0] == pf.WARN
-    assert pf.check_admin_account(make_ctx(tasks=[task("Other", "Password")]))[0] == pf.SKIP
+    assert pf.check_admin_account(make_ctx({"arcgis": {"item_id": ""}}, tasks=[task("Other", "Password")]))[0] == pf.SKIP
     assert pf.check_admin_account(make_ctx())[0] == pf.FAIL
 
 
@@ -507,6 +647,214 @@ def test_health_check_warning_keeps_preflight_exit_zero(tmp_path, monkeypatch):
     assert pf.run_preflight(args) == 0
 
 
+# --------------------------------------------------------------------------- host name override
+
+def test_host_name_override_mismatch_warns_with_both_fixes(monkeypatch):
+    monkeypatch.setattr(socket, "gethostname", lambda: "SYNTH-NEW-01")
+    status, message = pf.check_host_name(make_ctx({"host_name_override": "SYNTH-OLD-01"}))
+    assert status == pf.WARN and message.startswith("WARNING")
+    assert "SYNTH-OLD-01" in message and "SYNTH-NEW-01" in message
+    assert "host_previous_names" in message and "--allow-host-mismatch" in message
+
+
+def test_host_name_override_blank_or_equal_is_silent(monkeypatch):
+    monkeypatch.setattr(socket, "gethostname", lambda: "SYNTH-NEW-01")
+    for config in ({}, {"host_name_override": "  "}, {"host_name_override": "synth-new-01"}):
+        assert pf.check_host_name(make_ctx(config))[0] == pf.OK
+
+
+def test_preflight_and_the_publish_refusal_share_one_mismatch_test(monkeypatch):
+    monkeypatch.setattr(socket, "gethostname", lambda: "SYNTH-NEW-01")
+    assert publish.host_mismatch({"host_name_override": " SYNTH-OLD-01 "}) == ("SYNTH-OLD-01", "SYNTH-NEW-01")
+    assert publish.host_mismatch({"host_name_override": "synth-new-01"}) is None
+    assert publish.host_mismatch({}) is None
+    calls = []
+    monkeypatch.setattr(pf, "host_mismatch", lambda config: calls.append(config) or None)
+    assert pf.check_host_name(make_ctx({"host_name_override": "SYNTH-OLD-01"}))[0] == pf.OK
+    assert len(calls) == 1
+
+
+# --------------------------------------------------------------------------- base Python and install folder
+
+USER_PYTHON = r"C:\Users\synth\AppData\Local\Programs\Python\Python311"
+SHARED_PYTHON = r"C:\Program Files\Python311"
+
+
+@pytest.mark.parametrize("prefix", [USER_PYTHON, USER_PYTHON.lower(), r"C:\USERS\synth\Python311"])
+def test_base_python_under_users_warns_with_the_fix(monkeypatch, prefix):
+    monkeypatch.setenv("SystemDrive", "C:")
+    monkeypatch.setattr(pf.sys, "base_prefix", prefix)
+    status, message = pf.check_base_python(make_ctx())
+    assert status == pf.WARN and message.startswith("WARNING") and prefix in message
+    assert "for all users" in message and "docs/INSTALL.md" in message
+
+
+@pytest.mark.parametrize("prefix", [SHARED_PYTHON, r"C:\UsersShared\Python311", r"D:\Users\Python311"])
+def test_base_python_outside_users_is_ok(monkeypatch, prefix):
+    monkeypatch.setenv("SystemDrive", "C:")
+    monkeypatch.setattr(pf.sys, "base_prefix", prefix)
+    assert pf.check_base_python(make_ctx())[0] == pf.OK
+
+
+HOME = r"C:\SynthTaskDash"
+LOCKED_ACL = (f"{HOME} NT AUTHORITY\\SYSTEM:(OI)(CI)(F)\n"
+              "           BUILTIN\\Administrators:(OI)(CI)(F)\n"
+              "           HOST\\svc-td:(OI)(CI)(M)\n\n"
+              "Successfully processed 1 files; Failed processing 0 files\n")
+
+
+def fake_icacls(monkeypatch, stdout=LOCKED_ACL, returncode=0, stderr="", calls=None):
+    def run(cmd, **kwargs):
+        if calls is not None:
+            calls.append(list(cmd))
+        return SimpleNamespace(returncode=returncode, stdout=stdout, stderr=stderr)
+    monkeypatch.setattr(pf.subprocess, "run", run)
+    monkeypatch.setattr(pf, "home_dir", lambda: HOME)
+    monkeypatch.setattr(pf, "read_owner", lambda path: ("S-1-5-32-544", "BUILTIN\\Administrators"))
+
+
+@pytest.mark.parametrize("sid", list(pf.TRUSTED_OWNER_SIDS))
+def test_install_folder_owned_by_system_administrators_or_trustedinstaller_is_ok(monkeypatch, sid):
+    fake_icacls(monkeypatch)
+    monkeypatch.setattr(pf, "read_owner", lambda path: (sid, ""))
+    assert pf.check_install_folder_acl(make_ctx())[0] == pf.OK
+
+
+def test_install_folder_owned_by_a_direct_administrator_is_ok(monkeypatch):
+    fake_icacls(monkeypatch)
+    monkeypatch.setattr(pf, "read_owner", lambda path: ("S-1-5-21-1-2-3-1001", "HOST\\Admin"))
+    monkeypatch.setattr(pf, "read_admin_members", lambda: [("HOST\\admin", "User")])
+    assert pf.check_install_folder_acl(make_ctx())[0] == pf.OK
+
+
+@pytest.mark.parametrize("members", [[("HOST\\other", "User")], [("HOST\\Admin", "Group")], OSError("no group")])
+def test_install_folder_owned_by_an_unconfirmed_account_warns_with_the_setowner_fix(monkeypatch, members):
+    # A locked folder still belongs to its owner, who can grant themselves write again at any time.
+    fake_icacls(monkeypatch)
+    monkeypatch.setattr(pf, "read_owner", lambda path: ("S-1-5-21-1-2-3-1001", "HOST\\Admin"))
+
+    def admins():
+        if isinstance(members, Exception):
+            raise members
+        return members
+    monkeypatch.setattr(pf, "read_admin_members", admins)
+    status, message = pf.check_install_folder_acl(make_ctx())
+    assert status == pf.WARN and message.startswith("WARNING") and "HOST\\Admin" in message
+    assert f'icacls "{HOME}" /setowner *S-1-5-32-544' in message
+
+
+def test_install_folder_owner_unreadable_or_unresolved_still_warns(monkeypatch):
+    fake_icacls(monkeypatch)
+
+    def denied(path):
+        raise PermissionError(5, "Access is denied")
+    monkeypatch.setattr(pf, "read_owner", denied)
+    status, message = pf.check_install_folder_acl(make_ctx())
+    assert status == pf.WARN and "could not read the owner" in message
+    monkeypatch.setattr(pf, "read_owner", lambda path: ("S-1-5-21-9-9-9-1234", ""))
+    monkeypatch.setattr(pf, "read_admin_members", lambda: [])
+    assert "S-1-5-21-9-9-9-1234" in pf.check_install_folder_acl(make_ctx())[1]
+
+
+def test_read_owner_reads_a_real_folder_through_the_win32_api():
+    windir = os.environ.get("SystemRoot", r"C:\Windows")
+    sid, name = pf.read_owner(windir)
+    assert sid == pf.TRUSTED_OWNER_SIDS[2] and name.lower().endswith("trustedinstaller")
+    with pytest.raises(OSError):
+        pf.read_owner(os.path.join(windir, "no-such-folder-taskdash"))
+
+
+def test_install_folder_acl_locked_is_ok_and_icacls_runs_by_full_path(monkeypatch):
+    calls = []
+    fake_icacls(monkeypatch, calls=calls)
+    assert pf.check_install_folder_acl(make_ctx())[0] == pf.OK
+    assert calls == [[system32_exe("icacls.exe"), HOME]]
+
+
+@pytest.mark.parametrize("who", ["BUILTIN\\Users", "NT AUTHORITY\\Authenticated Users", "Everyone", "*S-1-5-11"])
+@pytest.mark.parametrize("rights", ["(OI)(CI)(M)", "(F)", "(I)(W)", "(OI)(CI)(IO)(M)", "(CI)(DE,WD,AD)", "(GW)", "(OI)(CI)(DE)"])
+def test_install_folder_acl_with_a_write_right_for_everyone_fails_with_the_icacls_fix(monkeypatch, who, rights):
+    fake_icacls(monkeypatch, LOCKED_ACL.replace("\n\n", f"\n           {who}:{rights}\n\n"))
+    status, message = pf.check_install_folder_acl(make_ctx())
+    assert status == pf.FAIL and who in message and HOME in message
+    assert "icacls" in message and "/inheritance:r" in message and "*S-1-5-32-545" in message
+    assert "administrator" in message
+
+
+def test_install_folder_acl_names_a_loose_entry_on_the_first_line_too(monkeypatch):
+    fake_icacls(monkeypatch, LOCKED_ACL.replace(f"{HOME} NT AUTHORITY\\SYSTEM:(OI)(CI)(F)", f"{HOME} Everyone:(F)"))
+    assert "Everyone" in pf.check_install_folder_acl(make_ctx())[1]
+
+
+@pytest.mark.parametrize("rights", ["(OI)(CI)(RX)", "(R)", "(I)(RX)", "(OI)(CI)(DENY)(W)", "(N)"])
+def test_install_folder_acl_read_only_or_denied_entries_pass(monkeypatch, rights):
+    fake_icacls(monkeypatch, LOCKED_ACL.replace("\n\n", f"\n           BUILTIN\\Users:{rights}\n\n"))
+    assert pf.check_install_folder_acl(make_ctx())[0] == pf.OK
+
+
+GERMAN_NAMES = {"s-1-5-32-545": "benutzer", "s-1-5-11": "authentifizierte benutzer", "s-1-1-0": "jeder"}
+GERMAN_ACL = (f"{HOME} NT-AUTORITAET\\SYSTEM:(OI)(CI)(F)\n"
+              "           VORDEFINIERT\\Administratoren:(OI)(CI)(F)\n"
+              "           HOST\\svc-td:(OI)(CI)(M)\n\n"
+              "Successfully processed 1 files; Failed processing 0 files\n")
+
+
+def fake_local_names(monkeypatch, names):
+    monkeypatch.setattr(pf, "local_names", lambda sids: {names[sid.lower()] for sid in sids if sid.lower() in names})
+
+
+@pytest.mark.parametrize("who", ["VORDEFINIERT\\Benutzer", "NT-AUTORITAET\\Authentifizierte Benutzer", "Jeder"])
+def test_install_folder_acl_finds_a_loose_writer_by_its_local_language_name(monkeypatch, who):
+    fake_icacls(monkeypatch, GERMAN_ACL.replace("\n\n", f"\n           {who}:(OI)(CI)(M)\n\n"))
+    fake_local_names(monkeypatch, {**GERMAN_NAMES, "s-1-5-18": "system", "s-1-5-32-544": "administratoren"})
+    status, message = pf.check_install_folder_acl(make_ctx())
+    assert status == pf.FAIL and who in message
+
+
+def test_install_folder_acl_never_says_ok_when_it_recognises_no_trusted_principal(monkeypatch):
+    # Neither SYSTEM nor Administrators is listed under a name this check knows: the language is not
+    # understood, so a clean result would be a guess.
+    fake_icacls(monkeypatch, GERMAN_ACL.replace("NT-AUTORITAET\\SYSTEM", "AUTORITE NT\\Systeme")
+                .replace("Administratoren", "Administrateurs"))
+    fake_local_names(monkeypatch, {})
+    status, message = pf.check_install_folder_acl(make_ctx())
+    assert status == pf.WARN and message.startswith("WARNING") and f'icacls "{HOME}"' in message
+
+
+def test_install_folder_acl_in_another_language_is_ok_once_the_local_names_resolve(monkeypatch):
+    fake_icacls(monkeypatch, GERMAN_ACL)
+    fake_local_names(monkeypatch, {**GERMAN_NAMES, "s-1-5-18": "system", "s-1-5-32-544": "administratoren"})
+    assert pf.check_install_folder_acl(make_ctx())[0] == pf.OK
+
+
+def test_install_folder_acl_unreadable_warns_and_a_missing_icacls_too(monkeypatch):
+    fake_icacls(monkeypatch, "", returncode=5, stderr="Access is denied.")
+    status, message = pf.check_install_folder_acl(make_ctx())
+    assert status == pf.WARN and message.startswith("WARNING") and f'icacls "{HOME}"' in message
+
+    def missing(cmd, **kwargs):
+        raise FileNotFoundError(cmd[0])
+    monkeypatch.setattr(pf.subprocess, "run", missing)
+    assert pf.check_install_folder_acl(make_ctx())[0] == pf.WARN
+
+
+# --------------------------------------------------------------------------- the [--] marker
+
+def test_unset_ids_and_no_task_give_skip_lines_without_a_problem(tmp_path, monkeypatch, capsys):
+    gis = FakeGis()
+    monkeypatch.setattr(pf, "connect_agol", lambda config: gis)
+    monkeypatch.setattr(pf, "CHECKS", (("credentials", True, pf.check_credentials),
+                                       ("task definitions", False, pf.check_tasks),
+                                       ("service", True, pf.check_service), ("sharing", True, pf.check_sharing),
+                                       ("collector logon type", False, pf.check_logon_type)))
+    monkeypatch.setattr(taskdash_collect, "collect_tasks", lambda timeout, *_: [task("Other", "Password")])
+    config = write_config(tmp_path, {"arcgis": {"profile": "p1"}})
+    assert pf.main(["--config", config]) == 0
+    out = capsys.readouterr().out
+    assert "[--] service:" in out and "[--] sharing:" in out and "[--] collector logon type:" in out
+    assert "[!!]" not in out and "Preflight: 0 problem(s), 0 warning(s)." in out
+
+
 # --------------------------------------------------------------------------- the runner
 
 def test_crash_in_one_check_does_not_stop_the_next(tmp_path, monkeypatch, capsys):
@@ -527,9 +875,13 @@ def test_warnings_do_not_set_exit_one(tmp_path, monkeypatch, capsys):
 def local_fakes(monkeypatch, tasks=None):
     fake_wevtutil(monkeypatch)
     monkeypatch.setattr(taskdash_collect, "collect_tasks",
-                        lambda timeout: tasks if tasks is not None
+                        lambda timeout, *_: tasks if tasks is not None
                         else [task("TaskDash Collector", "Password", run_as_user="HOST\\svc-td")])
     monkeypatch.setattr(pf, "read_admin_members", lambda: [("HOST\\svc-td", "User")])
+    monkeypatch.setattr(pf, "powershell_language_mode", lambda: "FullLanguage")
+    monkeypatch.setattr(pf.sys, "base_prefix", SHARED_PYTHON)
+    monkeypatch.setattr(pf, "read_acl", lambda path: LOCKED_ACL)
+    monkeypatch.setattr(pf, "read_owner", lambda path: ("S-1-5-32-544", "BUILTIN\\Administrators"))
 
 
 def test_offline_makes_no_network_call(tmp_path, monkeypatch, capsys):
@@ -545,15 +897,17 @@ def test_offline_makes_no_network_call(tmp_path, monkeypatch, capsys):
     skipped = [line for line in lines if line.startswith("[--]")]
     assert [line.split(":")[0] for line in skipped] == [
         "[--] credentials", "[--] privileges", "[--] log folders",
-        "[--] smtp", "[--] service", "[--] view", "[--] sharing"]
+        "[--] smtp", "[--] service", "[--] view", "[--] sharing", "[--] dashboard", "[--] delete protection"]
     assert any(line.startswith("[ok] event log") for line in lines)
 
 
 def test_full_run_with_fakes_makes_no_write(tmp_path, monkeypatch, capsys):
-    config_path = write_config(tmp_path, {"arcgis": {"item_id": "svc1", "view_item_id": "view1", "profile": "p1"},
+    config_path = write_config(tmp_path, {"arcgis": {"item_id": "svc1", "view_item_id": "view1",
+                                                      "dashboard_id": "dash1", "profile": "p1"},
                                           "alerting": {"healthcheck_url": "https://hc.example/ping-id"}})
     config = json.loads(open(config_path, encoding="utf-8").read())
-    gis = FakeGis(items={"svc1": FakeItem("svc1"), "view1": FakeItem("view1", "org")})
+    gis = FakeGis(items={"svc1": FakeItem("svc1"), "view1": FakeItem("view1", "org"),
+                         "dash1": fake_dashboard()})
     monkeypatch.setattr(pf, "connect_agol", lambda c: gis)
     monkeypatch.setattr(pf, "get_tables",
                         lambda item: service_tables() if item.id == "svc1" else view_tables(config))
@@ -562,7 +916,8 @@ def test_full_run_with_fakes_makes_no_write(tmp_path, monkeypatch, capsys):
     local_fakes(monkeypatch)
     assert pf.main(["--config", config_path]) == 0
     out = capsys.readouterr().out
-    assert "[!!]" not in out and out.count("[ok]") == 12 and "[--] smtp" in out and "ping-id" not in out
+    assert "[!!]" not in out and out.count("[ok]") == 19 and "[--] smtp" in out and "ping-id" not in out
+    assert "[ok] dashboard" in out and "[ok] delete protection" in out
     assert "Preflight: 0 problem(s), 0 warning(s)." in out
 
 

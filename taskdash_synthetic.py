@@ -213,6 +213,58 @@ def build_host(host_no: int, now: datetime, seed: int) -> Dict[str, Any]:
     return payload
 
 
+SCALE_HOST = "SCALE-HOST-01"
+
+
+def scale_spec(index: int) -> Dict[str, Any]:
+    """Blueprint for task `index` (from 1) of the scale host. Odd cases sit at fixed strides so a
+    host of any size holds them: wildcard characters every 100th, a non-ASCII name every 111th,
+    the \\MicrosoftSync\\ folder every 50th, an hourly task every 10th, a failing task every 25th."""
+    name = f"Scale Task {index:04d}"
+    if index % 100 == 0:
+        name = f"Scale [{index:04d}] Task"
+    elif index % 111 == 0:
+        name = f"Scale Café {index:04d}"
+    spec: Dict[str, Any] = {
+        "name": name, "script": f"scale_job_{index:04d}.py", "hour": index % 24, "minute": (index * 7) % 60,
+        "folder": "\\MicrosoftSync\\" if index % 50 == 0 else f"\\ScaleFolder{index % 10:02d}\\"}
+    if index % 10 == 0:
+        spec["every"] = "PT1H"
+    if index % 25 == 0:
+        spec["case"] = "failure"
+    return spec
+
+
+def build_scale_host(task_count: int, now: datetime, seed: int) -> Dict[str, Any]:
+    """One fixture for a single host of `task_count` tasks, in the shape build_host returns. A pure
+    function of its arguments, like build_host. A daily task has 30 events, an hourly task 108."""
+    rng = random.Random(f"{seed}-scale")
+    tasks: List[Dict[str, Any]] = []
+    events: List[Dict[str, Any]] = []
+    for index in range(1, task_count + 1):
+        spec = scale_spec(index)
+        if spec.get("every"):
+            trigger = daily_trigger(0, 0, repetition_interval=spec["every"], repetition_duration="P1D")
+        else:
+            trigger = daily_trigger(spec["hour"], spec["minute"])
+        starts, gap = schedule_for(spec, now, rng)
+        task = raw_task(1, spec["name"], spec["script"], [trigger], task_path=spec["folder"],
+                        task_full_name=spec["folder"] + spec["name"])
+        last_result = FILE_NOT_FOUND if spec.get("case") == "failure" else 0
+        task.update(last_run_time=iso(starts[-1]), next_run_time=iso(starts[-1] + gap),
+                    last_task_result=last_result)
+        durations = [rng.randint(60, 600) for _ in starts]
+        tasks.append(task)
+        events.extend(build_events(task, starts, durations, rng, last_result, False))
+
+    events.sort(key=lambda e: e["event_time_utc"])
+    for number, event in enumerate(events, start=1000):
+        event["event_record_id"] = number
+        event["computer_name"] = SCALE_HOST
+    return {"synthetic": True, "host_name": SCALE_HOST, "captured_at_utc": iso(now),
+            "tasks": tasks, "events": events}
+
+
 def metric_series(case: str, rng: random.Random) -> List[int]:
     """Oldest-first row counts; "far_below" ends 90 percent under its median."""
     history = [rng.randint(1000, 1100) for _ in range(6)]

@@ -32,6 +32,7 @@ import taskdash_metrics
 from taskdash_common import (
     TABLE_COLLECTOR_RUNS,
     TABLE_INVENTORY,
+    TABLE_METRIC_CHANGE,
     TABLE_METRICS,
     TABLE_RUNS,
     TABLE_TASK_CHANGES,
@@ -697,6 +698,15 @@ def task_table_expression() -> str:
         # read "Running now" between collections too (same trap as task_detail-taskdash-always-in-progress).
         'if (whyText == "" && health == "Disabled") { whyText = "Disabled in Task Scheduler."; }\n'
         'if (whyText == "" && health == "Running") { whyText = "Running now"; }\n'
+        # A healthy task has no attention_kind, so the reasons above are blank for it. Its mute note
+        # (publish.apply_mute_notes writes it as the last reason) still shows: a muted task sends no
+        # alert, and a quiet row would otherwise look like a task nobody watches.
+        'if (whyText == "" && why != "") {\n'
+        '  var muteParts = Split(why, "; ");\n'
+        '  var muteNote = muteParts[Count(muteParts) - 1];\n'
+        '  if (Find("Muted (alerts off)", muteNote) == 0 || Find("In maintenance until", muteNote) == 0) {'
+        ' whyText = muteNote; }\n'
+        '}\n'
         # Count first, no "Latest log:" prefix: the ~98px Why column cut "Latest log: 12..." before
         # the word "error" (wording-05/health_table-why-log-note-truncated).
         'if (whyText == "" && logErrLines > 0) {\n'
@@ -1040,6 +1050,8 @@ METRIC_LIST_EXPRESSION = FMT_HELPERS + (
 HEARTBEAT_LATE_MINUTES = 90
 HEARTBEAT_DOWN_MINUTES = 180
 DEFAULT_COLLECTOR_INTERVAL_MINUTES = 60
+# scheduler.heartbeat_ignore_after_days default: a computer silent this long is left out of the heartbeat.
+DEFAULT_HEARTBEAT_IGNORE_DAYS = 7
 
 
 def heartbeat_thresholds(interval_minutes: float = DEFAULT_COLLECTOR_INTERVAL_MINUTES) -> Tuple[float, float]:
@@ -1097,17 +1109,38 @@ HEARTBEAT_EXPRESSION = heartbeat_expression("MIN_collected_at_utc")
 HEARTBEAT_SOURCE_FIELD = "min_collected_at"
 
 
-def heartbeat_source_script(portal_url: str, item_id: str, layer_id: int) -> str:
+def heartbeat_source_script(portal_url: str, item_id: str, layer_id: int,
+                            runs_layer_id: int = DEFAULT_LAYER_IDS[TABLE_COLLECTOR_RUNS],
+                            ignore_after_days: float = DEFAULT_HEARTBEAT_IGNORE_DAYS) -> str:
     """Arcade data source returning one feature: the oldest collected_at_utc, in epoch millis.
 
     Exists only for refreshInterval: Now() in the tile's formatting Arcade is re-evaluated only
     when its data refreshes, and a plain layer dataset never refreshes on its own.
+
+    A computer with no CollectorRuns row in the last ignore_after_days days is retired or renamed,
+    so its stale inventory rows are left out; otherwise it would read Down for ever. Failed runs
+    write a CollectorRuns row too, so a collector that runs but cannot publish still reads Down,
+    but only until the cutoff: after ignore_after_days days without any row it drops out of the tile.
+
+    The server filters CollectorRuns by the cutoff, so the script reads only the recent rows, not
+    the whole table. The cutoff is whole minutes (at least 1) because DateAdd takes an integer.
     """
+    cutoff_minutes = max(1, round(ignore_after_days * 1440))
     return (
         f'var fs = FeatureSetByPortalItem(Portal({_s(portal_url)}), {_s(item_id)}, {layer_id},'
-        ' ["collected_at_utc"], false);\n'
-        'var oldest = First(OrderBy(Filter(fs, "collected_at_utc IS NOT NULL"), "collected_at_utc ASC"));\n'
-        'var ms = IIf(IsEmpty(oldest), null, Number(oldest["collected_at_utc"]));\n'
+        ' ["host_name", "collected_at_utc"], false);\n'
+        f'var runs = FeatureSetByPortalItem(Portal({_s(portal_url)}), {_s(item_id)}, {runs_layer_id},'
+        ' ["host_name", "started_utc"], false);\n'
+        f'var cutoff = DateAdd(Now(), -{cutoff_minutes}, "minutes");\n'
+        'var live = {};\n'
+        'for (var r in Filter(runs, "started_utc > @cutoff")) {\n'
+        '  live[Lower(Text(r["host_name"]))] = true;\n'
+        '}\n'
+        'var ms = null;\n'
+        'for (var f in Filter(fs, "collected_at_utc IS NOT NULL")) {\n'
+        '  var t = Number(f["collected_at_utc"]);\n'
+        '  if (HasKey(live, Lower(Text(f["host_name"]))) && (IsEmpty(ms) || t < ms)) { ms = t; }\n'
+        '}\n'
         'return FeatureSet(Text({\n'
         f'  fields: [{{name: {_s(HEARTBEAT_SOURCE_FIELD)}, alias: "Oldest host data", type: "esriFieldTypeDouble"}}],\n'
         '  geometryType: "",\n'
@@ -1120,8 +1153,9 @@ def heartbeat_source_script(portal_url: str, item_id: str, layer_id: int) -> str
 # grouped table cannot do this -- it has no "latest row" statistic, and Arcade on a grouped
 # dataset errored every row -- so an Arcade data source computes it. Avg vs Peak over ~30 runs
 # could not show a collapse: one night at 0 moved the average by ~3 % (audit D1).
-METRIC_CHANGE_HISTORY = 30        # earlier values in the median, about one month of daily runs
-METRIC_CHANGE_MIN_HISTORY = 3     # fewer earlier values give no usual value
+# The collector's compute_metric_change uses the same two numbers for the MetricChange table.
+METRIC_CHANGE_HISTORY = taskdash_metrics.METRIC_CHANGE_HISTORY        # earlier values in the median
+METRIC_CHANGE_MIN_HISTORY = taskdash_metrics.METRIC_CHANGE_MIN_HISTORY  # fewer give no usual value
 METRIC_CHANGE_DROP_PCT = -50      # "Far below usual" at this change or lower
 # Below this usual value a drop is noise: Parcel Diff's change count goes 1 -> 0 on a quiet
 # day. ponytail: one floor for every metric; a per-metric floor if a small count ever matters.
@@ -1156,10 +1190,18 @@ METRIC_CHANGE_FIELDS = (
 
 
 def metric_change_source_script(portal_url: str, item_id: str, layer_id: int) -> str:
-    """Arcade data source: one feature per host + task + metric, flagged rows first."""
-    fields = ", ".join(f'{{name: {_s(n)}, alias: {_s(a)}, type: {_s(t)}}}' for n, t, a in METRIC_CHANGE_FIELDS)
-    not_in_run, far_below, far_above = (_s(f) for f in METRIC_CHANGE_FLAGS)
-    lower_is_better_check = " || ".join(f'Find({_s(s)}, mk) > -1' for s in METRIC_CHANGE_LOWER_IS_BETTER)
+    """Arcade data source: one feature per host + task + metric, flagged rows first.
+
+    Reads every TaskMetrics row. It is the source until the service has the MetricChange table;
+    metric_change_from_table_script gives the same rows from the small table."""
+    # Median() on an array fails the whole data source in the Dashboards profile (bisected
+    # 2026-09-28: "Data source does not exist or is inaccessible"), so the median is by Sort.
+    median = (
+        f'  if (Count(p) >= {METRIC_CHANGE_MIN_HISTORY}) {{\n'
+        '    var sp = Sort(p, byNumber); var n = Count(sp); lowest = sp[0]; highest = sp[n - 1];\n'
+        '    usual = IIf(n % 2 == 1, sp[Floor(n / 2)], (sp[n / 2 - 1] + sp[n / 2]) / 2);\n'
+        '  }\n'
+    )
     return (
         f'var fs = FeatureSetByPortalItem(Portal({_s(portal_url)}), {_s(item_id)}, {layer_id},'
         ' ["host_name", "task_name", "task_full_name", "metric_key", "display_name", "metric_value",'
@@ -1182,28 +1224,59 @@ def metric_change_source_script(portal_url: str, item_id: str, layer_id: int) ->
         '  }\n'
         '}\n'
         'if (!IsEmpty(head)) { Push(series, {head: head, prev: prev}); }\n'
+    ) + _metric_change_rules_script('Count(series[j]["prev"])', 'Count(p)',
+                                    'var p = series[i]["prev"]; ', median)
+
+
+def metric_change_from_table_script(portal_url: str, item_id: str, layer_id: int) -> str:
+    """Arcade data source: the same rows as metric_change_source_script, read from the MetricChange
+    table. The collector stored each series' usual, lowest and highest value, so the browser reads
+    one row per series instead of every TaskMetrics row."""
+    names = ", ".join(_s(n) for n in ("host_name", "task_name", "task_full_name", "metric_key", "display_name",
+                                     "series_key", "latest_value", "latest_at_utc", "usual_value",
+                                     "lowest_value", "highest_value", "history_count"))
+    return (
+        f'var fs = FeatureSetByPortalItem(Portal({_s(portal_url)}), {_s(item_id)}, {layer_id}, [{names}], false);\n'
+        'var series = [];\n'
+        'for (var f in fs) {\n'
+        '  Push(series, {head: {host_name: f["host_name"], task_full_name: f["task_full_name"],'
+        ' task_name: f["task_name"], display_name: f["display_name"], metric_key: f["metric_key"],'
+        ' metric_value: f["latest_value"], seen: Number(f["latest_at_utc"]), series_key: f["series_key"]},'
+        ' n: f["history_count"], usual: f["usual_value"], lowest: f["lowest_value"],'
+        ' highest: f["highest_value"]});\n'
+        '}\n'
+    ) + _metric_change_rules_script(
+        'series[j]["n"]', 'series[i]["n"]', '',
+        '  usual = series[i]["usual"]; lowest = series[i]["lowest"]; highest = series[i]["highest"];\n')
+
+
+def _metric_change_rules_script(history_j: str, history_i: str, prep: str, stats: str) -> str:
+    """The Arcade shared by both Metric Change sources, from the per-task newest times to the
+    flagged rows. `series` holds one dictionary per metric, with its newest value in "head". The
+    arguments are the parts that differ: how to count the earlier values (in the task loop j and
+    the metric loop i), an extra declaration for the metric loop, and the statements that set
+    usual, lowest and highest."""
+    fields = ", ".join(f'{{name: {_s(n)}, alias: {_s(a)}, type: {_s(t)}}}' for n, t, a in METRIC_CHANGE_FIELDS)
+    not_in_run, far_below, far_above = (_s(f) for f in METRIC_CHANGE_FLAGS)
+    lower_is_better_check = " || ".join(f'Find({_s(s)}, mk) > -1' for s in METRIC_CHANGE_LOWER_IS_BETTER)
+    return (
         # Per task: its newest value time, and how many values its most-logged series has.
         # Distinct names per loop: a second `var` of one name in one scope is not safe in Arcade.
         'var newest = {}; var most = {};\n'
         'for (var j in series) {\n'
         '  var hj = series[j]["head"]; var tk = hj["host_name"] + "|" + hj["task_full_name"];\n'
-        '  var t = hj["seen"]; var nj = Count(series[j]["prev"]) + 1;\n'
+        f'  var t = hj["seen"]; var nj = {history_j} + 1;\n'
         '  if (!HasKey(newest, tk)) { newest[tk] = t; most[tk] = nj; }\n'
         '  else { if (newest[tk] < t) { newest[tk] = t; } if (most[tk] < nj) { most[tk] = nj; } }\n'
         '}\n'
         'function byNumber(a, b) { return a - b; }\n'
         'var feats = [];\n'
         'for (var i in series) {\n'
-        '  var h = series[i]["head"]; var p = series[i]["prev"]; var tki = h["host_name"] + "|" + h["task_full_name"];\n'
+        f'  var h = series[i]["head"]; {prep}var tki = h["host_name"] + "|" + h["task_full_name"];\n'
         '  var latest = h["metric_value"]; var seen = h["seen"]; var mk = Lower(h["metric_key"]);\n'
         f'  var lowerIsBetter = {lower_is_better_check};\n'
         '  var usual = null; var lowest = null; var highest = null; var change = null; var flag = "";\n'
-        # Median() on an array fails the whole data source in the Dashboards profile (bisected
-        # 2026-09-28: "Data source does not exist or is inaccessible"), so the median is by Sort.
-        f'  if (Count(p) >= {METRIC_CHANGE_MIN_HISTORY}) {{\n'
-        '    var sp = Sort(p, byNumber); var n = Count(sp); lowest = sp[0]; highest = sp[n - 1];\n'
-        '    usual = IIf(n % 2 == 1, sp[Floor(n / 2)], (sp[n / 2 - 1] + sp[n / 2]) / 2);\n'
-        '  }\n'
+        f'{stats}'
         # A usual of 0 divides by zero, so change stayed null and rendered "--", the missing-data
         # mark, even where latest also 0 is really no change (wording-metric-change-dash-for-zero).
         '  if (!IsEmpty(usual) && usual != 0) { change = Round(100 * (latest - usual) / Abs(usual), 1); }\n'
@@ -1211,7 +1284,7 @@ def metric_change_source_script(portal_url: str, item_id: str, layer_id: int) ->
         '  var gapHours = (newest[tki] - seen) / 3600000;\n'
         # Missing only counts for a series logged in most runs: a line printed only when there is
         # work (a sync that found no edits, a failure count) is absent on a quiet night by design.
-        f'  if (gapHours > {METRIC_CHANGE_MISSING_HOURS} && Count(p) + 1 >= {METRIC_CHANGE_USUALLY_LOGGED} * most[tki]) {{'
+        f'  if (gapHours > {METRIC_CHANGE_MISSING_HOURS} && {history_i} + 1 >= {METRIC_CHANGE_USUALLY_LOGGED} * most[tki]) {{'
         f' flag = {not_in_run}; }}\n'
         # A drop counts only below every earlier value: a count that is often this low (AP updates
         # on a quiet night) is normal, a first-ever low is news. Never for a lower-is-better key:
@@ -1682,11 +1755,18 @@ def help_terms(config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         raise SystemExit(f"scheduler.collector_interval_minutes must be a number above 0, got {interval!r}. "
                          "Set it to the minutes between collector runs, or remove the key for 60.")
     late, down = heartbeat_thresholds(interval)
+    ignore_days = scheduler.get("heartbeat_ignore_after_days", DEFAULT_HEARTBEAT_IGNORE_DAYS)
+    if (not isinstance(ignore_days, (int, float)) or isinstance(ignore_days, bool)
+            or not 0 < ignore_days < float("inf")):
+        raise SystemExit(f"scheduler.heartbeat_ignore_after_days must be a number above 0, got {ignore_days!r}. "
+                         "Set it to the days of silence after which the heartbeat leaves a computer out, "
+                         "or remove the key for 7.")
     hour = alerting.get("heartbeat_hour")
     daily = None if hour is None else f"{int(hour) % 12 or 12} {'AM' if int(hour) % 24 < 12 else 'PM'}"
     days = (config.get("retention") or {}).get("runs_days", DEFAULT_RETENTION_DAYS)
     metric_days = (config.get("retention") or {}).get("metrics_days", DEFAULT_RETENTION_DAYS)
-    return {"late": late, "down": down, "daily": daily, "days": int(days), "metric_days": int(metric_days),
+    return {"late": late, "down": down, "ignore_days": ignore_days, "daily": daily,
+            "days": int(days), "metric_days": int(metric_days),
             "grace": scheduler.get("overdue_grace_minutes", DEFAULT_GRACE_MINUTES),
             "collector": scheduler.get("collector_task_name") or DEFAULT_COLLECTOR_TASK_NAME}
 
@@ -1813,13 +1893,16 @@ def add_arcade_source(arcade_items: List[Dict[str, Any]], name: str, script: str
 
 def heartbeat_widget(item_id: str, layer_id: int, portal_url: str,
                      arcade_items: List[Dict[str, Any]],
-                     late: float = HEARTBEAT_LATE_MINUTES, down: float = HEARTBEAT_DOWN_MINUTES) -> Dict[str, Any]:
+                     late: float = HEARTBEAT_LATE_MINUTES, down: float = HEARTBEAT_DOWN_MINUTES,
+                     runs_layer_id: int = DEFAULT_LAYER_IDS[TABLE_COLLECTOR_RUNS],
+                     ignore_after_days: float = DEFAULT_HEARTBEAT_IGNORE_DAYS) -> Dict[str, Any]:
     widget = indicator(item_id, "Collector Heartbeat", layer_id, stat_field="collected_at_utc",
                        stat_type="min", expression=heartbeat_expression("MIN_collected_at_utc", late, down))
     if not FEATURE_FLAGS["heartbeat_arcade_refresh"]:
         return widget
     source_id = add_arcade_source(arcade_items, "TaskDash heartbeat (oldest host data)",
-                                  heartbeat_source_script(portal_url, item_id, layer_id),
+                                  heartbeat_source_script(portal_url, item_id, layer_id,
+                                                          runs_layer_id, ignore_after_days),
                                   HEARTBEAT_REFRESH_MINUTES)
     # The S-TRAF (5.1.0) shape for an indicator on an Arcade data source: valueType "feature",
     # one feature, no statistics, and valueField naming the feature's field (S-TRAF sets it on
@@ -1852,7 +1935,8 @@ TILE_TITLES = {"Collector Heartbeat": "Collector heartbeat", "Needs Attention": 
 
 def indicator_tiles(item_id: str, layers: Dict[str, int], portal_url: str,
                     arcade_items: List[Dict[str, Any]],
-                    late: float = HEARTBEAT_LATE_MINUTES, down: float = HEARTBEAT_DOWN_MINUTES) -> Dict[str, Dict[str, Any]]:
+                    late: float = HEARTBEAT_LATE_MINUTES, down: float = HEARTBEAT_DOWN_MINUTES,
+                    ignore_after_days: float = DEFAULT_HEARTBEAT_IGNORE_DAYS) -> Dict[str, Dict[str, Any]]:
     """The 8 tiles. No selector ever targets them, so a filter cannot hide a failure here.
 
     Failed, Overdue and Other Warnings partition Needs Attention by attention_kind, which
@@ -1878,7 +1962,8 @@ def indicator_tiles(item_id: str, layers: Dict[str, int], portal_url: str,
         '  middleTextMaxSize: "medium"\n'
         '};\n')
     tiles = {w["name"]: w for w in (
-        heartbeat_widget(item_id, inv, portal_url, arcade_items, late, down),
+        heartbeat_widget(item_id, inv, portal_url, arcade_items, late, down,
+                         layers[TABLE_COLLECTOR_RUNS], ignore_after_days),
         count_tile("Needs Attention", [rule("needs_attention", 1)], "Warning", "Open", "large"),
         count_tile("Failed (last run)", [rule("attention_kind", "FAILED")], "Error", PALETTE["Error"][0]),
         count_tile("Overdue", [rule("attention_kind", "OVERDUE")], "Warning", "Overdue"),
@@ -2020,14 +2105,18 @@ METRIC_CHANGE_REFRESH_MINUTES = 60  # TaskMetrics changes at most once per hourl
 
 
 def metric_change_table(item_id: str, layer_id: int, templates: Dict[str, Any], portal_url: str,
-                        arcade_items: List[Dict[str, Any]]) -> Dict[str, Any]:
+                        arcade_items: List[Dict[str, Any]],
+                        change_layer_id: Optional[int] = None) -> Dict[str, Any]:
     """Latest value against the usual value, per task and metric, on an Arcade data source.
 
     The Host, Task and Metric pickers narrow it, and a row click draws that metric's line in
-    Metric Trend (both render-tested on TEST 2026-09-28). Flagged rows sort first.
+    Metric Trend (both render-tested on TEST 2026-09-28). Flagged rows sort first. With
+    change_layer_id, the layer of the MetricChange table, the source reads that small table
+    instead of every TaskMetrics row.
     """
-    source_id = add_arcade_source(arcade_items, "TaskDash metric change (latest vs usual)",
-                                  metric_change_source_script(portal_url, item_id, layer_id),
+    script = (metric_change_source_script(portal_url, item_id, layer_id) if change_layer_id is None
+              else metric_change_from_table_script(portal_url, item_id, change_layer_id))
+    source_id = add_arcade_source(arcade_items, "TaskDash metric change (latest vs usual)", script,
                                   METRIC_CHANGE_REFRESH_MINUTES)
     widget = table_widget(
         item_id, "Metric Change", layer_id,
@@ -2075,7 +2164,9 @@ def metrics_widgets(item_id: str, layers: Dict[str, int], templates: Dict[str, A
     # any workflow. "Acme Stormwater: 152 observations" is not actionable.
     widgets = [metric_summary_table(item_id, met, templates)]
     if FEATURE_FLAGS["heartbeat_arcade_refresh"]:
-        widgets.append(metric_change_table(item_id, met, templates, portal_url, arcade_items))
+        # The MetricChange layer id is in `layers` only when the service has that table.
+        widgets.append(metric_change_table(item_id, met, templates, portal_url, arcade_items,
+                                           layers.get(TABLE_METRIC_CHANGE)))
     # Metric Trend needs BOTH the Task and the Metric selector: one task logs several metrics,
     # and without the Metric pick the chart draws unrelated series on one line.
     if FEATURE_FLAGS["trend_charts"] and FEATURE_FLAGS["sidebar_selectors"]:
@@ -2461,7 +2552,8 @@ def build(item_id: str, templates: Dict[str, Any], layer_ids: Optional[Dict[str,
     layers = {**DEFAULT_LAYER_IDS, **(layer_ids or {})}
     terms = help_terms(config)
     arcade_items: List[Dict[str, Any]] = []
-    tiles = indicator_tiles(item_id, layers, portal_url, arcade_items, terms["late"], terms["down"])
+    tiles = indicator_tiles(item_id, layers, portal_url, arcade_items, terms["late"], terms["down"],
+                            terms["ignore_days"])
     import taskdash_publish as publish
 
     hidden = sorted({f for fields in publish.view_hidden_fields(config or {}).values() for f in fields})
@@ -2846,7 +2938,8 @@ def load_templates(gis: Any, source_dashboard_id: str) -> Dict[str, Any]:
 
 
 def resolve_layer_ids(gis: Any, service_item_id: str, target: str) -> Dict[str, int]:
-    """Layer ids by table name, read from the service (read-only)."""
+    """Layer ids by table name, read from the service (read-only). MetricChange is optional: it
+    is in the result only when the item has it, and then Metric Change reads it."""
     item = gis.content.get(service_item_id)
     if item is None:
         raise SystemExit(f"Service item {service_item_id} not found or not visible to this account.")
@@ -2855,7 +2948,8 @@ def resolve_layer_ids(gis: Any, service_item_id: str, target: str) -> Dict[str, 
     if missing:
         raise SystemExit(f"The {target} service has no {missing} table(s). Create them first: "
                          f"python taskdash_publish.py --migrate --target {target} --apply")
-    return {name: int(tables[name].properties.id) for name in DEFAULT_LAYER_IDS}
+    wanted = [*DEFAULT_LAYER_IDS, *([TABLE_METRIC_CHANGE] if TABLE_METRIC_CHANGE in tables else [])]
+    return {name: int(tables[name].properties.id) for name in wanted}
 
 
 def resolve_dashboard(gis: Any, target: str, agol: Dict[str, Any], title_override: str = "") -> Tuple[Any, str]:
@@ -2964,8 +3058,9 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     parser = argparse.ArgumentParser(description="Build the TaskDash dashboard.", allow_abbrev=False)
     parser.add_argument("--apply", action="store_true", help="Create or update the dashboard item.")
-    parser.add_argument("--target", choices=("prod", "test"), default="test",
-                        help="Which dashboard to build: test (default) or prod.")
+    parser.add_argument("--target", choices=("prod", "test"), default=None,
+                        help="Which dashboard to build: prod or test. Default: test if the config has "
+                             "a test service, otherwise prod (check mode only: --apply then needs --target).")
     parser.add_argument("--title", default="", help="Dashboard title. Default: the standard title for the target.")
     parser.add_argument("--config", default="", metavar="PATH",
                         help="Config file to read. Default: the config next to the scripts.")
@@ -2984,6 +3079,18 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     config = load_config(Path(args.config) if args.config else None)
     agol = config.get("arcgis", {})
+    if args.target is None:
+        # A new install has no test service, so a test default would fail there.
+        has_test = normalize_text(agol.get(publish.service_key("test")))
+        # Check mode may pick prod, but a write must never reach prod unless the caller names it:
+        # most installs have no test service, and --apply replaces the live dashboard.
+        if args.apply and not has_test:
+            raise SystemExit("The config has no test service, so --apply without --target would "
+                             "update the production dashboard. To do that, run "
+                             "`taskdash dashboard --target prod --apply`.")
+        args.target = "test" if has_test else "prod"
+        emit(f"No --target given: using {args.target}"
+             f"{'' if has_test else ' (the config has no test service)'}.")
     service_key = publish.service_key(args.target)
     item_id = normalize_text(agol.get(service_key))
     if not item_id:
@@ -2993,6 +3100,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     gis = connect_agol(config)
     templates = load_templates(gis, args.source_dashboard)
     layer_ids = resolve_layer_ids(gis, read_id, args.target)
+    if TABLE_METRIC_CHANGE in layer_ids:
+        emit(f"Metric Change reads the small {TABLE_METRIC_CHANGE} table.")
+    else:
+        emit(f"The item has no {TABLE_METRIC_CHANGE} table, so Metric Change reads all of {TABLE_METRICS}. "
+             f"To read the small table, run `taskdash collect --migrate --apply`. A view made before "
+             f"this release needs a new view; docs/UPGRADE.md has the steps.")
     definition = build(read_id, templates, layer_ids, portal_url=gis.url, config=config)
 
     write_definition(definition, item_id, layer_ids)
@@ -3005,7 +3118,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 0
 
     if existing is not None:
-        backup_dashboard(existing, publish.resolve_log_dir(config))
+        log_dir = publish.resolve_log_dir(config)
+        emit(f"This rebuild replaces any hand edits made in the Dashboards editor. "
+             f"The current definition is saved first in {log_dir}.")
+        backup_dashboard(existing, log_dir)
     target = post_dashboard(gis, definition, title, existing, config)
     if args.target == "prod" and existing is None:
         emit(f"Put {target} in arcgis.dashboard_id so the next run and the alert e-mail use it.")

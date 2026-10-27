@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import builtins
 import contextlib
+import importlib.metadata
 import json
 import logging
 import os
@@ -22,15 +23,16 @@ import re
 import subprocess
 import sys
 import time
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 # Shown in the dashboard's About panel and the wheel name; release.yml checks it against the tag.
-TASKDASH_VERSION = "1.1.0"
+TASKDASH_VERSION = "1.2.0"
 # Bump when TABLE_SPECS or TABLE_INDEXES change. A service stamped with a newer number was
 # migrated by a newer TaskDash, which this one may write wrongly.
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 DEFAULT_CONFIG_FILE = "TaskDash.config.json"
 DEFAULT_POWERSHELL_TIMEOUT_SECONDS = 180
@@ -41,6 +43,7 @@ TABLE_RUNS = "TaskRuns"
 TABLE_METRICS = "TaskMetrics"
 TABLE_COLLECTOR_RUNS = "CollectorRuns"
 TABLE_TASK_CHANGES = "TaskChanges"
+TABLE_METRIC_CHANGE = "MetricChange"
 
 
 # --------------------------------------------------------------------------- arcpy guard
@@ -87,7 +90,15 @@ def home_dir() -> Path:
     """Per-install files: config, Logs, alert_state.json, pending files, dashboard output."""
     if _folder_deploy():
         return Path(__file__).resolve().parent
-    return Path(os.environ.get("TASKDASH_HOME") or Path.cwd()).resolve()
+    if os.environ.get("TASKDASH_HOME"):
+        return Path(os.environ["TASKDASH_HOME"]).resolve()
+    cwd = Path.cwd().resolve()
+    # A command run from another folder still finds the install that owns the venv.
+    if sys.prefix != sys.base_prefix and not (cwd / DEFAULT_CONFIG_FILE).is_file():
+        venv_parent = Path(sys.prefix).resolve().parent
+        if (venv_parent / DEFAULT_CONFIG_FILE).is_file():
+            return venv_parent
+    return cwd
 
 
 def runtime_dir() -> Path:
@@ -97,7 +108,8 @@ def runtime_dir() -> Path:
 
 _CONFIG_SECTION_KEYS = {"arcgis", "alerting", "scheduler", "history", "metrics", "upload",
                        "retention", "logging", "smtp", "privacy", "rules"}
-_CONFIG_TOP_LEVEL_KEYS = _CONFIG_SECTION_KEYS | {"host_name_override", "powershell_timeout_seconds"}
+_CONFIG_TOP_LEVEL_KEYS = _CONFIG_SECTION_KEYS | {"host_name_override", "host_previous_names",
+                                                  "powershell_timeout_seconds"}
 
 # Dotted key -> expected type, built from every config.get(...) call across the TaskDash .py
 # files (see taskdash_collect.py:should_include_task, taskdash_publish.py:collect_everything/
@@ -119,6 +131,7 @@ _CONFIG_NUMBER_KEYS = {
     "powershell_timeout_seconds", "alerting.heartbeat_hour", "alerting.realert_hours",
     "alerting.shared_cause_min_tasks", "alerting.incident_digest_hours",
     "scheduler.overdue_grace_minutes", "scheduler.collector_interval_minutes",
+    "scheduler.heartbeat_ignore_after_days",
     "history.max_events_per_run", "history.days_back", "history.first_run_max_events",
     "metrics.days_back", "metrics.max_log_files_per_task", "metrics.max_lines_per_file",
     "upload.chunk_size", "retention.runs_days", "retention.metrics_days",
@@ -130,11 +143,13 @@ _CONFIG_BOOL_KEYS = {"alerting.enabled", "alerting.include_log_tail", "scheduler
                     "privacy.hide_command_lines", "privacy.hide_sample_lines",
                     "privacy.hide_accounts", "privacy.hide_paths"}
 _CONFIG_STRING_LIST_KEYS = {"alerting.to", "scheduler.exclude_command_target_types",
-                            "rules.profiles", "metrics.log_roots"}
+                            "rules.profiles", "metrics.log_roots", "host_previous_names"}
 _CONFIG_DICT_KEYS = {"metrics.log_directory_overrides", "metrics.tasks"}
 # alerting.maintenance_windows: list of {"task": regex str, "start": ISO str, "end": ISO str,
-# "reason": str}. Only the list-of-objects shape is validated here; a malformed entry (bad
-# regex, unparseable start/end) is caught defensively at runtime by
+# "reason": str}; an explicit "end": null is an open window (a per-task mute; an omitted "end" is still
+# ignored) and "start" may be omitted or null (active now). The list-of-objects shape is validated here; a stray key or an empty
+# "task" only warns (_maintenance_window_warnings), so an existing config keeps loading. A malformed
+# value (bad regex, unparseable start/end) is caught defensively at runtime by
 # taskdash_publish._active_maintenance_windows/_task_in_maintenance, which warn and skip it
 # rather than fail the whole config.
 _CONFIG_LIST_OF_DICT_KEYS = {"alerting.maintenance_windows"}
@@ -161,6 +176,36 @@ def _unknown_section_keys(config: Dict[str, Any]) -> List[tuple]:
             for key in config[section] if key not in allowed[section] and not key.startswith("_")]
 
 
+# Old dotted key -> new dotted key, for `preflight --config-diff`. No key has been renamed yet: the
+# deprecated alerting.mail_config_path still works and is not a rename. Add a pair when a key moves.
+RENAMED_KEYS: Dict[str, str] = {}
+
+
+def config_diff(config: Dict[str, Any]) -> Dict[str, List[Any]]:
+    """Compare a config's keys with the known-keys tables. Names only, never a value.
+
+    The example file's values are placeholders and often differ from the code default (the example
+    sets heartbeat_hour 7, the code default sends no daily e-mail), so they are no source of
+    defaults. taskdash_preflight.CONFIG_DEFAULTS holds the code defaults.
+
+    unknown: dotted keys TaskDash ignores (likely typos); absent: dotted known keys the config
+    lacks; renamed: [(old, new)]. '_' keys are notes. Nested objects such as metrics.tasks are not
+    walked.
+    """
+    allowed = _section_allowed_keys()
+    known = sorted(_CONFIG_TOP_LEVEL_KEYS - _CONFIG_SECTION_KEYS) + sorted(
+        f"{section}.{key}" for section in sorted(allowed) for key in allowed[section])
+    present = [k for k in config if not k.startswith("_") and k not in _CONFIG_SECTION_KEYS]
+    for section in sorted(_CONFIG_SECTION_KEYS):
+        if isinstance(config.get(section), dict):
+            present += [f"{section}.{k}" for k in config[section] if not k.startswith("_")]
+    renamed = [(old, RENAMED_KEYS[old]) for old in present if old in RENAMED_KEYS]
+    moved_to = {new for _, new in renamed}
+    unknown = [k for k in present if k not in known and k not in RENAMED_KEYS]
+    absent = [dotted for dotted in known if dotted not in present and dotted not in moved_to]
+    return {"unknown": unknown, "absent": absent, "renamed": renamed}
+
+
 def _config_path_value(config: Dict[str, Any], dotted_key: str) -> Any:
     node: Any = config
     for part in dotted_key.split("."):
@@ -175,6 +220,62 @@ def _redact_config_value(dotted_key: str, value: Any) -> Any:
     if "password" in dotted_key.lower() or "secret" in dotted_key.lower():
         return "<redacted>"
     return value
+
+
+def _previous_names_errors(config: Dict[str, Any]) -> List[str]:
+    """host_previous_names holds old computer names. An empty one matches nothing useful, and the
+    current name would make the adoption step treat this host's own rows as another host's."""
+    names = config.get("host_previous_names")
+    if not isinstance(names, list) or not all(isinstance(n, str) for n in names):
+        return []  # the type check above already reported it
+    if any(not n.strip() for n in names):
+        return ["host_previous_names must not hold an empty name. Remove the empty entry, "
+                "or list each earlier computer name as it shows in the Host column."]
+    import socket
+
+    current = normalize_text(config.get("host_name_override")) or socket.gethostname()
+    if any(n.strip().lower() == current.lower() for n in names):
+        return [f"host_previous_names must not list the current host name '{current}'. Remove it: "
+                f"list only earlier names of this computer."]
+    return []
+
+
+_MAINTENANCE_WINDOW_KEYS = {"task", "start", "end", "reason"}
+
+
+def maintenance_window_has_unknown_key(window: Dict[str, Any]) -> bool:
+    return any(key not in _MAINTENANCE_WINDOW_KEYS and not str(key).startswith("_") for key in window)
+
+
+def maintenance_window_is_misspelled_mute(window: Dict[str, Any]) -> bool:
+    """An entry with no end or no start and a stray key may be a misspelled "end" ("End", "stop") or
+    "start" ("Start"). Read as an open window it would mute for ever, or a future window would start
+    at once, so the run ignores it, as it ignored every entry without both before optional keys
+    existed. A stray key beside a real start and end changes nothing."""
+    missing_a_bound = window.get("start") is None or window.get("end") is None
+    return missing_a_bound and maintenance_window_has_unknown_key(window)
+
+
+def _maintenance_window_warnings(config: Dict[str, Any]) -> List[str]:
+    """Warnings, never load errors: an existing config with a stray key must keep running."""
+    windows = _config_path_value(config, "alerting.maintenance_windows")
+    if not isinstance(windows, list):
+        return []  # the type check above already reported it
+    warnings = []
+    for index, window in enumerate(windows):
+        if not isinstance(window, dict):
+            continue
+        where = f"alerting.maintenance_windows[{index}]"
+        if maintenance_window_has_unknown_key(window):
+            outcome = ("The entry has no start or no end, so it is ignored"
+                       if maintenance_window_is_misspelled_mute(window) else "The key is ignored")
+            warnings.append(f"WARNING: {where} has an unknown key. Use only task, start, end and reason "
+                            f"(a '_' key is a note). {outcome}; check for a misspelled start or end.")
+        task = window.get("task")
+        if not isinstance(task, str) or not task.strip():
+            warnings.append(f"WARNING: {where} has no non-empty \"task\" (a regex), so it matches nothing. "
+                            f"Add it, or remove the entry.")
+    return warnings
 
 
 def _validate_config(config: Dict[str, Any]) -> List[str]:
@@ -214,6 +315,8 @@ def _validate_config(config: Dict[str, Any]) -> List[str]:
             ok = isinstance(value, list) and all(isinstance(item, str) for item in value)
             check(key, value, "a list of strings", ok)
 
+    errors.extend(_previous_names_errors(config))
+
     for key in _CONFIG_DICT_KEYS:
         value = _config_path_value(config, key)
         if value is not _MISSING and value is not None:
@@ -247,20 +350,24 @@ def load_config(config_path: Optional[Path] = None, *, defer_warnings: bool = Fa
     path = config_path or (runtime_dir() / DEFAULT_CONFIG_FILE)
     if not path.exists():
         raise SystemExit(f"Config not found at {path}: copy TaskDash.config.example.json to "
-                         f"{path.name} in {path.parent} and fill it in.")
+                         f"{path.name} in {path.parent} and fill it in.\n"
+                         + see_troubleshooting("The config file is missing"))
     try:
         config = json.loads(path.read_text(encoding="utf-8-sig"))
     except json.JSONDecodeError as exc:
-        raise SystemExit(f"Config at {path} is not valid JSON (line {exc.lineno}): {exc.msg}")
+        raise SystemExit(f"Config at {path} is not valid JSON (line {exc.lineno}): {exc.msg}\n"
+                         + see_troubleshooting("The config is not valid JSON"))
     except UnicodeDecodeError:
         # Windows PowerShell 5.1 Out-File and Set-Content write UTF-16 / ANSI by default.
         raise SystemExit(f"Config at {path} is not UTF-8 text. Open it in an editor and save it "
-                         f"as UTF-8, then run again.")
+                         f"as UTF-8, then run again.\n" + see_troubleshooting("The config is not UTF-8 text"))
     except OSError as exc:
         raise SystemExit(f"Cannot read the config at {path}: {exc}. Give the account that runs "
-                         f"TaskDash read access to the file, then run again.")
+                         f"TaskDash read access to the file, then run again.\n"
+                         + see_troubleshooting("The config cannot be read"))
     if not isinstance(config, dict):
-        raise SystemExit(f"Config at {path} must be a JSON object, not {type(config).__name__}.")
+        raise SystemExit(f"Config at {path} must be a JSON object, not {type(config).__name__}.\n"
+                         + see_troubleshooting("The config is not a JSON object"))
 
     errors = _validate_config(config)
     unknown_keys = _unknown_section_keys(config)
@@ -273,14 +380,15 @@ def load_config(config_path: Optional[Path] = None, *, defer_warnings: bool = Fa
     if errors:
         raise SystemExit(
             f"Config at {path} has {len(errors)} problem(s) -- fix and re-run:\n  "
-            + "\n  ".join(errors)
+            + "\n  ".join(errors) + "\n" + see_troubleshooting("The config has problems")
         )
     # A missing rules.profiles must not fall back silently: an install that had its own rules would
     # lose them, and --refresh-metrics --apply would then delete every row they mined.
     if not isinstance(config.get("rules"), dict) or "profiles" not in config["rules"]:
         raise SystemExit(
             f"Config at {path} has no rules.profiles. Add \"rules\": {{\"profiles\": []}} to use only "
-            f"rules/default.json, or list your rules files, e.g. {{\"profiles\": [\"rules/<org>.json\"]}}."
+            f"rules/default.json, or list your rules files, e.g. {{\"profiles\": [\"rules/<org>.json\"]}}.\n"
+            + see_troubleshooting("The config has no rules profiles")
         )
     # The rules files and metrics.tasks are checked here too, so a bad regex stops the run before
     # any work. Imported late: taskdash_metrics imports this module.
@@ -297,10 +405,9 @@ def load_config(config_path: Optional[Path] = None, *, defer_warnings: bool = Fa
             else:
                 emit(message)
 
-    for section, key in unknown_keys:
-        if section == "privacy":
-            continue
-        message = f"WARNING: unknown config key '{section}.{key}' in {path} -- ignored (check for a typo)."
+    messages = [f"WARNING: unknown config key '{section}.{key}' in {path} -- ignored (check for a typo)."
+                for section, key in unknown_keys if section != "privacy"]
+    for message in messages + _maintenance_window_warnings(config):
         if defer_warnings:
             warnings.append(message)
         else:
@@ -387,6 +494,12 @@ def emit(message: str) -> None:
         print(message, flush=True)
     except (ValueError, OSError, AttributeError):
         pass
+
+
+def see_troubleshooting(heading: str) -> str:
+    """The last line of a refusal that docs/TROUBLESHOOTING.md documents. test_h3_see_troubleshooting
+    checks every heading named in the code against the docs, so pass it as a string literal."""
+    return f"See TROUBLESHOOTING.md, section {heading}."
 
 
 # setup_logging's own "{prefix}_{stamp}.log", the bootstrap*.log files written directly by
@@ -641,43 +754,90 @@ class PowerShellTimeout(SystemExit):
     the run (like EventLogDisabled) and halves the next first-run read."""
 
 
+POWERSHELL_OUT_ENV = "TASKDASH_PS_OUT"
+
+# The payload runs dot-sourced, so its variables keep the scope they had at the top of a -Command
+# string. FullLanguage prints to stdout as it always did. ConstrainedLanguage (AppLocker or WDAC)
+# cannot set [Console]::OutputEncoding, so stdout would arrive in the OEM code page and garble
+# non-ASCII task names; there the JSON goes to a UTF-8 file named in the environment instead.
+POWERSHELL_WRAPPER = (
+    "$tdScript = {\n__SCRIPT__\n}\n"
+    "if ($ExecutionContext.SessionState.LanguageMode -eq 'FullLanguage') { . $tdScript }\n"
+    f"else {{ . $tdScript | Set-Content -LiteralPath $env:{POWERSHELL_OUT_ENV} -Encoding UTF8 }}\n"
+)
+
+
+def _powershell_argv(script: str) -> List[str]:
+    return [system32_exe(*POWERSHELL_EXE), "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+            "-OutputFormat", "Text", "-Command", script]
+
+
+def powershell_language_mode(timeout_seconds: int = 30) -> str:
+    """Language mode of a new PowerShell ("FullLanguage", "ConstrainedLanguage"), or "" when unreadable."""
+    argv = _powershell_argv("$ExecutionContext.SessionState.LanguageMode")
+    try:
+        done = subprocess.run(argv, capture_output=True, timeout=timeout_seconds, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return done.stdout.decode("utf-8", errors="replace").strip() if done.returncode == 0 else ""
+
+
+def _run_powershell(script: str, timeout_seconds: int) -> Tuple[Any, str]:
+    """(finished process, text of the temp file the wrapper wrote or ""). The file is always removed."""
+    out_path = runtime_dir() / f".taskdash_ps_{uuid.uuid4().hex}.json"
+    try:
+        completed = subprocess.run(
+            _powershell_argv(POWERSHELL_WRAPPER.replace("__SCRIPT__", script)),
+            capture_output=True,
+            timeout=timeout_seconds,
+            check=False,
+            env={**os.environ, POWERSHELL_OUT_ENV: str(out_path)},
+        )
+        file_text = out_path.read_bytes().decode("utf-8-sig", errors="replace") if out_path.exists() else ""
+    finally:
+        try:
+            out_path.unlink(missing_ok=True)
+        except OSError as exc:
+            emit(f"WARNING: could not remove the temporary file {out_path} ({exc}). Delete it by hand.")
+    return completed, file_text
+
+
 def run_powershell_json(script: str, timeout_seconds: int = DEFAULT_POWERSHELL_TIMEOUT_SECONDS) -> List[Dict[str, Any]]:
     """Run a PowerShell snippet that ends in ConvertTo-Json and return a list of dicts.
 
     Output is decoded as UTF-8 explicitly. The old wrapper piped PowerShell's default
-    UTF-16 through a text log and produced unreadable spaced-out characters.
+    UTF-16 through a text log and produced unreadable spaced-out characters. In
+    ConstrainedLanguage the JSON comes back through a temp file (see POWERSHELL_WRAPPER).
     """
     try:
-        completed = subprocess.run(
-            [
-                system32_exe(*POWERSHELL_EXE),
-                "-NoProfile",
-                "-NonInteractive",
-                "-ExecutionPolicy", "Bypass",
-                "-OutputFormat", "Text",
-                "-Command", script,
-            ],
-            capture_output=True,
-            timeout=timeout_seconds,
-            check=False,
-        )
+        completed, file_text = _run_powershell(script, timeout_seconds)
     except subprocess.TimeoutExpired:
         raise PowerShellTimeout(
             f"PowerShell did not finish within {timeout_seconds} s. Raise "
             f"powershell_timeout_seconds in the config, or check that the computer is not "
             f"overloaded.")
-    stdout = completed.stdout.decode("utf-8", errors="replace").strip()
+    stdout = file_text.strip() or completed.stdout.decode("utf-8", errors="replace").strip()
     stderr = completed.stderr.decode("utf-8", errors="replace").strip()
 
     if completed.returncode != 0:
-        raise SystemExit(f"PowerShell collection failed (exit {completed.returncode}): {stderr[:500]}")
+        # The probe runs only after a failure, so a healthy run starts one PowerShell, not two.
+        if powershell_language_mode() == "ConstrainedLanguage":
+            raise SystemExit(
+                f"PowerShell is in ConstrainedLanguage mode (AppLocker or WDAC is on) and the command "
+                f"failed (exit {completed.returncode}): {stderr[:500]}\n"
+                "Ask your administrator to add an allow rule for the TaskDash folder to the AppLocker or "
+                "WDAC policy, or run the collector as an account that the policy exempts.\n"
+                + see_troubleshooting("PowerShell runs in ConstrainedLanguage mode"))
+        raise SystemExit(f"PowerShell collection failed (exit {completed.returncode}): {stderr[:500]}\n"
+                         + see_troubleshooting("PowerShell failed"))
     if not stdout:
         return []
 
     try:
         payload = json.loads(stdout)
     except json.JSONDecodeError as exc:
-        raise SystemExit(f"PowerShell returned non-JSON output ({exc.msg}): {stdout[:300]}")
+        raise SystemExit(f"PowerShell returned non-JSON output ({exc.msg}): {stdout[:300]}\n"
+                         + see_troubleshooting("PowerShell returned text that is not JSON"))
 
     if isinstance(payload, dict):
         return [payload]
@@ -787,7 +947,12 @@ def with_retry(
             f"Retrying in {delay:.1f}s.")
         sleep_fn(delay)
 
-    raise SystemExit(f"{label} failed after {attempts} attempts: {last_exc}")
+    if isinstance(last_exc, requests.exceptions.SSLError):
+        raise SystemExit(f"{label} failed after {attempts} attempts. SSLError: the certificate of "
+                         f"the ArcGIS server was not trusted. " + _ssl_fix_text(last_exc)
+                         + see_troubleshooting("TaskDash cannot reach ArcGIS")) from last_exc
+    raise SystemExit(f"{label} failed after {attempts} attempts: {last_exc}\n"
+                     + see_troubleshooting("An ArcGIS call failed after several tries"))
 
 
 # --------------------------------------------------------------------------- AGOL
@@ -815,6 +980,32 @@ def make_field(
     return field
 
 
+def arcgis_version_warning() -> Optional[str]:
+    """One WARNING line when the installed arcgis is outside pyproject's range, else None.
+
+    The range is parsed by hand (packaging may not be installed). Keep it equal to the
+    `arcgis` dependency in pyproject.toml. The version comes from the package metadata, never
+    from `import arcgis`: that import probes ArcPy and dies without a Pro licence, and it runs
+    before connect_agol installs the ArcPy guard."""
+    try:
+        version = importlib.metadata.version("arcgis")
+    except importlib.metadata.PackageNotFoundError:
+        return None
+    match = re.match(r"(\d+)\.(\d+)", version)
+    if match and (2, 4) <= (int(match.group(1)), int(match.group(2))) < (3, 0):
+        return None
+    return (f"WARNING: arcgis {version} is outside the tested range (arcgis>=2.4,<3). TaskDash may "
+            "fail in ways its tests do not cover. Install a version in that range with "
+            "pip install \"arcgis>=2.4,<3\".")
+
+
+def _ssl_fix_text(exc: BaseException) -> str:
+    """The cause and fix for an SSLError, shared by sign-in and every REST call (with_retry)."""
+    return (f"A proxy that inspects TLS traffic is the usual cause. Add the proxy's root certificate to the Windows certificate store, or "
+            f"save it as a PEM file and set the REQUESTS_CA_BUNDLE variable to that file's path. "
+            f"Open a new PowerShell window afterwards. Detail: {str(exc)[:200]}\n")
+
+
 def _open_gis(url: str, *args: Any, **kwargs: Any) -> Any:
     import requests
     from arcgis.gis import GIS
@@ -824,11 +1015,18 @@ def _open_gis(url: str, *args: Any, **kwargs: Any) -> Any:
     kwargs.setdefault("trust_env", True)
     try:
         return GIS(url, *args, **kwargs)
+    except requests.exceptions.SSLError as exc:
+        # A subclass of ConnectionError, so it must be caught first: "check the network" hides the cause.
+        raise SystemExit(
+            f"SSLError: the certificate of arcgis.url '{url}' was not trusted. "
+            + _ssl_fix_text(exc)
+            + see_troubleshooting("TaskDash cannot reach ArcGIS")) from exc
     except requests.exceptions.ConnectionError as exc:
         raise SystemExit(
             f"Cannot reach arcgis.url '{url}'. Check the URL in the config (ArcGIS Online is "
             f"https://www.arcgis.com or https://<org>.maps.arcgis.com), the network and any proxy. "
-            f"Detail: {type(exc).__name__}: {str(exc)[:200]}") from exc
+            f"Detail: {type(exc).__name__}: {str(exc)[:200]}\n"
+            + see_troubleshooting("TaskDash cannot reach ArcGIS")) from exc
 
 
 def connect_agol(config: Dict[str, Any]) -> Any:
@@ -847,7 +1045,8 @@ def connect_agol(config: Dict[str, Any]) -> Any:
         if gis.users.me is None:
             raise SystemExit(
                 f"arcgis.profile '{profile}' did not sign in. Store it once with "
-                f"GIS(url, user, password, profile='{profile}') as the account the scheduled task runs under.")
+                f"GIS(url, user, password, profile='{profile}') as the account the scheduled task runs under.\n"
+                + see_troubleshooting("The stored sign-in does not work"))
         emit(f"Connected to ArcGIS portal as: {gis.users.me.username}")
         return gis
 
@@ -859,7 +1058,8 @@ def connect_agol(config: Dict[str, Any]) -> Any:
     if not username or not password:
         raise SystemExit(
             "No ArcGIS credentials resolved. Set arcgis.username/password in the config, "
-            "or set arcgis.username_env/password_env to environment variable names."
+            "or set arcgis.username_env/password_env to environment variable names.\n"
+            + see_troubleshooting("TaskDash finds no ArcGIS credentials")
         )
 
     if agol.get("password") and not pass_env and agol.get("allow_plaintext_password") is not True:
@@ -867,7 +1067,8 @@ def connect_agol(config: Dict[str, Any]) -> Any:
             "arcgis.password is stored in plaintext in the config. Store a profile once, as the "
             "account the scheduled task runs under: GIS(url, user, password, profile=\"name\"), "
             "then set arcgis.profile to that name and delete arcgis.password. To accept the "
-            "risk instead, set arcgis.allow_plaintext_password to true.")
+            "risk instead, set arcgis.allow_plaintext_password to true.\n"
+            + see_troubleshooting("The config holds a plaintext password"))
 
     gis = _open_gis(url, username, password)
     emit(f"Connected to ArcGIS portal as: {gis.users.me.username}")
@@ -1068,7 +1269,8 @@ def raise_on_edit_failure(result: Any, kind: str, label: str) -> None:
                     "it and updates it instead; if this repeats, look for a key written twice."
                     if "duplicate key" in text.lower()
                     else "-- check field lengths and types against the table schema.")
-            raise SystemExit(f"{label} {kind} failed: {text} {hint}")
+            raise SystemExit(f"{label} {kind} failed: {text} {hint}\n"
+                             + see_troubleshooting("ArcGIS refused a write"))
 
 
 def purge_older_than(table: Any, time_field: str, retention_days: int, label: str = "") -> int:

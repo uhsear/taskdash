@@ -74,6 +74,9 @@ jobs:
           $secure = ConvertTo-SecureString $plain -AsPlainText -Force
           $name = "ci_taskdash"
           New-LocalUser -Name $name -Password $secure -AccountNeverExpires | Out-Null
+          # install_task.ps1 -Apply refuses a task account outside Administrators. The group is
+          # named by SID so this holds on any Windows language. Remove-LocalUser below drops the membership.
+          Add-LocalGroupMember -SID S-1-5-32-544 -Member $name
           $credential = New-Object System.Management.Automation.PSCredential("$env:COMPUTERNAME\$name", $secure)
           .\install_task.ps1 -TaskName TaskDashCI -InstallDir $env:TASKDASH_HOME -Python $env:TASKDASH_EXE -Credential $credential -LogonType Password -Apply
           if ($LASTEXITCODE) { throw "install_task.ps1 exited $LASTEXITCODE." }
@@ -124,9 +127,10 @@ jobs:
         with:
           python-version: "3.11"
 
-      # The tests import arcgis but replace its network calls with fakes.
+      # The tests import arcgis but replace its network calls with fakes. pyyaml lets the
+      # workflow-parsing tests run; without it they would skip.
       - name: Install test dependencies
-        run: python -m pip install "arcgis>=2.4,<3" pytest
+        run: python -m pip install "arcgis>=2.4,<3" pytest "pyyaml>=6,<7"
 
       - name: Run the full suite
         run: python -m pytest -q -p no:cacheprovider

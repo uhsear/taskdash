@@ -125,7 +125,7 @@ def test_help_describes_target_title_and_config(capsys):
         dash.main(["--help"])
     out = capsys.readouterr().out
     assert "--config PATH" in out and "--version" in out
-    assert "test (default) or prod" in out and "Dashboard title" in out
+    assert "Which dashboard to build: prod or test" in out and "Dashboard title" in out
 
 
 def test_config_path_is_passed_to_load_config(monkeypatch, tmp_path):

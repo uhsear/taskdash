@@ -264,7 +264,7 @@ def test_collect_everything_reads_hide_paths_from_the_privacy_config(monkeypatch
         raise RuntimeError("stop")
 
     monkeypatch.setattr(collect, "build_inventory_rows", fake_build)
-    monkeypatch.setattr(collect, "collect_tasks", lambda timeout: [])
+    monkeypatch.setattr(collect, "collect_tasks", lambda timeout, *_: [])
     monkeypatch.setattr(publish, "read_run_events", lambda *a: ([], False))
     monkeypatch.setattr(collect, "load_descriptions", lambda: {})
     for privacy, expected in (({}, True), ({"hide_paths": False}, False)):
@@ -594,7 +594,7 @@ def test_the_logon_note_names_the_single_use_licence():
 # ------------------------------------------------------------------ 10. capture warning
 
 def test_capture_fixture_warns_that_the_file_is_private(monkeypatch, tmp_path, capsys):
-    monkeypatch.setattr(collect, "collect_tasks", lambda timeout: [{"actions": f"x -Password {DUMMY}"}])
+    monkeypatch.setattr(collect, "collect_tasks", lambda timeout, *_: [{"actions": f"x -Password {DUMMY}"}])
     monkeypatch.setattr(collect, "collect_run_events", lambda *a, **k: [])
     out = tmp_path / "f.json"
     assert publish._main_dispatch(publish.parse_args(["--capture-fixture", str(out)]), {}, tmp_path) == 0

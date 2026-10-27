@@ -254,7 +254,7 @@ class _MetricsTable:
 
 
 @pytest.mark.parametrize("apply", [False, True])
-def test_refresh_metrics_is_check_by_default(monkeypatch, apply):
+def test_refresh_metrics_is_check_by_default(monkeypatch, tmp_path, apply):
     table = _MetricsTable([_stored(1, "features_max_oid", "new.log")])
     monkeypatch.setattr(publish, "connect_agol", lambda config: None)
     monkeypatch.setattr(publish, "ensure_service", lambda gis, config, target: None)
@@ -264,7 +264,8 @@ def test_refresh_metrics_is_check_by_default(monkeypatch, apply):
     monkeypatch.setattr(publish, "mine_metrics",
                         lambda config, inventory, host, examined=None: ([_fresh("exported_record_count", "new.log")], {}))
     args = publish.parse_args(["--refresh-metrics"] + (["--apply"] if apply else []))
-    assert publish.run_refresh_metrics({"host_name_override": "H", "privacy": {"hide_paths": False}}, args) == 0
+    config = {"host_name_override": "H", "privacy": {"hide_paths": False}, "logging": {"log_dir": str(tmp_path)}}
+    assert publish.run_refresh_metrics(config, args) == 0
     assert bool(table.edits) is apply
 
 

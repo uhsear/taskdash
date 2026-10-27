@@ -333,8 +333,10 @@ def test_apply_migration_creates_a_missing_table_when_item_is_given(monkeypatch)
                                               [("host_name", "task_full_name", "change_kind", "changed_utc")]),
     }
     collector_table = _complete(publish.collector_runs_fields, [("run_id",)])
+    metric_change_table = _complete(publish.metric_change_fields, [("series_key",)])
     monkeypatch.setattr(publish, "get_tables",
-                        lambda item: {**complete, publish.TABLE_COLLECTOR_RUNS: collector_table})
+                        lambda item: {**complete, publish.TABLE_COLLECTOR_RUNS: collector_table,
+                                      publish.TABLE_METRIC_CHANGE: metric_change_table})
 
     item = _StampItem()
     publish.apply_migration(dict(complete), item=item)

@@ -6,6 +6,312 @@ All notable changes to TaskDash are listed here. The format follows
 
 ## [Unreleased]
 
+## [1.2.0] - not yet released
+
+### Added
+
+- `decimal_separator` in a rules file (`"."` default, or `","`) reads metric numbers such as `1,5` and
+  `1.234,5` from logs that write decimals with a comma. The default changes nothing.
+- `TaskDash.config.example.json` ships a default `scheduler.exclude_task_name_regex` that skips the
+  Microsoft Edge update, Google update and OneDrive tasks. It affects new installs only; the
+  built-in default stays empty. No table field changed.
+
+- ConstrainedLanguage support for the PowerShell commands (AppLocker or WDAC; H4-4). The commands
+  that read the task list and the event log now run in that mode. The event reader takes fields from
+  `Properties` by position where `ToXml()` is refused. In that mode each result comes back through a
+  UTF-8 temp file named `.taskdash_ps_*.json` in the TaskDash folder, which TaskDash reads and
+  removes, because the console encoding cannot be set there. A failure in that mode now names the
+  mode and the fix (an allow rule for the TaskDash folder, or an exempt account). `taskdash
+  preflight` has a read-only `language mode` line that warns in ConstrainedLanguage. Output in
+  FullLanguage is unchanged, and so is the reference install: it reads the same JSON from stdout. A
+  failed PowerShell call starts one more PowerShell, only to read the mode. No table field changed.
+- A CI matrix, `.github/workflows/matrix.yml` (H4-10). It runs on a version tag, weekly and on demand:
+  the full suite on `windows-2022` and `windows-2025` with Python 3.11, 3.12 and 3.13 (`windows-2019`
+  is retired); legs for ConstrainedLanguage, the de-DE and fi-FI cultures and two daylight-saving
+  time zones, each asserting that it runs in what it names; a live dry-run collect that reads eight
+  seeded odd tasks (brackets, repeated spaces, an apostrophe, a non-ASCII name, a `\MicrosoftSync\`
+  folder and two monthly tasks, one with brackets in its name) registered by `tests/ci/seed_tasks.ps1` and removed afterwards; and a
+  500-task synthetic host (`taskdash_synthetic.build_scale_host`) that must finish its offline passes
+  in 15 minutes. The scale test runs only when `TASKDASH_SCALE_TASKS` is set, so the default suite
+  stays fast. The generator is the only shipped code that changed, and `taskdash demo` does not use
+  it. No config key, table field or default changed.
+- `docs/APPROVAL.md`, a one-page sheet for an IT and security review. It lists the endpoints,
+  accounts, task settings, files, outgoing data, removal steps and release checks. A test checks its
+  commands, flags, config keys, file names and privileges against the code, and that the network
+  code stays in the three places it names. README, INSTALL and INTRODUCTION link it. No code or
+  table field changed.
+- `taskdash signin` infers the organization URL. When `arcgis.url` is empty it offers
+  `https://www.arcgis.com`, and after the sign-in it prints the organization's own URL
+  (`urlKey` plus `customBaseUrl`) with the line to put in the config. With `--apply` it writes only
+  `arcgis.url`, after a `.bak_setup_` backup of the config. No table field changed.
+- `Install-TaskDash.ps1`, a one-window installer. It chains the venv and wheel install (checking the
+  wheel against a `<wheel>.sha256` file when one is beside it), the config copy, `taskdash signin`
+  for this account and for the task account, `taskdash preflight` (after the event-log fix),
+  `taskdash setup`, `install_task.ps1 -EnableEventLog -StartNow`, and `taskdash status`. It takes
+  `-InstallDir`, `-Wheel`, `-TaskAccount` and `-Apply`, checks only without `-Apply`, stops at the
+  first failure and lists what it created, and reports `nothing to do` for a finished step, so a
+  second run is safe. It never reads or prints a password. It ships in the wheel next to
+  `install_task.ps1`. `docs/INSTALL.md` opens with a two-command "Quick install". No table field
+  changed.
+- `taskdash signin --for-task-account [--task-user NAME] [--apply]`: seals the ArcGIS sign-in, and the
+  mail password when `smtp.user` is set, into `taskdash_handoff.bin` in the TaskDash folder, so the
+  install no longer needs `runas`. The bytes use DPAPI machine scope. The file's ACL allows only the
+  task account, SYSTEM and Administrators, with no inheritance. The next `collect --apply` run, or
+  `preflight` check, by the task account saves the ArcGIS profile and the keyring entry, checks that
+  the profile signs in, and then deletes the file. A failure keeps the file and fails the run like a
+  sign-in failure. The file never holds plain text, and nothing prints or logs a secret. `runas`
+  stays as the documented fallback. New module `taskdash_handoff`. No table field changed.
+- `taskdash preflight --as-task [--task-user NAME] [--apply]`: runs the preflight checks as the task
+  account without `runas`. Without `--apply` it prints the plan (temporary task name, account,
+  command, output file) and changes nothing. With `--apply` it asks for the password (hidden prompt;
+  it goes only to Task Scheduler's COM interface, never to a command line), registers a one-time task
+  from `taskdash_task.xml` with the collector task's account and logon type and no trigger, runs it,
+  waits up to 300 seconds, prints the output from a restricted file in the log folder, and always
+  deletes the task and the file. It only reads the collector task. New module `taskdash_astask`.
+  No table field changed.
+- Two read-only checks in `taskdash preflight`. `base python` warns when the Python that made the
+  virtual environment is under `C:\Users`, which the task account may not be able to run. `install
+  folder` fails when Users, Authenticated Users or Everyone hold a write right on the install
+  folder, because the task runs as an administrator and loads code and config from there. It reads
+  the permissions with `icacls` by full path and prints the `icacls` fix. No table field changed.
+- A wheel install finds its config from any folder: when `TASKDASH_HOME` is not set and the current
+  folder has no config, `home_dir()` uses the folder that contains the running virtual environment
+  if that folder holds `TaskDash.config.json`. The order is otherwise unchanged.
+- `taskdash signin [--apply]`: asks for the ArcGIS user name (default `arcgis.username`) and the
+  password (hidden prompt, never an argument, never printed), signs in, checks that `users.me` is not
+  empty and that the account has the privileges preflight checks, and with `--apply` saves the
+  profile the way the install guide's one-liner did, then proves it signs in. Without `--apply` it
+  saves nothing. Step 3 of `docs/INSTALL.md` uses it instead of the Python one-liners. No table field
+  changed.
+- A `host name` check in `taskdash preflight`: it warns when `host_name_override` is set and differs
+  from this computer's name, and names the fix. It uses the same test as the `collect --apply`
+  refusal. The example config now leaves `host_name_override`, `arcgis.url`,
+  `arcgis.service_description` and `alerting.dashboard_url` empty, so a copy never points at another
+  organization. The code defaults are unchanged. No table field changed.
+- An upgrade and rollback guide, `docs/UPGRADE.md`, linked from the README and `docs/INSTALL.md`. A
+  `collect --apply` run now logs one `WARNING` when the service schema is newer than the installed
+  TaskDash, as after a rollback. It names both schema numbers and keeps publishing; the fields that
+  only the newer release writes stay empty. The refusal in `collect --migrate --apply` is unchanged.
+  No table field changed.
+- `host_previous_names` (top-level config key, default empty): after a computer rename, each
+  `collect --apply` moves the TaskInventory rows stored under the listed old names to the current
+  name and logs the count, so no stale duplicates remain. It moves only the tasks that run
+  publishes, so the inventory shrink guard stays meaningful. It skips, with a `WARNING`, an old name
+  whose collector ran within twice `scheduler.collector_interval_minutes`, so a replacement computer
+  that took the name keeps its rows. History tables keep the old name. The
+  key must not hold an empty name or the current name. "Rename the computer" in docs/CONFIGURE.md
+  gives the steps, including the wait after the old name's last run. No table field changed.
+- `taskdash status` now returns an exit code: 0 for a fresh success, 1 when the newest run failed,
+  2 for no run or a success older than twice the collector interval, and 3 when it cannot sign in
+  or read. It shows the age of the last success, and `--host NAME` (default: this install's host,
+  `--host all` for every host) filters the runs.
+- `taskdash status --prune [--apply] [--keep N]` lists, and with `--apply` removes, old dashboard
+  and config backups, empty pending files and bootstrap logs older than 7 days in the `Logs` folder
+  beside the config, whatever `logging.log_dir` says. It keeps the newest `--keep` bootstrap logs and
+  `bootstrap_FAIL_` crash records. It stops with a message when it cannot find the config, and never
+  reads a `Logs` folder under the directory the command runs in. With `--apply` it skips the pending
+  files while a collector run holds the run lock.
+- A per-task mute: an `alerting.maintenance_windows` entry with `"end": null`
+  mutes the matching tasks until you remove it, and `start` may be left out too. A muted task's
+  `Why` text ends with `Muted (alerts off)`, a bounded window's with `In maintenance until <end>`,
+  and each publishing run logs one `WARNING` with the number of muted tasks. The note comes after a
+  failing task's own reason, and a healthy muted task shows it alone. No table field changed.
+- `taskdash preflight --config-diff` lists the config keys TaskDash does not know (likely typos), the
+  renamed keys with their new names, and the known keys that are absent with the default that
+  TaskDash uses. It prints no value from the config, and exits 0 unless the config cannot be read.
+- `taskdash setup --apply` turns on delete protection for the service, the view and the dashboard it
+  creates, and marks them in its printed list. `taskdash preflight` has two new read-only checks:
+  `dashboard` (it exists, is not public and reads the view) and `delete protection` (service and
+  view). Both warn and never change an item. "Rebuild or move the ArcGIS items" in
+  docs/TROUBLESHOOTING.md explains how to rebuild the dashboard, recreate the view and change owner.
+
+- `taskdash remove [--apply]` undoes `taskdash setup`. `taskdash setup --apply` now saves
+  `taskdash_setup_manifest.json` beside the config (item IDs, types, titles and creation order, no
+  secrets). Remove lists what it would delete and changes nothing without `--apply`. With `--apply`
+  it turns off delete protection and deletes, newest first, only the manifest items that still exist,
+  that you own and that still have the manifest's type and title. It turns protection back on when a
+  delete fails, keeps the service when its view was skipped, and reports any item it skips. It prints the commands that remove the Windows
+  task and the package. "Undo the install" in docs/INSTALL.md now covers the whole removal.
+- `taskdash collect --retire-host NAME [--apply]` retires a computer that published to a shared
+  service. It counts that computer's rows in every table and changes nothing without `--apply`. With
+  `--apply` it deletes only the TaskInventory rows; the history tables age out by retention. It
+  refuses the computer that runs it, an empty name and a wildcard. "Retire a computer" in
+  docs/CONFIGURE.md gives the steps. No table field changed.
+- `install_task.ps1 -Replace` rotates the task account's password. With `-Apply` it registers the
+  same XML over the existing task (`-Force`), keeps the account and the logon type, and asks for the
+  new password. It keeps the task's existing command, arguments, working directory, trigger and
+  settings, so a hand-added `--allow-host-mismatch` or a changed schedule survives. It refuses when no task has that name, or when the
+  task runs as another account or logon type. The account must match as `DOMAIN\name`, ignoring
+  case. Check mode with `-Replace` runs the same read-only refusals and prints what `-Apply` would
+  do. Without `-Replace`, an existing task is still an error, and the message now names
+  `-Replace`. The new guide `docs/ROTATE.md` covers the ArcGIS, mail and task account passwords,
+  including what an administrator reset of the task account password does to the saved secrets.
+- `install_task.ps1 -Apply` refuses before it registers anything when the window is not elevated or
+  the task account is not a direct or nested member of the local Administrators group (nested
+  membership only warns). Check mode prints the same problems as warnings and exits 0. Two new
+  switches, `-EnableEventLog` and `-StartNow`, run `taskdash preflight --enable-event-log --apply`
+  before the registration and start the task once after it, waiting up to 10 minutes and decoding
+  `LastTaskResult`. Both only print a plan without `-Apply`. No table field changed.
+
+### Changed
+
+- The dashboard's Metric Change reads a small new table, `MetricChange`, instead of every
+  `TaskMetrics` row. After each `collect --apply` run writes and purges metrics, it reads its host's
+  stored `TaskMetrics` rows and stores one row per host, task and metric: the newest value, the usual
+  value (the median of up to 30 earlier values, none under 3), the lowest and highest earlier value,
+  and the earlier count. The flag rules stay in the dashboard, which gives the same rows as before.
+  The table has a unique index on `series_key` and follows `retention.metrics_days`. It is optional.
+  A service without it publishes exactly as before, `collect` logs one `WARNING` with the fix, and
+  `taskdash dashboard` keeps the old source until the table exists. The drift check, `preflight` and
+  `--create-view` do not need it. To switch, run `taskdash collect --migrate --apply`, then one
+  `collect --apply`, then `taskdash dashboard --apply`; `docs/UPGRADE.md` has the steps. A view made
+  before this release does not gain the table, so a dashboard that reads such a view keeps the old
+  source. `SCHEMA_VERSION` is now 2. Prod-visible: until `--migrate --apply` runs, each `collect`
+  run logs the extra `WARNING`, and `CollectorRuns.schema_version` reads 2 from the first run of the
+  new version. After the migration, a run that wrote or purged metric rows makes one more read of
+  the host's `TaskMetrics` rows and sends only the series whose values moved (usually a few rows
+  per hour, not one per series). A run that wrote none skips both, except to fill an empty table.
+- The hourly publish sends only the metric rows of log files that changed since the last clean
+  `--apply` run, and reads only the stored metric keys those files can hold (bounded by the
+  changed files' names), not every stored key of the host.
+  A per-target state file, `Logs\metrics_state.json` (`metrics_state_test.json` for `--target test`),
+  keeps one digest of the rows of each log file. It is written only after a clean publish, never in
+  a dry run. With no state file, or after a change to the `metrics` or `privacy` settings, the
+  service or the version, or after `--refresh-metrics --apply`, one run sends every row as before.
+  Prod-visible: the hourly run writes far fewer rows and `observed_at_utc`, `collected_at_utc` of
+  an unchanged row stay at their last values. No table field changed.
+- The hourly publish reads 30 days of stored runs to build the run summary, not the whole 90-day
+  table. One grouped `MAX(start_time_utc)` query per host finds each task's newest real run, and a
+  second query fetches only the runs of tasks whose newest run is older than 30 days, so those tasks
+  keep their last-run facts. Every count, the duration baseline and the last-run columns are
+  unchanged. The mean duration, which the anomaly check uses only when a task has fewer than 5
+  baseline runs, is now a 30-day mean. The follow-up query stops at the window's start, so a stale
+  task's Missed and Skipped rows inside the window are not counted twice. A stuck "Running" row older than 30 days no longer sets the
+  running time of a task that has later runs. A task with only "Running" rows in the window gets
+  one more grouped query for its newest finished run, so its last duration and result stay on the
+  dashboard. No table field changed.
+- The package now requires Python 3.11 or later (it said 3.9), matching CI, the lock file and the
+  install guide. The install guide, `Install-TaskDash.ps1` and the upgrade guide install the wheel
+  with the `smtp` extra on every path, so there is no choice to make. The extra stays installable
+  alone. The setup refusal for an existing install now names the commands for a wheel install and a
+  folder install.
+- `taskdash preflight` prints `[--]`, not `[!!]`, for results that only mean "not set up yet": no
+  `arcgis.item_id` (the `service` and `sharing` lines) and no registered collector task (the
+  `collector logon type` line). The `dashboard`, `view` and `collector account` lines already did.
+  A `[--]` line does not count as a problem and does not set exit 1, so a fresh install that has
+  not run `setup` yet exits 0. The reference install, which has both, behaves as before.
+- An `alerting.maintenance_windows` entry without an `end` key is still ignored with a warning, so
+  an upgrade never starts muting tasks. Only `"end": null` mutes until you remove the entry. To stop
+  a misspelled key from becoming a silent mute, the run also ignores an entry with no `start` or a
+  null `end` that holds a key other than `task`, `start`, `end` and `reason` (a `_` key is a note),
+  and the config load warns about it. The config never fails to load for these keys. An entry whose `task` is not non-empty text
+  also only warns, and it matches no task.
+- The dashboard heartbeat leaves out a computer that has made no collector run for
+  `scheduler.heartbeat_ignore_after_days` days (default 7), so a retired or renamed computer no longer
+  shows as down for ever. The dashboard reads only the collector runs inside that window. Rebuild the
+  dashboard to get it. A single computer sees no change unless its collector has been silent that long.
+- `taskdash preflight` shows a service schema that is newer than the installed TaskDash as a warning,
+  not a failure, with the advice that `collect` logs. A rolled-back collector keeps publishing.
+  Missing tables, fields and indexes still fail.
+- `taskdash dashboard` without `--target` now uses `test` only when `arcgis.test_item_id` is set.
+  Otherwise a check run uses `prod`, so a new install no longer fails. It prints one line naming the target.
+  `--apply` without `--target` stops when there is no test service. Pass `--target prod --apply` to update prod.
+  Before `--apply` updates an existing dashboard, it warns that the rebuild replaces hand edits.
+- A refusal or exit message that `docs/TROUBLESHOOTING.md` documents now ends with the line
+  `See TROUBLESHOOTING.md, section <heading>.`, so you find the fix without searching. It covers the
+  config, sign-in, schema, sharing, host, retire-host, setup, remove, demo and status messages. The
+  message texts themselves did not change. A test checks that every heading the code names exists.
+
+### Fixed
+
+- `install_task.ps1` built the trigger's `StartBoundary` with a custom format string, so a culture
+  with another calendar (for example Thai, year 2569) wrote a date that Task Scheduler rejected. It
+  now uses the sortable `s` format with the invariant culture.
+- A run with `--target test` no longer shares `Logs\event_read_mark.json` and
+  `Logs\first_run_budget.json` with the production run. It uses `event_read_mark_test.json` and
+  `first_run_budget_test.json`. The production names are unchanged, so an existing install keeps its
+  position.
+- A later (non-first) event-log read that times out now halves its next size, down to 250 events, as
+  a first-run read does. Before, it retried the same size on every run. A dry run never saves the size.
+- When `taskdash_common` itself fails to import, a wheel install now saves the traceback in
+  `Logs\bootstrap_FAIL_<time>.log` before it re-raises. Before, no file was written. The file goes
+  to the same folder as every other log, including the folder that owns the running venv.
+- `Install-TaskDash.ps1` now treats an inherit-only generic write or full-control entry (`(GW)`, `(GA)`)
+  for Users, Authenticated Users or Everyone as a loose folder, as preflight does. Before, it skipped
+  the lock and preflight failed afterwards.
+- docs/TROUBLESHOOTING.md now says that a task whose XML export fails stays in the inventory with
+  blank monthly trigger details. Only a task that cannot be read at all is left out.
+- A collector run by an account that cannot read the restricted hand-off file (a window that is not
+  elevated, or another account) now leaves the file alone and logs a warning. Before, it failed the
+  run with "The hand-off file could not be opened".
+- `taskdash preflight` no longer reports `[ok]` for the install folder on a Windows in another
+  language. It matches the local names of Users, Authenticated Users and Everyone, and warns when it
+  finds neither SYSTEM nor Administrators in the permissions.
+- The `host name` preflight line and the `collect --apply` refusal now share one mismatch test.
+- The hand-off store now installs the ArcPy import guard before its first ArcGIS import. The collector
+  and `preflight --as-task` store the hand-off before they connect, so on a cloned Pro environment a
+  Password-logon task died on the Pro licence and kept the file. `signin --for-task-account --apply`
+  now creates the hand-off file with share mode 0 and restricts it through that handle, so no other
+  handle can open the file while it still has the folder's permissions.
+- `taskdash preflight --as-task` no longer stops with a traceback when it cannot delete its output
+  file. It names the file, tells you to delete it, and exits 1.
+
+- The push and release workflows now install PyYAML for the suite, and the workflow-parsing tests
+  fail instead of skipping when `CI` is set and PyYAML is missing. They skipped on those runs before.
+- A failed `MetricChange` write now makes the next run send the metric files again. Before, the
+  run saved `metrics_state.json` anyway, so the next run skipped the recompute and the table kept
+  stale values until a log file changed. Prod-visible only after such a failure.
+- With `decimal_separator` set to `","`, a `.` groups thousands only in a number such as `1.234` or
+  `12.345.678,9`. `1.5` and `0.512` stay decimals instead of reading as 15 and 512. `TASKDASH`
+  metric lines are no longer rewritten, so they keep their documented `3.5` format.
+- A sign-in or an ArcGIS call that fails on a certificate error now names SSLError and the fix (a TLS-inspecting proxy: trust its root certificate or set `REQUESTS_CA_BUNDLE`) instead of the generic "cannot reach" or "failed after several tries" text. Prod-visible only on that failure.
+- The collector and `taskdash preflight` print one WARNING when the installed `arcgis` is outside `>=2.4,<3`. Preflight gains an "arcgis version" line. No change when the version is in range. The version comes from the package metadata, so the check never imports `arcgis` before the ArcPy import guard is installed.
+
+- Stored keys fold case (H4-8). A task renamed only in case now updates its row in the hosted
+  tables (`TaskInventory` included) instead of adding a duplicate that the case-insensitive unique
+  index rejects. The change history (`TaskChanges`) treats it as the same task too: no
+  `task_removed` and `task_added` pair for a case-only rename.
+  `alert_state.json` is now keyed on the full task name (folder and name), so two tasks that share a
+  short name in different folders no longer share one alert. An older `alert_state.json` is re-keyed
+  on read, so the upgrade sends no repeat alert and drops none. The next write saves the new keys.
+  The e-mail still names tasks by their short name. An old alert for a short name that two tasks
+  share is not re-keyed, because the old key cannot say which task it was. The next alert e-mail
+  then lists that problem once more. No table field changed.
+- A corrupt `alert_state.json` (H4-7) is no longer reset silently. TaskDash logs a WARNING, keeps
+  the bad file as `alert_state.json.corrupt-<stamp>` and rebuilds the state, so alerts already sent
+  may repeat once. A file whose fields have the wrong type (a text where a list or an object belongs)
+  gets the same treatment, because it would otherwise fail every hourly alert check.
+  `--preview-alert` still changes no file. `read_last_lines` already capped a
+  read at 8 MB from the end; a test now pins that default.
+- The Microsoft task filter (H4-5) now matches the whole folder name. It skips `\Microsoft\` and
+  its subfolders, and no longer skips a folder such as `\MicrosoftSync\`. If the reference install
+  has such a folder, its tasks now appear. The PowerShell query drops the Microsoft tasks itself,
+  so they are never sent to Python, and the "Collected N task row(s)" line counts fewer rows. A
+  Microsoft task that `Get-ScheduledTaskInfo` cannot read no longer appears in the unreadable-task
+  warning; an error from the task listing itself still does. The query now pipes each task to `Get-ScheduledTaskInfo` and, for a monthly trigger, to `Export-ScheduledTask`
+  instead of passing its name, because a name with `[` and `]` was read as a pattern. A monthly task
+  with brackets in its name now shows its months and days. `taskdash preflight`
+  still passes the task check on a computer whose only tasks are under `\Microsoft\`, even when
+  the listing reports an error for one of them, so the installer is not blocked. No table field changed.
+
+### Security
+
+- `Install-TaskDash.ps1` never uses an existing install folder that an ordinary user owns or can write
+  to. It stops before it runs `taskdash.exe` or reads a config from such a folder, in check mode too.
+  It creates a new folder with its owner and permissions in one step, so no other user can change the
+  folder in between. It copies the wheel into that folder, checks the hash of the copy, and installs
+  the copy. It also refuses a junction or link at the install path and a parent folder that an
+  ordinary user can change, and it runs Python with `-I`, so files in the current folder are not
+  imported. Any write right held by an account other than SYSTEM, Administrators, TrustedInstaller,
+  the installing administrator or the task account now counts as loose, not only those of Users,
+  Authenticated Users and Everyone. With `-Apply`, it stops when it cannot read the local
+  Administrators group, because it would give an unconfirmed task account write access to a folder
+  that it runs programs from as an administrator.
+- `taskdash preflight` now warns when the install folder's owner is not SYSTEM, Administrators,
+  TrustedInstaller or a direct member of the Administrators group. The owner can always change the
+  folder's permissions, so a locked folder owned by an ordinary user is not locked against that user.
+  The warning gives the `icacls /setowner` fix. It does not set exit code 1.
+
 ## [1.1.0] - 2026-10-27
 
 ### Added

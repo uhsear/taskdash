@@ -13,7 +13,7 @@ Not affiliated with, endorsed by or supported by Esri.
 - Detects overdue tasks, stuck tasks, and tasks that changed.
 - Keeps the run history from the Windows event log, and mines each task's log files for counts,
   durations and errors.
-- Publishes to five hosted tables. The dashboard reads a query-only view of them. The editable
+- Publishes to six hosted tables. The dashboard reads a query-only view of them. The editable
   service stays owner only.
 - Sends optional e-mail alerts, including one e-mail that names the likely shared cause when
   several tasks fail together.
@@ -32,12 +32,14 @@ Not affiliated with, endorsed by or supported by Esri.
 2. Follow [docs/INSTALL.md](docs/INSTALL.md) to install it. Plan for about one hour.
 3. Use [docs/CONFIGURE.md](docs/CONFIGURE.md) to change a setting.
 4. Use [docs/USE.md](docs/USE.md) to read the dashboard and the alert e-mails.
-5. If something fails, look up the message in [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).
+5. Follow [docs/UPGRADE.md](docs/UPGRADE.md) to move to a new release, or back to the previous one.
+6. Follow [docs/ROTATE.md](docs/ROTATE.md) to change the ArcGIS, mail or task account password.
+7. If something fails, look up the message in [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).
 
 ## Requirements
 
 - Windows 10, Windows 11 or Windows Server 2016 or later, with PowerShell.
-- 64-bit Python 3.11 installed for all users. The package needs Python 3.9 or later; 3.11 is the
+- 64-bit Python 3.11 installed for all users. The package needs Python 3.11 or later, and 3.11 is the
   tested version.
 - The `arcgis` package, version 2.4 or later and earlier than 3. The wheel installs it.
 - An ArcGIS Online built-in account of the Creator user type, without multifactor authentication.
@@ -50,6 +52,9 @@ tested yet. [docs/INTRODUCTION.md](docs/INTRODUCTION.md) lists the details and a
 ## Resources
 
 - [Install guide](docs/INSTALL.md)
+- [Upgrade and rollback guide](docs/UPGRADE.md)
+- [Password rotation guide](docs/ROTATE.md)
+- [IT and security approval sheet](docs/APPROVAL.md)
 - [Introduction](docs/INTRODUCTION.md)
 - [Configuration reference](docs/CONFIGURE.md)
 - [Use guide](docs/USE.md)

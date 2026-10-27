@@ -236,7 +236,8 @@ def test_live_summary_reads_instance_id_so_the_duplicate_skip_is_excused():
         properties = {"maxRecordCount": 2000}
 
         def query(self, where, out_fields, **kwargs):
-            assert "instance_id" in out_fields.split(",")
+            if not kwargs.get("out_statistics"):  # the grouped MAX reads only the group field
+                assert "instance_id" in out_fields.split(",")
             if kwargs.get("result_offset"):
                 return Result([])
             return Result([Feature({"task_full_name": "\\Task Dash", "run_status": "Success",
