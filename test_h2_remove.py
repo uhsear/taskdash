@@ -340,3 +340,115 @@ def test_a_protected_group_is_skipped_not_cleared(capsys):
     assert remove.remove(_gis(log, group=group), MANIFEST, apply=True, task_name="T") == 1
     assert "g1" not in _deletes(log) and not any(c[1] == "g1" for c in log if c[0] == "protect")
     assert "delete protection is on" in capsys.readouterr().out
+
+
+# ------------------------------------------------------------------ remove: other computers still publish
+
+class RunsTable:
+    def __init__(self, hosts=(), error=None):
+        self.hosts, self.error, self.wheres = hosts, error, []
+
+    def query(self, where, **kwargs):
+        self.wheres.append(where)
+        if self.error:
+            raise RuntimeError(self.error)
+        return SimpleNamespace(features=[SimpleNamespace(attributes={"host_name": h}) for h in self.hosts])
+
+
+def _shared(monkeypatch, runs, tmp_path):
+    path, _ = _args(tmp_path)
+    (tmp_path / setup.MANIFEST_FILE).write_text(json.dumps(MANIFEST), encoding="utf-8")
+    config = {**json.loads(path.read_text()), "rules": {"profiles": []}, "host_name_override": "OWNER-PC"}
+    path.write_text(json.dumps(config), encoding="utf-8")
+    log = []
+    monkeypatch.setattr(remove, "connect_agol", lambda config: _gis(log))
+    monkeypatch.setattr(remove, "get_tables", lambda item: {"CollectorRuns": runs} if runs else {})
+    monkeypatch.setattr(remove, "get_host_name", lambda config: "OWNER-PC")
+    return path, log
+
+
+def test_apply_refuses_while_another_computer_has_a_recent_run(tmp_path, monkeypatch):
+    runs = RunsTable(hosts=["SECOND-PC"])
+    path, log = _shared(monkeypatch, runs, tmp_path)
+    with pytest.raises(SystemExit, match="SECOND-PC") as exc:
+        remove.main(["--config", str(path), "--apply"])
+    assert "Retire a computer" in str(exc.value) and log == []
+    assert "host_name <> 'OWNER-PC'" in runs.wheres[0] and "started_utc >= TIMESTAMP" in runs.wheres[0]
+
+
+def test_check_mode_warns_about_another_computer_and_still_lists(tmp_path, monkeypatch, capsys):
+    path, log = _shared(monkeypatch, RunsTable(hosts=["SECOND-PC"]), tmp_path)
+    assert remove.main(["--config", str(path)]) == 0
+    out = capsys.readouterr().out
+    assert "WARNING" in out and "SECOND-PC" in out and "Would delete" in out and log == []
+
+
+def test_apply_goes_on_when_only_this_computer_published(tmp_path, monkeypatch):
+    path, log = _shared(monkeypatch, RunsTable(hosts=["owner-pc"]), tmp_path)
+    assert remove.main(["--config", str(path), "--apply"]) == 0
+    assert "svc1" in _deletes(log)
+
+
+def test_apply_refuses_when_the_runs_table_cannot_be_read(tmp_path, monkeypatch):
+    path, log = _shared(monkeypatch, RunsTable(error="timed out"), tmp_path)
+    with pytest.raises(SystemExit, match="Cannot check"):
+        remove.main(["--config", str(path), "--apply"])
+    assert log == []
+
+
+def test_a_service_without_a_runs_table_is_not_blocked(tmp_path, monkeypatch):
+    path, log = _shared(monkeypatch, None, tmp_path)
+    assert remove.main(["--config", str(path), "--apply"]) == 0
+    assert "svc1" in _deletes(log)
+
+
+# ------------------------------------------------------------------ remove: config ids and next steps
+
+def _with_ids(monkeypatch, tmp_path, **gis_objects):
+    path, log = _shared(monkeypatch, None, tmp_path)
+    config = json.loads(path.read_text())
+    config["arcgis"].update({"item_id": "svc1", "view_item_id": "view1", "dashboard_id": "dash1",
+                             "test_item_id": "other-test-service", "profile": "taskdash"})
+    path.write_text(json.dumps(config), encoding="utf-8")
+    monkeypatch.setattr(remove, "connect_agol", lambda c: _gis(log, **gis_objects))
+    return path, log
+
+
+def test_apply_backs_up_the_config_and_empties_the_ids_of_deleted_items(tmp_path, monkeypatch, capsys):
+    path, _ = _with_ids(monkeypatch, tmp_path)
+    assert remove.main(["--config", str(path), "--apply"]) == 0
+    arcgis = json.loads(path.read_text())["arcgis"]
+    assert (arcgis["item_id"], arcgis["view_item_id"], arcgis["dashboard_id"]) == ("", "", "")
+    # An id that the manifest does not list is not ours to empty; other keys stay.
+    assert arcgis["test_item_id"] == "other-test-service" and arcgis["profile"] == "taskdash"
+    assert len(list(tmp_path.glob("TaskDash.config.json.bak_setup_*"))) == 1
+    assert "Emptied the ids of the deleted items" in capsys.readouterr().out
+
+
+def test_check_mode_leaves_the_config_alone(tmp_path, monkeypatch):
+    path, _ = _with_ids(monkeypatch, tmp_path)
+    before = path.read_text()
+    assert remove.main(["--config", str(path)]) == 0
+    assert path.read_text() == before and list(tmp_path.glob("*.bak_setup_*")) == []
+
+
+def test_an_id_stays_when_its_item_was_skipped(tmp_path, monkeypatch):
+    log = []
+    path, _ = _with_ids(monkeypatch, tmp_path, view1=RemoveItem(log, "view1", delete_error="refused"))
+    assert remove.main(["--config", str(path), "--apply"]) == 1
+    arcgis = json.loads(path.read_text())["arcgis"]
+    # The view could not be deleted, so the service stays too; only the dashboard went.
+    assert arcgis["dashboard_id"] == "" and arcgis["view_item_id"] == "view1" and arcgis["item_id"] == "svc1"
+
+
+def test_next_steps_forget_the_sign_ins_before_the_task_goes_and_quote_pip_for_powershell(capsys):
+    remove.print_next_steps("My Task")
+    lines = [line.strip() for line in capsys.readouterr().out.splitlines()]
+    order = [next(i for i, line in enumerate(lines) if needle in line)
+             for needle in ("signin --forget --apply", "signin --forget --for-task-account --apply",
+                            "Unregister-ScheduledTask", "pip uninstall taskdash")]
+    assert order == sorted(order)
+    pip = lines[order[-1]]
+    # A quoted path followed by arguments is a parse error in PowerShell unless the call operator leads.
+    assert pip.startswith('& "') and pip.endswith('" -m pip uninstall taskdash')
+    assert 'Unregister-ScheduledTask -TaskName "My Task"' in " ".join(lines)

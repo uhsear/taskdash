@@ -102,13 +102,13 @@ def test_recent_changes_help_explains_detection_time_and_acknowledged_notes():
 def test_collector_runs_column_is_named_email_sent_with_the_newest_48_caption(build):
     widget = _by_name(build())["Collector Runs"]
     labels = {c["fieldName"]: c["title"] for c in widget["columnSettings"]}
-    assert labels["alert_sent"] == "Email sent"
+    assert labels["alert_sent"] == "E-mail sent"
     assert "Newest 48. Read Error" in widget["topCaption"]
     assert "Two days of hourly runs" not in widget["topCaption"]
     shows = dash.HELP["Collector Runs"][0]
     # round7 wording-email-sent-help / collector_interactions-email-sent-help-incomplete: the
     # daily send is not conditional on health, and realert/changed also send.
-    assert "Email sent is Yes" in shows and "7 AM daily check" in shows
+    assert "E-mail sent is Yes" in shows and "7 AM daily check" in shows
 
 
 # ------------------------------------------------------------------ indicators-other-warnings-help-says-runs

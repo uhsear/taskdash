@@ -68,7 +68,7 @@ def publish_world(monkeypatch, tmp_path):
     monkeypatch.setattr(publish, "connect_agol", lambda cfg: object())
     monkeypatch.setattr(publish, "ensure_service", lambda gis, cfg, target: item)
     monkeypatch.setattr(publish, "get_tables", lambda i: {})
-    monkeypatch.setattr(publish, "check_schema_drift", lambda tables: None)
+    monkeypatch.setattr(publish, "check_schema_drift", lambda tables, *a: None)
     monkeypatch.setattr(publish, "check_source_sharing", lambda *a: None)
     monkeypatch.setattr(publish, "check_release_sharing", lambda *a: None)
     monkeypatch.setattr(publish, "collect_everything", collect_everything)

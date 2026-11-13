@@ -45,7 +45,11 @@ def test_every_installer_switch_in_the_rotate_guide_is_a_real_parameter():
 def test_the_guide_states_the_reset_fact_and_the_keyring_service():
     text = ROTATE.read_text(encoding="utf-8")
     assert "A reset is not a change" in text
-    assert "taskdash-smtp" in text and "ProfileManager().create('taskdash'" in text
+    assert "taskdash-smtp" in text
+    # The sign-in is rotated by the commands, not by a hard-coded profile name and runas.
+    assert "ProfileManager" not in text
+    for command in ("signin --apply", "signin --for-task-account --apply", "preflight --as-task --apply"):
+        assert command in text, command
 
 
 @pytest.mark.parametrize("name", ["README.md", "docs/UPGRADE.md", "docs/TROUBLESHOOTING.md",

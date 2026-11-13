@@ -1,4 +1,4 @@
-"""TaskDash install checker: one line per check, `[ok]`, `[!!]` or `[--]`, each `[!!]` ending with the fix.
+"""TaskDash install checker: one line per check, `[ok]`, `[w]`, `[!!]` or `[--]`, each `[!!]` ending with the fix.
 
 Driver: manual, before the first scheduled run and after any config, account or task change
 Source: the TaskDash config, the local Task Scheduler, ArcGIS Online and the SMTP relay
@@ -10,20 +10,23 @@ one `wevtutil sl` command, and `--as-task --apply`, which registers and removes 
     python taskdash_preflight.py --enable-event-log     # show the Task Scheduler log state and the fix
     python taskdash_preflight.py --enable-event-log --apply [--max-size-mb 64]
     python taskdash_preflight.py --config-diff          # unknown, renamed and absent config keys; exit 0
+    python taskdash_preflight.py --describe             # tasks with no description, and a starter file; exit 0
     python taskdash_preflight.py --as-task [--apply]    # run every check as the task account (taskdash_astask)
 
 The sign-in hand-off file is stored and deleted only by a run with `--consume-handoff`, which
 `--as-task` passes to its child. A plain run never changes it.
 
-Exit code: 0 when no check failed, else 1. One line is a warning that does NOT set exit 1: the
-tested-scale line. It prints `[!!]` but begins "WARNING"; a larger install may work, and exiting 1
-would block a working install from automation. A config warning is treated the same way. Every other
-`[!!]` line sets exit 1.
+Exit code: 0 when no check failed, else 1. A warning prints `[w]` and never sets exit 1: it names
+something to look at, such as the tested-scale line (a larger install may work, and exiting 1 would
+block a working install from automation) or a config warning. Every `[!!]` line sets exit 1.
 
 `[--]` means "does not apply, or not set up yet": a check the config turns off, `--offline`, and a
 fresh install that has no service id, dashboard id or collector task yet. It never sets exit 1.
 A missing collector task counts as "not set up" only while the service id is empty. After that it is
 a WARNING, because a normal window cannot see a task of another account.
+
+A check that cannot run because an earlier one failed prints `[--] <check>: needs: <that check>` and is not
+counted, so one cause is one problem.
 
 A crash inside one check becomes `[!!] <check>: <ExceptionType>: <message>`, and the next check still runs.
 """
@@ -46,11 +49,12 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 import taskdash_collect as collect
 import taskdash_metrics as metrics
 from taskdash_common import (
-    DEFAULT_CHUNK_SIZE,
+    CONFIG_DEFAULTS,
     DEFAULT_CONFIG_FILE,
-    DEFAULT_POWERSHELL_TIMEOUT_SECONDS,
     SCHEMA_VERSION,
     TASKDASH_VERSION,
+    command_text,
+    config_default,
     config_diff,
     arcgis_version_warning,
     connect_agol,
@@ -60,6 +64,7 @@ from taskdash_common import (
     legacy_mail_warnings,
     load_config,
     load_mail_settings,
+    mail_failure_hint,
     normalize_text,
     powershell_language_mode,
     run_powershell_json,
@@ -67,14 +72,8 @@ from taskdash_common import (
     see_troubleshooting,
     system32_exe,
 )
-from taskdash_dashboard import (
-    DEFAULT_COLLECTOR_INTERVAL_MINUTES,
-    DEFAULT_COLLECTOR_TASK_NAME,
-    DEFAULT_HEARTBEAT_IGNORE_DAYS,
-    DEFAULT_PORTAL_URL,
-    DEFAULT_RETENTION_DAYS,
-)
-from taskdash_handoff import consume_handoff
+from taskdash_dashboard import DEFAULT_COLLECTOR_TASK_NAME
+from taskdash_handoff import _bare_name, consume_handoff, handoff_waiting, handoff_waiting_text
 from taskdash_setup import INSTALL_KEYS
 from taskdash_publish import (
     OPTIONAL_TABLES,
@@ -94,7 +93,7 @@ from taskdash_publish import (
 )
 
 OK, FAIL, SKIP, WARN = "ok", "fail", "skip", "warn"
-MARKS = {OK: "[ok]", FAIL: "[!!]", SKIP: "[--]", WARN: "[!!]"}
+MARKS = {OK: "[ok]", FAIL: "[!!]", SKIP: "[--]", WARN: "[w]"}
 
 EVENT_LOG_NAME = collect.OPERATIONAL_LOG_NAME
 # Windows ships this log at 1 MB (10 MB on some builds) and overwrites the oldest events when it
@@ -102,11 +101,8 @@ EVENT_LOG_NAME = collect.OPERATIONAL_LOG_NAME
 # 1 to 2 KB per event that is up to ~2 MB/day, so 64 MB holds about a month: the default
 # history.days_back window survives a collector outage of a few weeks.
 RECOMMENDED_LOG_MB = 64
-# Both forms: a wheel install has the taskdash command, a folder install has the scripts.
-EVENT_LOG_FIX = ("taskdash preflight --enable-event-log --apply (folder install: "
-                 "python taskdash_preflight.py --enable-event-log --apply)")
-MIGRATE_FIX = ("taskdash collect --migrate --apply (folder install: "
-               "python taskdash_publish.py --migrate --apply)")
+EVENT_LOG_FIX = command_text("preflight", "--enable-event-log", "--apply")
+MIGRATE_FIX = command_text("collect", "--migrate", "--apply")
 
 # What was run at the reference install. Beyond it TaskDash is untested, not known to fail.
 TESTED_TASK_COUNT = 29
@@ -115,6 +111,7 @@ TESTED_MIN_REPEAT_SECONDS = 3600
 # Portal privilege -> what TaskDash does with it.
 REQUIRED_PRIVILEGES = (
     ("portal:user:createItem", "create items"),
+    ("portal:publisher:publishFeatures", "publish hosted feature layers"),
     ("portal:user:createGroup", "create groups"),
     ("portal:user:shareToGroup", "share items to groups"),
     ("features:user:edit", "edit features"),
@@ -172,7 +169,7 @@ def check_privileges(ctx: Context) -> Result:
     if missing:
         return FAIL, ("account lacks privilege(s): " + ", ".join(missing)
                       + ". Ask an organization administrator to add them to the account's role.")
-    return OK, "account can create items, create groups, share to groups and edit features"
+    return OK, "account can create items, publish hosted feature layers, create groups, share to groups and edit features"
 
 
 def read_log_state(log_name: str = EVENT_LOG_NAME) -> Tuple[bool, int]:
@@ -202,9 +199,9 @@ def check_event_log(ctx: Context) -> Result:
 
 
 def check_tasks(ctx: Context) -> Result:
-    timeout = int((ctx.config or {}).get("powershell_timeout_seconds", 180))
+    timeout = int((ctx.config or {}).get("powershell_timeout_seconds", config_default("powershell_timeout_seconds")))
     scheduler = (ctx.config or {}).get("scheduler") or {}
-    exclude = scheduler.get("exclude_microsoft_tasks", True)
+    exclude = scheduler.get("exclude_microsoft_tasks", config_default("scheduler.exclude_microsoft_tasks"))
     ctx.tasks = collect.collect_tasks(timeout, exclude)
     if ctx.tasks:
         return OK, f"{len(ctx.tasks)} task definition(s) readable"
@@ -214,6 +211,10 @@ def check_tasks(ctx: Context) -> Result:
         return OK, "Task Scheduler is readable; no task outside \\Microsoft\\ exists yet"
     return FAIL, ("Task Scheduler returned no tasks. Run from the account the collector runs as, "
                   "in a session that can read Task Scheduler.")
+
+
+HIDDEN_TASKS_NOTE = ("A normal window can miss tasks that other accounts own, so before you change a key, "
+                     "run this check again from an administrator window or with --as-task.")
 
 
 def check_log_folders(ctx: Context) -> Result:
@@ -230,7 +231,57 @@ def check_log_folders(ctx: Context) -> Result:
     if bad:
         return FAIL, ("log folder(s) missing or unreadable: " + "; ".join(bad)
                       + ". Fix the path in metrics.log_directory_overrides or grant this account read access.")
+    unmatched = metrics.unmatched_override_keys(overrides, [t.get("task_full_name") for t in ctx.tasks or ()])
+    if unmatched and ctx.tasks:
+        return WARN, ("WARNING: metrics.log_directory_overrides key(s) match no task: " + ", ".join(map(repr, unmatched))
+                      + ". A key is the full task path, like '\\Folder\\Task'. The case does not matter. "
+                      + HIDDEN_TASKS_NOTE)
     return OK, f"{len(overrides)} configured log folder(s) exist and are readable"
+
+
+def check_descriptions(ctx: Context) -> Result:
+    """workflow_descriptions.json: unknown or mistyped keys, bad values, and keys that name no task."""
+    if not (runtime_dir() / "workflow_descriptions.json").exists():
+        return SKIP, "no workflow_descriptions.json; tasks show their Windows Description"
+    problems: List[str] = []
+    descriptions = collect.load_descriptions(warnings=problems)
+    scheduler = (ctx.config or {}).get("scheduler") or {}
+    if ctx.tasks:
+        key_problems = collect.description_key_warnings(
+            descriptions, [t for t in ctx.tasks if collect.should_include_task(t, scheduler)])
+        problems += key_problems + ([HIDDEN_TASKS_NOTE] if key_problems else [])
+    if problems:
+        return WARN, "workflow_descriptions.json has problems. Fix each one:\n       " + "\n       ".join(problems)
+    return OK, f"workflow_descriptions.json holds {len(descriptions)} description(s), no problems"
+
+
+MAX_SUGGESTED_ROOTS = 5
+
+
+def _suggested_log_roots(ctx: Context) -> List[str]:
+    """The folders that hold the monitored tasks' scripts, which is where their logs usually are."""
+    scheduler = (ctx.config or {}).get("scheduler") or {}
+    folders = {ntpath.dirname(collect.classify_command_target(task.get("primary_executable"),
+                                                              task.get("primary_arguments"))[0])
+               for task in ctx.tasks or ()
+               if collect.should_include_task(task, scheduler)}
+    return sorted(folder for folder in folders if folder)
+
+
+def check_log_roots(ctx: Context) -> Result:
+    roots = [normalize_text(root) for root in ((ctx.config or {}).get("metrics") or {}).get("log_roots") or ()]
+    roots = [root for root in roots if root]
+    if roots:
+        return OK, f"metrics.log_roots lists {len(roots)} folder(s); logs are read only inside them"
+    suggested = _suggested_log_roots(ctx)
+    hint = ""
+    if suggested:
+        shown = ", ".join(f'"{folder}"' for folder in suggested[:MAX_SUGGESTED_ROOTS])
+        more = len(suggested) - MAX_SUGGESTED_ROOTS
+        hint = f" The monitored tasks' scripts sit in: {shown}{f' and {more} more' if more > 0 else ''}."
+    return WARN, ("WARNING: metrics.log_roots is empty, so a task author can make TaskDash read, and mail, "
+                  "the logs of any folder. List the folders that hold your logs in metrics.log_roots. "
+                  "See 'Limit where TaskDash reads logs' in docs/CONFIGURE.md." + hint)
 
 
 def probe_smtp(mail: Dict[str, Any]) -> None:
@@ -250,23 +301,58 @@ def probe_smtp(mail: Dict[str, Any]) -> None:
             smtp.ehlo()
 
 
+def _is_example_address(value: Any) -> bool:
+    """The shipped placeholder, as an address or a host name: example.com and its subdomains."""
+    text = normalize_text(value).lower()
+    return text == "example.com" or text.endswith(("@example.com", ".example.com"))
+
+
 def check_smtp(ctx: Context) -> Result:
-    if not (ctx.config or {}).get("alerting", {}).get("enabled"):
+    alerting = (ctx.config or {}).get("alerting", {})
+    if not alerting.get("enabled"):
         return SKIP, "alerting.enabled is not true"
+    recipients = [r for r in (alerting.get("to") or []) if normalize_text(r)]
+    if not recipients:
+        # Otherwise the first real failure exits 1 with nobody told, which is what alerts are for.
+        return FAIL, ("alerting is enabled but alerting.to has no address, so nobody would receive an "
+                      "alert. Add at least one address to alerting.to, or set alerting.enabled to false.")
     mail = load_mail_settings(ctx.config)
     if mail is None:
         return FAIL, ("alerting is enabled but the mail settings are unusable (see the WARNING above). "
                       "Fix the smtp block or alerting.mail_config_path, or set alerting.enabled to false.")
+    # Mirrors send_email: the legacy file never turns SSL on, so only the strict smtp block can.
+    encrypted = bool((mail.get("strict tls") and mail.get("use ssl")) or mail.get("use tls", True))
+    if not encrypted and mail.get("smtp username") and mail.get("smtp password"):
+        return FAIL, ("the mail login would send its password in plain text: neither STARTTLS nor SSL is on. "
+                      "Set smtp.starttls to true (or smtp.ssl to true), and clear smtp.allow_plaintext_auth. "
+                      "Or clear smtp.user to send without a login.")
+    smtp = ctx.config.get("smtp") or {}
+    placeholders = (["alerting.to"] if any(_is_example_address(r) for r in recipients) else [])
+    placeholders += [f"smtp.{key}" for key in ("host", "from", "user") if _is_example_address(smtp.get(key))]
+    placeholder_note = (f"WARNING: {', '.join(placeholders)} still hold example.com placeholders, so alerts "
+                        "would go nowhere real. Put the real values in the config.")
+    if "smtp.host" in placeholders:
+        # The probe below would fail on the placeholder host and hide this note: say it instead.
+        # FAIL, like an empty alerting.to: with a placeholder host no alert can ever be sent.
+        return FAIL, placeholder_note + " (smtp.host is a placeholder, so no connection was tried)"
     try:
         probe_smtp(mail)
     except (OSError, smtplib.SMTPException) as exc:  # ssl.SSLError is an OSError
-        return FAIL, (f"cannot reach {mail['smtp server']}:{mail.get('smtp port', 587)}: "
-                      f"{type(exc).__name__}: {exc}. Check smtp.host, smtp.port, the firewall and that "
-                      "the relay's certificate is trusted.")
+        reason = f"{type(exc).__name__}: {exc}"
+        # A server without STARTTLS answered; blaming the firewall would send the admin the wrong way.
+        fix = (mail_failure_hint(reason) if "STARTTLS" in reason else
+               "Check smtp.host, smtp.port, the firewall and that the relay's certificate is trusted.")
+        return FAIL, f"cannot reach {mail['smtp server']}:{mail.get('smtp port', 587)}: {reason}. {fix}"
     answered = f"{mail['smtp server']} answered EHLO (nothing sent, no login)"
+    notes = []
     if not mail.get("strict tls"):
-        return WARN, "WARNING: " + " WARNING: ".join(legacy_mail_warnings(mail)) + f" ({answered})"
-    return OK, answered
+        notes.append("WARNING: " + " WARNING: ".join(legacy_mail_warnings(mail)))
+    if not encrypted:
+        notes.append("WARNING: neither STARTTLS nor SSL is on, so alert mail, which names tasks and log "
+                     "lines, crosses the network in plain text. Set smtp.starttls to true if the server allows it.")
+    if placeholders:
+        notes.append(placeholder_note)
+    return (WARN, " ".join(notes) + f" ({answered})") if notes else (OK, answered)
 
 
 def _service_not_set_up(ctx: Context) -> Optional[Result]:
@@ -280,7 +366,7 @@ def _service_not_set_up(ctx: Context) -> Optional[Result]:
                       "'collect --apply' refuses. Put the feature layer's item id back in "
                       f"arcgis.{service_key('prod')}. " + see_troubleshooting("The service is not in the config"))
     return SKIP, (f"no arcgis.{service_key('prod')} configured yet. 'taskdash setup --apply' creates the "
-                  "service and fills the id in (folder install: python taskdash_setup.py --apply).")
+                  "service and fills the id in.")
 
 
 def check_service(ctx: Context) -> Result:
@@ -383,9 +469,8 @@ def check_sharing(ctx: Context) -> Result:
     return OK, f"service is private where a view exists and {len(urls)} table(s) refused an anonymous query"
 
 
-DASHBOARD_FIX = ("Rebuild it with: taskdash dashboard --target prod --apply (folder install: python "
-                 "taskdash_dashboard.py --target prod --apply). See 'Rebuild or move the ArcGIS items' in "
-                 "docs/TROUBLESHOOTING.md.")
+DASHBOARD_FIX = (f"Rebuild it with: {command_text('dashboard', '--target', 'prod', '--apply')}. "
+                 "See 'Rebuild or move the ArcGIS items' in docs/TROUBLESHOOTING.md.")
 
 
 def _dashboard_view_ids(item: Any) -> set:
@@ -398,6 +483,34 @@ def _dashboard_view_ids(item: Any) -> set:
                + ((definition.get("mobileView") or {}).get("widgets") or []))
     sources = [(d or {}).get("dataSource") or {} for w in widgets for d in (w or {}).get("datasets") or []]
     return {s.get("itemId") for s in sources if s.get("type") == "layerDataSource"}
+
+
+# item.access, narrowest first. A dashboard shared more widely than its view shows some viewers no data.
+_ACCESS_RANK = {"private": 0, "shared": 1, "org": 2, "public": 3}
+
+
+def _shared_group_ids(item: Any) -> Optional[set]:
+    """The ids of the groups the item is shared with, or None when the item cannot say."""
+    shared_with = getattr(item, "shared_with", None)
+    return None if shared_with is None else {g.id for g in shared_with.get("groups") or []}
+
+
+def dashboard_sharing_gaps(dash: Any, view: Any) -> List[str]:
+    """Why people who can open the dashboard may still see nothing, from the sharing of the two items."""
+    access = getattr(dash, "access", None)
+    if access == "private":
+        return ["it is shared with nobody, so only its owner can open it"]
+    if view is None:
+        return []
+    view_access = getattr(view, "access", None)
+    if access in _ACCESS_RANK and view_access in _ACCESS_RANK and _ACCESS_RANK[access] > _ACCESS_RANK[view_access]:
+        return [f"it is shared more widely ('{access}') than its view ('{view_access}'), so some people "
+                "who open it see no data"]
+    if access == view_access == "shared":
+        dash_groups, view_groups = _shared_group_ids(dash), _shared_group_ids(view)
+        if dash_groups is not None and view_groups is not None and dash_groups - view_groups:
+            return ["it is shared with a group that the view is not shared with, so that group sees no data"]
+    return []
 
 
 def check_dashboard(ctx: Context) -> Result:
@@ -417,6 +530,7 @@ def check_dashboard(ctx: Context) -> Result:
     view_id = normalize_text(agol.get(view_key("prod")))
     if view_id and view_id not in _dashboard_view_ids(item):
         problems.append(f"its data sources do not read the view {view_id}")
+    problems += dashboard_sharing_gaps(item, ctx.gis.content.get(view_id) if view_id else None)
     if problems:
         return WARN, f"WARNING: dashboard {dash_id}: " + "; ".join(problems) + f". {DASHBOARD_FIX}"
     return OK, f"dashboard {dash_id} exists, is not public" + (" and reads the view" if view_id else "")
@@ -523,6 +637,51 @@ def check_admin_account(ctx: Context) -> Result:
                       f"other accounts' tasks. {fix}")
     return FAIL, (f"task account '{user}' is not in the local Administrators group, so it misses other "
                   f"accounts' tasks and cannot log on as a batch job. {fix}")
+
+
+def check_collector_install(ctx: Context) -> Result:
+    """The collector task must run this install's folder: it reads that folder's config and writes
+    its logs there. A task left from another install, or moved, publishes with the wrong settings."""
+    if ctx.tasks is None:
+        return FAIL, "task definitions were not read (see the task check above), so the task's action is unknown."
+    name, task = _collector_task(ctx)
+    if task is None:
+        return _no_collector_task(ctx, name)
+    home = ntpath.normcase(ntpath.normpath(str(home_dir())))
+    workdir = collect.strip_wrapping_quotes(task.get("primary_working_directory"))
+    program = collect.strip_wrapping_quotes(task.get("primary_executable"))
+    problems = []
+    if not workdir:
+        problems.append("it sets no working folder, so it starts where it finds no config")
+    elif ntpath.normcase(ntpath.normpath(workdir)) != home:
+        problems.append(f"it starts in '{workdir}', not in this install's folder '{home_dir()}'")
+    # install_task.ps1 -Python <interpreter> registers cmd.exe and names run_taskdash.cmd in the arguments.
+    arguments = ntpath.normcase(collect.strip_wrapping_quotes(task.get("primary_arguments")).replace('"', ""))
+    via_wrapper = (ntpath.basename(ntpath.normcase(program)) == "cmd.exe"
+                   and (home + "\\run_taskdash.cmd") in arguments)
+    if program and not via_wrapper and not ntpath.normcase(program).startswith(home + "\\"):
+        problems.append(f"it runs '{program}', which is outside this install's folder")
+    if problems:
+        # -Replace keeps the old action and folder, so only a fresh registration repairs them.
+        return WARN, (f"WARNING: task '{name}': " + "; ".join(problems) + f". Remove it with "
+                      f"Unregister-ScheduledTask -TaskName '{name}' from an elevated prompt, then register it "
+                      "again with install_task.ps1 -Apply from this install (without -Replace), or run "
+                      "preflight from the install folder the task uses.")
+    return OK, f"task '{name}' runs {program or 'its program'} in this install's folder"
+
+
+def check_handoff(ctx: Context) -> Result:
+    waiting = handoff_waiting()
+    if waiting is None:
+        return SKIP, "no sign-in hand-off file is waiting"
+    _, task = _collector_task(ctx) if ctx.tasks is not None else ("", None)
+    runs_as = normalize_text((task or {}).get("run_as_user"))
+    wrong = ""
+    if waiting["account"] and runs_as and _bare_name(waiting["account"]) != _bare_name(runs_as):
+        wrong = (f" The collector task runs as {runs_as}, so it will not store the file. Make it again with "
+                 f"{command_text('signin', '--for-task-account', '--task-user', runs_as, '--apply')}.")
+    return WARN, (f"WARNING: {handoff_waiting_text()}{wrong} Start the collector task. "
+                  + see_troubleshooting("A hand-off file is waiting"))
 
 
 def check_scale(ctx: Context) -> Result:
@@ -703,35 +862,54 @@ def read_owner(path: str) -> Tuple[str, str]:
         kernel.LocalFree(descriptor)
 
 
-def untrusted_owner(path: str) -> Optional[str]:
+def untrusted_owner(path: str) -> Optional[Result]:
     """None when SYSTEM, Administrators, TrustedInstaller or a direct member of Administrators owns the
-    folder, else the warning. A folder's owner can always change its permissions, so a locked folder
-    owned by an ordinary user is not locked against that user."""
+    folder. Otherwise (status, message): FAIL for an owner that is not an administrator, WARN when the
+    owner or the Administrators group cannot be read. A folder's owner can always change its
+    permissions, so a locked folder owned by an ordinary user is not locked against that user."""
     fix = f'From an elevated prompt run: icacls "{path}" /setowner *S-1-5-32-544'
     try:
         sid, name = read_owner(path)
     except OSError as exc:
-        return (f"WARNING: could not read the owner of {path} ({type(exc).__name__}). Run (Get-Acl '{path}').Owner "
-                "in PowerShell and confirm that it is Administrators or an administrator.")
+        return WARN, (f"WARNING: could not read the owner of {path} ({type(exc).__name__}). Run (Get-Acl '{path}').Owner "
+                      "in PowerShell and confirm that it is Administrators or an administrator.")
     if sid in TRUSTED_OWNER_SIDS:
         return None
     try:
         members = read_admin_members()
     except (OSError, SystemExit, subprocess.SubprocessError):
-        members = []
+        return WARN, (f"WARNING: could not list the Administrators group, so this check cannot tell whether "
+                      f"{name or sid}, the owner of {path}, is an administrator. Run net localgroup Administrators.")
     if name and any(member.lower() == name.lower() for member, kind in members if kind.lower() == "user"):
         return None
-    return (f"WARNING: {path} is owned by {name or sid}, which is not SYSTEM, Administrators or a direct member "
-            "of the Administrators group. The owner can always change the folder's permissions, so a non-admin "
-            "owner could put code there that the task runs as an administrator. If this account is an "
-            f"administrator through a group, this is safe. {fix}")
+    groups = [member for member, kind in members if kind.lower() == "group"]
+    if groups:
+        # The usual domain setup: the account is an administrator through a group, which this list cannot expand.
+        return WARN, (f"WARNING: {path} is owned by {name or sid}, which is not a direct member of the "
+                      f"Administrators group; confirm that it belongs through {', '.join(groups[:5])}. {fix}")
+    return FAIL, (f"{path} is owned by {name or sid}, which is not SYSTEM, Administrators or a direct member "
+                  "of the Administrators group. The owner can always change the folder's permissions, so a "
+                  f"non-admin owner could put code there that the task runs as an administrator. {fix}")
+
+
+# Placeholders and the system installer: an entry for one of them grants no ordinary user a write right.
+IGNORED_WRITERS = {"creator owner", "trustedinstaller", "s-1-3-0"}
+IGNORED_SIDS = ("S-1-3-0",)
+
+
+def other_writers(acl_text: str, path: str) -> List[str]:
+    """Principals that hold a write right but are not SYSTEM, Administrators or a placeholder. Each must
+    still be an administrator itself. A DENY entry grants nothing, so it is skipped."""
+    skip = TRUSTED_PRINCIPALS | IGNORED_WRITERS | local_names(TRUSTED_SIDS + IGNORED_SIDS)
+    return list(dict.fromkeys(who for who, name, rights in acl_entries(acl_text, path)
+                              if "DENY" not in rights and name not in skip and rights & WRITE_RIGHTS))
 
 
 def check_install_folder_acl(ctx: Context) -> Result:
     # The task runs as an administrator and loads code and config from here, so a folder that
-    # ordinary users can write to is a way to run code as an administrator.
+    # a non-administrator can write to is a way to run code as an administrator.
     path = str(home_dir())
-    by_hand = f'icacls "{path}" and confirm that Users, Authenticated Users and Everyone are not listed.'
+    by_hand = f'icacls "{path}" and confirm that only SYSTEM, Administrators and administrators can write.'
     try:
         acl = read_acl(path)
     except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
@@ -740,15 +918,35 @@ def check_install_folder_acl(ctx: Context) -> Result:
     if not writers and not trusted_listed(acl, path):
         return WARN, (f"WARNING: could not recognise SYSTEM or Administrators in the permissions of {path}, so "
                       f"this check cannot tell who can write there. Run {by_hand}")
-    if not writers:
-        owner_warning = untrusted_owner(path)
-        if owner_warning:
-            return WARN, owner_warning
-        return OK, f"{path} gives no write right to Users, Authenticated Users or Everyone"
-    return FAIL, (f"{path} lets {', '.join(writers)} write. The task runs as an administrator and loads code "
-                  "and config from this folder, so any of them could run code as an administrator. From an "
-                  f'elevated prompt run: icacls "{path}" /inheritance:r /grant:r "*S-1-5-18:(OI)(CI)F" '
-                  '"*S-1-5-32-544:(OI)(CI)F" /remove:g "*S-1-5-32-545" "*S-1-5-11" "*S-1-1-0"')
+    if writers:
+        return FAIL, (f"{path} lets {', '.join(writers)} write. The task runs as an administrator and loads code "
+                      "and config from this folder, so any of them could run code as an administrator. From an "
+                      f'elevated prompt run: icacls "{path}" /inheritance:r /grant:r "*S-1-5-18:(OI)(CI)F" '
+                      '"*S-1-5-32-544:(OI)(CI)F" /remove:g "*S-1-5-32-545" "*S-1-5-11" "*S-1-1-0"')
+    # The task account needs Modify here (log and state writes), so it is never an outsider.
+    _, task = _collector_task(ctx) if ctx.tasks is not None else ("", None)
+    user = normalize_text((task or {}).get("run_as_user")).lower()
+    candidates = [who for who in other_writers(acl, path)
+                  if not user or (who.lower() != user and ("\\" in user or who.split("\\")[-1].lower() != user))]
+    if candidates:
+        try:
+            members = read_admin_members()
+            admins = {member.lower() for member, _ in members}
+        except (OSError, SystemExit, subprocess.SubprocessError) as exc:
+            return WARN, (f"WARNING: could not list the Administrators group ({type(exc).__name__}), so this check "
+                          f"cannot tell whether {', '.join(candidates)} may write to {path}. Run net localgroup "
+                          "Administrators and confirm that each is a member.")
+        outsiders = [who for who in candidates if who.lower() not in admins]
+        groups = [member for member, kind in members if kind.lower() == "group"]
+        if outsiders and groups:
+            return WARN, (f"WARNING: {path} lets {', '.join(outsiders)} write, and they are not direct members of the "
+                          f"Administrators group. Confirm that each belongs through {', '.join(groups[:5])}. "
+                          "Write access to this folder is control of the task account, which runs as an administrator.")
+        if outsiders:
+            return FAIL, (f"{path} lets {', '.join(outsiders)} write, and they are not administrators. Write access "
+                          "to this folder is control of the task account, which runs as an administrator. From an "
+                          f'elevated prompt run: icacls "{path}" /grant:r "{outsiders[0]}:(OI)(CI)RX"')
+    return untrusted_owner(path) or (OK, f"{path} is writable only by SYSTEM, Administrators and administrators")
 
 
 CHECKS: Sequence[Tuple[str, bool, Callable[[Context], Result]]] = (
@@ -758,6 +956,8 @@ CHECKS: Sequence[Tuple[str, bool, Callable[[Context], Result]]] = (
     ("event log", False, check_event_log),
     ("task definitions", False, check_tasks),
     ("log folders", False, check_log_folders),
+    ("descriptions", False, check_descriptions),
+    ("log roots", False, check_log_roots),
     ("smtp", True, check_smtp),
     ("service", True, check_service),
     ("view", True, check_view),
@@ -766,6 +966,8 @@ CHECKS: Sequence[Tuple[str, bool, Callable[[Context], Result]]] = (
     ("delete protection", True, check_delete_protection),
     ("collector logon type", False, check_logon_type),
     ("collector account", False, check_admin_account),
+    ("collector install", False, check_collector_install),
+    ("hand-off", False, check_handoff),
     ("tested scale", False, check_scale),
     ("health check", False, check_health_check),
     ("host name", False, check_host_name),
@@ -786,13 +988,28 @@ def run_check(check: Callable[[Context], Result], ctx: Context) -> Result:
         return FAIL, f"{type(exc).__name__}: {text}"
 
 
+# A check that cannot answer when the check it reads from failed. It prints [--] and is not counted, so a
+# missing sign-in shows as one problem, on the credentials line.
+NEEDS = {
+    "privileges": "credentials", "service": "credentials", "view": "credentials", "sharing": "credentials",
+    "dashboard": "credentials", "delete protection": "credentials",
+    "collector logon type": "task definitions", "collector account": "task definitions",
+    "collector install": "task definitions", "tested scale": "task definitions",
+}
+
+
 def run_preflight(args: argparse.Namespace) -> int:
     ctx = Context(args)
     results = [("config", *run_check(check_config, ctx))]
     if ctx.config is not None:
         for name, needs_network, check in CHECKS:
-            skipped = needs_network and args.offline
-            results.append((name, *((SKIP, "skipped with --offline") if skipped else run_check(check, ctx))))
+            root = NEEDS.get(name)
+            if needs_network and args.offline:
+                results.append((name, SKIP, "skipped with --offline"))
+            elif root and any(n == root and status == FAIL for n, status, _ in results):
+                results.append((name, SKIP, f"needs: {root}. Fix the {root} line above first."))
+            else:
+                results.append((name, *run_check(check, ctx)))
     for name, status, message in results:
         emit(f"{MARKS[status]} {name}: {message}")
     failed = sum(status == FAIL for _, status, _ in results)
@@ -803,50 +1020,15 @@ def run_preflight(args: argparse.Namespace) -> int:
 
 # --------------------------------------------------------------------------- config diff
 
-# What the code uses when a known key is absent, worded as the Default column of docs/CONFIGURE.md
-# (a test compares the two). Taken from the code, never from TaskDash.config.example.json, whose
-# values are placeholders. The sign-in password keys are left out: nothing about them is printed.
-CONFIG_DEFAULTS: Dict[str, Any] = {
-    "host_name_override": "empty",
-    "host_previous_names": "empty",
-    "powershell_timeout_seconds": DEFAULT_POWERSHELL_TIMEOUT_SECONDS,
-    "arcgis.url": DEFAULT_PORTAL_URL,
-    "arcgis.profile": "empty", "arcgis.username": "empty", "arcgis.username_env": "empty",
-    "arcgis.item_id": "empty", "arcgis.test_item_id": "empty",
-    "arcgis.view_item_id": "empty", "arcgis.test_view_item_id": "empty", "arcgis.dashboard_id": "empty",
-    "arcgis.service_description": "TaskDash - scheduled task monitoring",
-    "arcgis.service_tags": "taskdash,monitoring,scheduled tasks",
-    "arcgis.dashboard_tags": "taskdash,monitoring",
-    "alerting.enabled": "false", "alerting.to": "empty", "alerting.mail_config_path": "empty",
-    "alerting.healthcheck_url": "empty", "alerting.include_log_tail": "true",
-    "alerting.dashboard_url": "empty", "alerting.heartbeat_hour": "none",
-    "alerting.realert_hours": 24, "alerting.shared_cause_min_tasks": 3,
-    "alerting.incident_digest_hours": 6, "alerting.maintenance_windows": "empty list",
-    "scheduler.task_name_regex": "empty", "scheduler.task_path_regex": "empty",
-    "scheduler.action_regex": "empty", "scheduler.exclude_task_name_regex": "empty",
-    "scheduler.exclude_microsoft_tasks": "true", "scheduler.include_disabled": "true",
-    "scheduler.exclude_command_target_types": "empty list",
-    "scheduler.interactive_required_pattern": collect.DEFAULT_INTERACTIVE_REQUIRED_PATTERN,
-    "scheduler.collector_task_name": DEFAULT_COLLECTOR_TASK_NAME,
-    "scheduler.collector_interval_minutes": DEFAULT_COLLECTOR_INTERVAL_MINUTES,
-    "scheduler.overdue_grace_minutes": f"{collect.DEFAULT_OVERDUE_GRACE_MINUTES:g}",
-    "scheduler.heartbeat_ignore_after_days": DEFAULT_HEARTBEAT_IGNORE_DAYS,
-    "history.max_events_per_run": 5000, "history.days_back": 30, "history.first_run_max_events": 30000,
-    "metrics.days_back": 30, "metrics.max_log_files_per_task": metrics.DEFAULT_MAX_LOG_FILES_PER_TASK,
-    "metrics.max_lines_per_file": metrics.DEFAULT_MAX_LINES_PER_FILE,
-    "metrics.log_directory_overrides": "empty object", "metrics.log_roots": "empty list",
-    "metrics.tasks": "empty object",
-    "upload.chunk_size": DEFAULT_CHUNK_SIZE,
-    "retention.runs_days": DEFAULT_RETENTION_DAYS, "retention.metrics_days": DEFAULT_RETENTION_DAYS,
-    "retention.changes_days": 365,
-    "logging.log_dir": "empty", "logging.max_log_age_days": 30,
-    "smtp.host": "empty", "smtp.port": 587, "smtp.from": "empty", "smtp.user": "empty",
-    "smtp.starttls": "true", "smtp.ssl": "true when smtp.port is 465, else false",
-    "smtp.allow_plaintext_auth": "false",
-    "privacy.hide_command_lines": "true", "privacy.hide_sample_lines": "true",
-    "privacy.hide_accounts": "true", "privacy.hide_paths": "true",
-    "rules.profiles": "none (required)",
-}
+def default_wording(value: Any) -> str:
+    """A code default as the Default column of docs/CONFIGURE.md words it."""
+    if value is None:
+        return "none"
+    if isinstance(value, bool):
+        return str(value).lower()
+    if isinstance(value, (str, list, dict)) and not value:
+        return {str: "empty", list: "empty list", dict: "empty object"}[type(value)]
+    return f"{value:g}" if isinstance(value, float) else str(value)
 
 
 def run_config_diff(config_arg: str) -> int:
@@ -877,9 +1059,42 @@ def run_config_diff(config_arg: str) -> int:
         emit(f"  {old} -> {new}" if new else f"  {old}")
     emit("Absent keys (TaskDash uses the default shown):")
     for key in diff["absent"]:
-        emit(f"  {key} (default: {CONFIG_DEFAULTS[key]})" if key in CONFIG_DEFAULTS else f"  {key}")
+        emit(f"  {key} (default: {default_wording(CONFIG_DEFAULTS[key])})" if key in CONFIG_DEFAULTS else f"  {key}")
     if not diff["absent"]:
         emit("  none")
+    return 0
+
+
+def undescribed_tasks(tasks: Sequence[Dict[str, Any]], scheduler: Dict[str, Any],
+                      descriptions: Dict[str, Any]) -> List[str]:
+    """Names of the monitored tasks that have no description in workflow_descriptions.json and no
+    Description of their own in Task Scheduler."""
+    return sorted({normalize_text(task.get("task_name")) for task in tasks
+                   if collect.should_include_task(task, scheduler)
+                   and not normalize_text(task.get("description"))
+                   and not collect.lookup_description(descriptions, *collect.description_names(task))},
+                  key=str.lower)
+
+
+def run_describe(config_arg: str) -> int:
+    """Print the monitored tasks that have no description, then a starter workflow_descriptions.json with an
+    empty text for each. Reads the config and Task Scheduler; writes no file."""
+    try:
+        config, _ = load_config(Path(config_arg) if config_arg else None, defer_warnings=True)
+        scheduler = config.get("scheduler") or {}
+        tasks = collect.collect_tasks(int(config.get("powershell_timeout_seconds", config_default("powershell_timeout_seconds"))),
+                                      scheduler.get("exclude_microsoft_tasks", config_default("scheduler.exclude_microsoft_tasks")))
+        names = undescribed_tasks(tasks, scheduler, collect.load_descriptions(warnings=[]))
+    except (Exception, SystemExit) as exc:  # noqa: BLE001 - say what to fix, not a traceback
+        emit(f"Cannot list the tasks: {type(exc).__name__}: {exc.code if isinstance(exc, SystemExit) else exc}")
+        return 1
+    if not names:
+        emit("Every monitored task has a description.")
+        return 0
+    emit(f"{len(names)} monitored task(s) have no description. The dashboard shows 'No description yet' for them.")
+    emit("Save the text below as workflow_descriptions.json in the TaskDash folder, or add its lines to your "
+         "file, then write a sentence for each task. TaskDash ignores a task whose text stays empty.")
+    emit(json.dumps({"tasks": {name: "" for name in names}}, indent=2, ensure_ascii=False))
     return 0
 
 
@@ -911,13 +1126,16 @@ def run_enable_event_log(apply: bool, max_size_mb: Optional[int]) -> int:
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Read-only TaskDash install checker.",
+        prog="taskdash preflight",
+        description="Check a TaskDash install. Changes nothing unless you pass --apply with "
+                    "--enable-event-log or --as-task.",
         allow_abbrev=False,  # --apply must never be reachable by abbreviation
     )
-    parser.add_argument("--config", default="", help="Path to TaskDash.config.json.")
+    parser.add_argument("--config", default="", metavar="PATH",
+                        help="Config file. Default: the install's config.")
     parser.add_argument("--offline", action="store_true",
-                        help="Skip every check that needs the network (credentials, privileges, smtp, "
-                             "service, view, sharing).")
+                        help="Skip every check that needs the network ("
+                             + ", ".join(name for name, needs_network, _ in CHECKS if needs_network) + ").")
     parser.add_argument("--enable-event-log", action="store_true",
                         help="Show the Task Scheduler log state and the command that enables it. "
                              "Runs alone, without the other checks.")
@@ -928,6 +1146,9 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--config-diff", action="store_true",
                         help="Compare the config keys with the keys TaskDash knows: unknown, absent "
                              "and renamed. Prints no secret value. Runs alone.")
+    parser.add_argument("--describe", action="store_true",
+                        help="List the monitored tasks that have no description and print a starter "
+                             "workflow_descriptions.json for them. Reads only. Runs alone.")
     parser.add_argument("--as-task", action="store_true",
                         help="Run the preflight checks as the task account, in a temporary task, without "
                              "runas. Prints the plan and changes nothing without --apply. Runs alone.")
@@ -935,8 +1156,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
                         help="With --as-task: the account to run as, DOMAIN\\name. Default: the account "
                              "of the collector task.")
     parser.add_argument("--consume-handoff", action="store_true",
-                        help="Store and delete the sign-in hand-off file before the credentials check, as the "
-                             "collector does. --as-task passes it to the check it runs; do not use it by hand.")
+                        help=argparse.SUPPRESS)  # internal: --as-task passes it to the check it runs
     parser.add_argument("--version", action="version", version=f"TaskDash {TASKDASH_VERSION}")
     args = parser.parse_args(argv)
     if (args.apply and not (args.enable_event_log or args.as_task)) or (args.max_size_mb and not args.enable_event_log):
@@ -944,6 +1164,9 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
                      "only with --enable-event-log.")
     if args.task_user and not args.as_task:
         parser.error("--task-user only works with --as-task.")
+    if args.describe and (args.enable_event_log or args.config_diff or args.as_task or args.offline or args.apply
+                          or args.consume_handoff):
+        parser.error("--describe runs alone. Drop the other flags except --config.")
     if args.as_task and (args.enable_event_log or args.config_diff):
         parser.error("--as-task runs alone. Drop --enable-event-log and --config-diff.")
     if args.consume_handoff and (args.enable_event_log or args.config_diff or args.as_task):
@@ -960,6 +1183,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parse_args(argv)
     if args.config_diff:
         return run_config_diff(args.config)
+    if args.describe:
+        return run_describe(args.config)
     if args.as_task:
         from taskdash_astask import run_as_task  # only --as-task needs pywin32
         return run_as_task(args)

@@ -27,8 +27,8 @@ MAIL_SECRET = "mail-never-print-1b6"
 URL = "https://org.example.com"
 ACCOUNT = r"EXAMPLE\svc-demo"
 LOCAL_MACHINE_FLAG = 0x4
-ALL_PRIVILEGES = ["portal:user:createItem", "portal:user:createGroup", "portal:user:shareToGroup",
-                  "features:user:edit"]
+ALL_PRIVILEGES = ["portal:user:createItem", "portal:publisher:publishFeatures", "portal:user:createGroup",
+                  "portal:user:shareToGroup", "features:user:edit"]
 
 
 def _xor(data: bytes) -> bytes:

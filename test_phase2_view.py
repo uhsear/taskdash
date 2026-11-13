@@ -163,6 +163,14 @@ def test_apply_refetches_the_view_until_its_tables_appear(world, monkeypatch):
     assert publish.create_view(world.gis, world.item, {}, apply=True) is world.view
 
 
+def test_a_live_view_with_the_same_title_gets_the_rename_steps_and_no_create_call(world):
+    world.gis.content.search = lambda *a, **k: [SimpleNamespace(id="liveview", title="TaskDash_view")]
+    with pytest.raises(SystemExit, match=r"already exists \(liveview\).*rename its title.*_old") as raised:
+        publish.create_view(world.gis, world.item, {}, apply=True)
+    assert "half built" in str(raised.value)
+    assert not [entry for entry in world.log if entry[0] == "create_view"]
+
+
 def test_view_whose_tables_never_appear_stops_with_the_fix(world, monkeypatch):
     monkeypatch.setattr(publish, "get_tables", lambda item: {})
     monkeypatch.setattr(publish.time, "sleep", lambda s: None)
@@ -213,7 +221,7 @@ def test_switches_off_hide_only_definition_hash_and_still_lock_capabilities(worl
 
 
 def test_run_create_view_refuses_when_a_view_is_configured(world):
-    args = SimpleNamespace(target="test", apply=True)
+    args = SimpleNamespace(target="test", apply=True, replace=False)
     with pytest.raises(SystemExit, match="test_view_item_id"):
         publish.run_create_view({"arcgis": {"test_view_item_id": VIEW}}, args)
 

@@ -41,7 +41,7 @@ def world(monkeypatch):
     monkeypatch.setattr(publish, "connect_agol", lambda cfg: object())
     monkeypatch.setattr(publish, "ensure_service", lambda gis, cfg, target: seen["item"])
     monkeypatch.setattr(publish, "get_tables", lambda i: {})
-    monkeypatch.setattr(publish, "check_schema_drift", lambda tables: None)
+    monkeypatch.setattr(publish, "check_schema_drift", lambda tables, *a: None)
     monkeypatch.setattr(publish, "check_source_sharing", lambda *a: None)
     monkeypatch.setattr(publish, "check_release_sharing", lambda *a: None)
     monkeypatch.setattr(publish, "publish",
@@ -111,6 +111,11 @@ def _documented_invocations(text):
     return pairs
 
 
+# `collect --help` hides these on purpose (`taskdash setup` replaces them for a new install), but the
+# guide names them for a view rebuild. test_audit_w3c checks that the parser accepts them.
+HIDDEN_FLAGS = {("collect", "--create-view"), ("collect", "--replace")}
+
+
 def test_every_command_and_flag_in_the_upgrade_guide_exists(capsys):
     pairs = _documented_invocations(UPGRADE.read_text(encoding="utf-8"))
     commands = {command for command, _ in pairs}
@@ -119,7 +124,7 @@ def test_every_command_and_flag_in_the_upgrade_guide_exists(capsys):
     assert commands <= known, f"not a taskdash command: {sorted(commands - known)}"
     help_flags = {command: _help_flags(command, capsys) for command in commands}
     for command, flag in sorted(pairs, key=str):
-        if flag is not None:
+        if flag is not None and (command, flag) not in HIDDEN_FLAGS:
             assert flag in help_flags[command], f"taskdash {command} has no {flag}"
 
 

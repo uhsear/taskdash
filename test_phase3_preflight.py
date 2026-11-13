@@ -236,7 +236,7 @@ class FakeSmtp:
 
 
 def smtp_config(**block):
-    return {"alerting": {"enabled": True}, "smtp": {"host": "relay.example.invalid", "from": "a@example.invalid", **block}}
+    return {"alerting": {"enabled": True, "to": ["ops@example.invalid"]}, "smtp": {"host": "relay.example.invalid", "from": "a@example.invalid", **block}}
 
 
 def test_smtp_skipped_when_alerting_off():
@@ -260,7 +260,7 @@ def test_smtp_legacy_mail_file_keeps_its_unverified_tls(monkeypatch, tmp_path):
     mail_file = tmp_path / "mail.json"
     mail_file.write_text(json.dumps({"email settings": {"smtp server": "relay.example.invalid",
                                                         "from address": "a@example.invalid"}}), encoding="utf-8")
-    ctx = make_ctx({"alerting": {"enabled": True, "mail_config_path": str(mail_file)}})
+    ctx = make_ctx({"alerting": {"enabled": True, "to": ["ops@example.invalid"], "mail_config_path": str(mail_file)}})
     status, message = pf.check_smtp(ctx)
     assert status == pf.WARN
     assert "deprecated" in message and "not verified" in message and "smtp block" in message
@@ -268,15 +268,16 @@ def test_smtp_legacy_mail_file_keeps_its_unverified_tls(monkeypatch, tmp_path):
     assert FakeSmtp.log[2] == ("starttls", None)
 
 
-def test_smtp_legacy_file_with_login_and_no_tls_warns_separately(monkeypatch, tmp_path):
+def test_smtp_legacy_file_with_login_and_no_tls_fails(monkeypatch, tmp_path):
     FakeSmtp.log = []
     monkeypatch.setattr(smtplib, "SMTP", FakeSmtp)
     mail_file = tmp_path / "mail.json"
     mail_file.write_text(json.dumps({"email settings": {
         "smtp server": "relay.example.invalid", "from address": "a@example.invalid",
         "use tls": False, "smtp username": "u", "smtp password": "secret-pw"}}), encoding="utf-8")
-    status, message = pf.check_smtp(make_ctx({"alerting": {"enabled": True, "mail_config_path": str(mail_file)}}))
-    assert status == pf.WARN and "plain text" in message and "secret-pw" not in message
+    status, message = pf.check_smtp(make_ctx({"alerting": {"enabled": True, "to": ["ops@example.invalid"], "mail_config_path": str(mail_file)}}))
+    assert status == pf.FAIL and "plain text" in message and "secret-pw" not in message
+    assert FakeSmtp.log == [], "the check must stop before it connects"
 
 
 def test_smtp_unreachable_and_unusable(monkeypatch):
@@ -285,7 +286,7 @@ def test_smtp_unreachable_and_unusable(monkeypatch):
     monkeypatch.setattr(smtplib, "SMTP", refuse)
     status, message = pf.check_smtp(make_ctx(smtp_config()))
     assert status == pf.FAIL and "ConnectionRefusedError" in message and "smtp.host" in message
-    status, message = pf.check_smtp(make_ctx({"alerting": {"enabled": True}}))
+    status, message = pf.check_smtp(make_ctx({"alerting": {"enabled": True, "to": ["ops@example.invalid"]}}))
     assert status == pf.FAIL and "unusable" in message
 
 
@@ -711,6 +712,7 @@ def fake_icacls(monkeypatch, stdout=LOCKED_ACL, returncode=0, stderr="", calls=N
     monkeypatch.setattr(pf.subprocess, "run", run)
     monkeypatch.setattr(pf, "home_dir", lambda: HOME)
     monkeypatch.setattr(pf, "read_owner", lambda path: ("S-1-5-32-544", "BUILTIN\\Administrators"))
+    monkeypatch.setattr(pf, "read_admin_members", lambda: [("HOST\\svc-td", "User")])
 
 
 @pytest.mark.parametrize("sid", list(pf.TRUSTED_OWNER_SIDS))
@@ -723,24 +725,30 @@ def test_install_folder_owned_by_system_administrators_or_trustedinstaller_is_ok
 def test_install_folder_owned_by_a_direct_administrator_is_ok(monkeypatch):
     fake_icacls(monkeypatch)
     monkeypatch.setattr(pf, "read_owner", lambda path: ("S-1-5-21-1-2-3-1001", "HOST\\Admin"))
-    monkeypatch.setattr(pf, "read_admin_members", lambda: [("HOST\\admin", "User")])
+    monkeypatch.setattr(pf, "read_admin_members", lambda: [("HOST\\admin", "User"), ("HOST\\svc-td", "User")])
     assert pf.check_install_folder_acl(make_ctx())[0] == pf.OK
 
 
-@pytest.mark.parametrize("members", [[("HOST\\other", "User")], [("HOST\\Admin", "Group")], OSError("no group")])
-def test_install_folder_owned_by_an_unconfirmed_account_warns_with_the_setowner_fix(monkeypatch, members):
+@pytest.mark.parametrize("members", [[("HOST\\other", "User")]])
+def test_install_folder_owned_by_a_non_administrator_fails_with_the_setowner_fix(monkeypatch, members):
     # A locked folder still belongs to its owner, who can grant themselves write again at any time.
     fake_icacls(monkeypatch)
     monkeypatch.setattr(pf, "read_owner", lambda path: ("S-1-5-21-1-2-3-1001", "HOST\\Admin"))
-
-    def admins():
-        if isinstance(members, Exception):
-            raise members
-        return members
-    monkeypatch.setattr(pf, "read_admin_members", admins)
+    monkeypatch.setattr(pf, "read_admin_members", lambda: members + [("HOST\\svc-td", "User")])
     status, message = pf.check_install_folder_acl(make_ctx())
-    assert status == pf.WARN and message.startswith("WARNING") and "HOST\\Admin" in message
+    assert status == pf.FAIL and "HOST\\Admin" in message
     assert f'icacls "{HOME}" /setowner *S-1-5-32-544' in message
+
+
+def test_install_folder_owner_with_an_unreadable_administrators_group_only_warns(monkeypatch):
+    fake_icacls(monkeypatch)
+    monkeypatch.setattr(pf, "read_owner", lambda path: ("S-1-5-21-1-2-3-1001", "HOST\\Admin"))
+
+    def unreadable():
+        raise OSError("no group")
+    monkeypatch.setattr(pf, "read_admin_members", unreadable)
+    status, message = pf.check_install_folder_acl(make_ctx())
+    assert status == pf.WARN and message.startswith("WARNING") and "net localgroup Administrators" in message
 
 
 def test_install_folder_owner_unreadable_or_unresolved_still_warns(monkeypatch):
@@ -752,8 +760,9 @@ def test_install_folder_owner_unreadable_or_unresolved_still_warns(monkeypatch):
     status, message = pf.check_install_folder_acl(make_ctx())
     assert status == pf.WARN and "could not read the owner" in message
     monkeypatch.setattr(pf, "read_owner", lambda path: ("S-1-5-21-9-9-9-1234", ""))
-    monkeypatch.setattr(pf, "read_admin_members", lambda: [])
-    assert "S-1-5-21-9-9-9-1234" in pf.check_install_folder_acl(make_ctx())[1]
+    monkeypatch.setattr(pf, "read_admin_members", lambda: [("HOST\\svc-td", "User")])
+    status, message = pf.check_install_folder_acl(make_ctx())
+    assert status == pf.FAIL and "S-1-5-21-9-9-9-1234" in message
 
 
 def test_read_owner_reads_a_real_folder_through_the_win32_api():
@@ -779,6 +788,61 @@ def test_install_folder_acl_with_a_write_right_for_everyone_fails_with_the_icacl
     assert status == pf.FAIL and who in message and HOME in message
     assert "icacls" in message and "/inheritance:r" in message and "*S-1-5-32-545" in message
     assert "administrator" in message
+
+
+@pytest.mark.parametrize("rights", ["(OI)(CI)(F)", "(OI)(CI)(M)", "(W)"])
+def test_install_folder_acl_with_a_write_right_for_a_non_administrator_fails(monkeypatch, rights):
+    # The daily account gets Read & Execute only: a write right is control of the administrator task account.
+    fake_icacls(monkeypatch, LOCKED_ACL.replace("\n\n", f"\n           HOST\\daily:{rights}\n\n"))
+    status, message = pf.check_install_folder_acl(make_ctx())
+    assert status == pf.FAIL and "HOST\\daily" in message and "not administrators" in message
+    assert f'icacls "{HOME}" /grant:r "HOST\\daily:(OI)(CI)RX"' in message
+
+
+def test_install_folder_acl_with_a_read_only_daily_account_and_creator_owner_is_ok(monkeypatch):
+    acl = LOCKED_ACL.replace("\n\n", "\n           HOST\\daily:(OI)(CI)(RX)\n           CREATOR OWNER:(OI)(CI)(IO)(F)\n\n")
+    fake_icacls(monkeypatch, acl)
+    assert pf.check_install_folder_acl(make_ctx())[0] == pf.OK
+
+
+def test_install_folder_acl_with_an_unreadable_administrators_group_warns_about_other_writers(monkeypatch):
+    fake_icacls(monkeypatch)
+
+    def unreadable():
+        raise OSError("no group")
+    monkeypatch.setattr(pf, "read_admin_members", unreadable)
+    status, message = pf.check_install_folder_acl(make_ctx())
+    assert status == pf.WARN and "HOST\\svc-td" in message
+
+
+def test_install_folder_acl_accepts_a_task_account_that_is_an_administrator_through_a_group(monkeypatch):
+    # The usual domain setup: the task account holds Modify and is in no direct-member list.
+    fake_icacls(monkeypatch)
+    monkeypatch.setattr(pf, "read_admin_members", lambda: [("HOST\\Domain Admins", "Group"), ("HOST\\Admin", "User")])
+    assert pf.check_install_folder_acl(admin_ctx("HOST\\svc-td")) == (
+        pf.OK, f"{HOME} is writable only by SYSTEM, Administrators and administrators")
+    assert pf.check_install_folder_acl(admin_ctx("svc-td"))[0] == pf.OK
+
+
+def test_install_folder_acl_warns_for_another_group_admin_writer_and_never_asks_to_lower_the_task_account(monkeypatch):
+    acl = LOCKED_ACL.replace("\n\n", "\n           HOST\\daily:(OI)(CI)(M)\n\n")
+    fake_icacls(monkeypatch, acl)
+    monkeypatch.setattr(pf, "read_admin_members", lambda: [("HOST\\Domain Admins", "Group")])
+    status, message = pf.check_install_folder_acl(admin_ctx("HOST\\svc-td"))
+    assert status == pf.WARN and "HOST\\daily" in message and "Domain Admins" in message
+    assert "svc-td" not in message and "/grant:r" not in message
+    monkeypatch.setattr(pf, "read_admin_members", lambda: [("HOST\\Admin", "User")])
+    status, message = pf.check_install_folder_acl(admin_ctx("HOST\\svc-td"))
+    assert status == pf.FAIL and "HOST\\daily" in message and "svc-td" not in message
+
+
+def test_install_folder_owner_that_may_be_an_administrator_through_a_group_only_warns(monkeypatch):
+    fake_icacls(monkeypatch)
+    monkeypatch.setattr(pf, "read_owner", lambda path: ("S-1-5-21-1-2-3-1001", "HOST\\Admin"))
+    monkeypatch.setattr(pf, "read_admin_members", lambda: [("HOST\\Domain Admins", "Group"), ("HOST\\svc-td", "User")])
+    status, message = pf.check_install_folder_acl(make_ctx())
+    assert status == pf.WARN and message.startswith("WARNING") and "Domain Admins" in message
+    assert f'icacls "{HOME}" /setowner *S-1-5-32-544' in message
 
 
 def test_install_folder_acl_names_a_loose_entry_on_the_first_line_too(monkeypatch):
@@ -874,14 +938,19 @@ def test_warnings_do_not_set_exit_one(tmp_path, monkeypatch, capsys):
 
 def local_fakes(monkeypatch, tasks=None):
     fake_wevtutil(monkeypatch)
+    monkeypatch.setattr(pf, "handoff_waiting", lambda: None)
+    monkeypatch.setattr(pf, "home_dir", lambda: HOME)
     monkeypatch.setattr(taskdash_collect, "collect_tasks",
                         lambda timeout, *_: tasks if tasks is not None
-                        else [task("TaskDash Collector", "Password", run_as_user="HOST\\svc-td")])
+                        else [task("TaskDash Collector", "Password", run_as_user="HOST\\svc-td",
+                                   primary_working_directory=HOME, primary_executable=HOME + "\\venv\\Scripts\\taskdash.exe")])
     monkeypatch.setattr(pf, "read_admin_members", lambda: [("HOST\\svc-td", "User")])
     monkeypatch.setattr(pf, "powershell_language_mode", lambda: "FullLanguage")
     monkeypatch.setattr(pf.sys, "base_prefix", SHARED_PYTHON)
     monkeypatch.setattr(pf, "read_acl", lambda path: LOCKED_ACL)
     monkeypatch.setattr(pf, "read_owner", lambda path: ("S-1-5-32-544", "BUILTIN\\Administrators"))
+    # The descriptions check reads the repo's own workflow_descriptions.json otherwise.
+    monkeypatch.setattr(pf, "runtime_dir", lambda: pf.Path("no-such-folder"))
 
 
 def test_offline_makes_no_network_call(tmp_path, monkeypatch, capsys):
@@ -896,15 +965,17 @@ def test_offline_makes_no_network_call(tmp_path, monkeypatch, capsys):
     lines = capsys.readouterr().out.splitlines()
     skipped = [line for line in lines if line.startswith("[--]")]
     assert [line.split(":")[0] for line in skipped] == [
-        "[--] credentials", "[--] privileges", "[--] log folders",
-        "[--] smtp", "[--] service", "[--] view", "[--] sharing", "[--] dashboard", "[--] delete protection"]
+        "[--] credentials", "[--] privileges", "[--] log folders", "[--] descriptions",
+        "[--] smtp", "[--] service", "[--] view", "[--] sharing", "[--] dashboard", "[--] delete protection",
+        "[--] hand-off"]
     assert any(line.startswith("[ok] event log") for line in lines)
 
 
 def test_full_run_with_fakes_makes_no_write(tmp_path, monkeypatch, capsys):
     config_path = write_config(tmp_path, {"arcgis": {"item_id": "svc1", "view_item_id": "view1",
                                                       "dashboard_id": "dash1", "profile": "p1"},
-                                          "alerting": {"healthcheck_url": "https://hc.example/ping-id"}})
+                                          "alerting": {"healthcheck_url": "https://hc.example/ping-id"},
+                                          "metrics": {"log_roots": ["D:/Jobs"]}})
     config = json.loads(open(config_path, encoding="utf-8").read())
     gis = FakeGis(items={"svc1": FakeItem("svc1"), "view1": FakeItem("view1", "org"),
                          "dash1": fake_dashboard()})
@@ -916,7 +987,7 @@ def test_full_run_with_fakes_makes_no_write(tmp_path, monkeypatch, capsys):
     local_fakes(monkeypatch)
     assert pf.main(["--config", config_path]) == 0
     out = capsys.readouterr().out
-    assert "[!!]" not in out and out.count("[ok]") == 19 and "[--] smtp" in out and "ping-id" not in out
+    assert "[!!]" not in out and out.count("[ok]") == 21 and "[--] smtp" in out and "ping-id" not in out
     assert "[ok] dashboard" in out and "[ok] delete protection" in out
     assert "Preflight: 0 problem(s), 0 warning(s)." in out
 

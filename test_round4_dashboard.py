@@ -122,7 +122,7 @@ def test_metric_change_caption_says_where_the_no_usual_rows_sort(build):
 
 def test_metric_change_help_names_the_usually_logged_share():
     todo = dash.HELP["Metric Change"][2]
-    assert f"{int(dash.METRIC_CHANGE_USUALLY_LOGGED * 100)}% of its runs" in todo
+    assert f"{int(dash.METRIC_CHANGE_USUALLY_LOGGED * 100)}% of the task's recent runs" in todo
     assert "logs in most runs" not in todo
 
 
@@ -182,7 +182,7 @@ def test_status_help_files_stuck_and_blocked_under_warning():
 # ------------------------------------------------------------------ collector_tab-ack-setting-name-hides-other-notes
 
 def test_config_notes_help_says_to_use_a_word_unique_to_one_note():
-    todo = dash.HELP["Config Notes"][2]
+    todo = dash.HELP["Setting Notes"][2]
     assert "add the setting name" not in todo
     assert "appears only in that note" in todo
 
@@ -244,7 +244,7 @@ def test_duration_trend_empty_state_matches_task_detail_wording():
 
 def test_recent_failures_empty_state_names_host_and_task_not_filters():
     assert dash.EMPTY_STATES["Recent Failures"] == (
-        "No failed runs for the selected host or task in the saved history (up to 90 days). "
+        "No failed runs for the selected computer or task in the saved history (up to 90 days). "
         "Schedule and Status do not filter this list.")
 
 

@@ -5,13 +5,15 @@ Without -Apply it only renders and validates the XML and prints the task setting
 With -Apply it registers the task, then reads it back and checks the logon type.
 With -Replace, check mode also reads the existing task and runs every -Replace refusal below.
 
-    .\install_task.ps1 -InstallDir C:\TaskDash
-    .\install_task.ps1 -InstallDir C:\TaskDash -Apply
+    .\install_task.ps1 -InstallDir C:\TaskDash -Python C:\TaskDash\venv\Scripts\taskdash.exe
     .\install_task.ps1 -InstallDir C:\TaskDash -Python C:\TaskDash\venv\Scripts\taskdash.exe -Apply
+    .\install_task.ps1 -InstallDir C:\TaskDash -Apply
 
--InstallDir holds run_taskdash.cmd, and is also the working directory the task starts in.
--Python names the interpreter for run_taskdash.cmd (it becomes TASKDASH_PYTHON), or a
-taskdash.exe, which the task then runs as "taskdash collect --apply".
+-InstallDir is the working directory the task starts in. A folder install also holds run_taskdash.cmd,
+which TaskDash keeps as the wrapper of that install; the wheel does not ship it.
+-Python names a taskdash.exe, which the task then runs as "taskdash collect --apply", or the interpreter
+for run_taskdash.cmd (it becomes TASKDASH_PYTHON). Without -Python, the task runs run_taskdash.cmd when
+the folder holds it, else <InstallDir>\venv\Scripts\taskdash.exe, which a wheel install makes.
 
 -Replace rotates the task account's password. It registers the same XML over the existing task
 (-Force), for the same account and the same logon type, and asks for the new password. It keeps the
@@ -19,9 +21,11 @@ existing task's command, arguments, working directory, trigger and settings, so 
 or a changed schedule survives; -Python does not change them. It refuses when no task has that name,
 when the task runs as another account or logon type, or when it has no single program action. The
 account must match as DOMAIN\name, ignoring case; the name alone counts only when Task Scheduler
-reports no domain. Without -Replace, an existing task is an error.
+reports no domain. A different domain or computer name in front of the same account name is accepted,
+so a renamed computer's local account (OLD\svc, now NEW\svc) keeps its task; the task is registered
+again as the account that -User names. Without -Replace, an existing task is an error.
 
-    .\install_task.ps1 -InstallDir C:\TaskDash -User DOMAIN\svc-taskdash -Replace -Apply
+    .\install_task.ps1 -InstallDir C:\TaskDash -Python C:\TaskDash\venv\Scripts\taskdash.exe -User DOMAIN\svc-taskdash -Replace -Apply
 
 -Apply refuses early when the window is not elevated or the task account is not in the local
 Administrators group. Check mode reports both and still exits 0.
@@ -138,13 +142,20 @@ foreach ($problem in $problems) {
     Write-Host "WARNING: -Apply would refuse. $problem"
 }
 
+# The wheel does not ship run_taskdash.cmd, so a wheel install has only the venv's taskdash.exe to run.
+$venvExe = Join-Path $InstallDir "venv\Scripts\taskdash.exe"
+if (-not $Python -and -not (Test-Path -LiteralPath (Join-Path $InstallDir "run_taskdash.cmd") -PathType Leaf) -and
+        (Test-Path -LiteralPath $venvExe -PathType Leaf)) {
+    $Python = $venvExe
+}
+
 if ($Python -match '(?i)taskdash\.exe$') {
     $command = $Python
     $arguments = "collect --apply"
 } else {
     $wrapper = Join-Path $InstallDir "run_taskdash.cmd"
     if (-not (Test-Path -LiteralPath $wrapper -PathType Leaf)) {
-        Fail "run_taskdash.cmd is not in '$InstallDir'. Point -InstallDir at the folder that holds it, or pass -Python <path to taskdash.exe>."
+        Fail "Neither run_taskdash.cmd nor venv\Scripts\taskdash.exe is in '$InstallDir'. Point -InstallDir at the install folder, or pass -Python <path to taskdash.exe>."
     }
     if ($Python) {
         # Task Scheduler cannot set an environment variable for an action, so cmd sets it first.
@@ -205,7 +216,7 @@ $will = if ($Apply) { "will" } else { "would" }
 if ($EnableEventLog) { Write-Host "Event log:         $will run '$taskdashExe preflight --enable-event-log --apply' before registering" }
 if ($StartNow) { Write-Host "Start now:         $will start the task once after registering and wait up to 10 minutes for LastTaskResult" }
 if ($Replace) { Write-Host "Replace:           yes - the existing task is registered again with the new password and keeps its command, trigger and settings" }
-Write-Host "Trigger:          every 1 hour from $start, no end"
+Write-Host "Trigger:           every 1 hour from $start, no end"
 Write-Host "Limits:            2 hour run limit, no second instance, catch up a missed run"
 # Measured in a clean Windows: a standard account saw 170 of 229 tasks (not those other accounts
 # registered), and without 'Log on as a batch job' its every start failed at logon (event 104,
@@ -220,13 +231,23 @@ if ($Replace) {
         Fail "-Replace found no task named '$TaskName'. Run without -Replace to register it, or pass the right -TaskName."
     }
     # A new password must go to the same account and logon type. Anything else is a different task.
-    # The short name alone would let CORP\svc pass for a different PC\svc, so it is used only when
-    # Task Scheduler reports a bare name (the same rule as preflight's check_admin_account).
+    # With a prefix on both sides the account name must match. The prefix may differ only after a
+    # computer rename: the old prefix is a name this computer no longer has, and -User names this computer.
+    # CORP\svc and PC\svc are different accounts, so any other prefix change is refused.
+    # A bare name on only one side still has to equal the other side's account name.
     $existingUser = "$($existing.Principal.UserId)"
-    $sameAccount = if ($existingUser.Contains('\') -and $User.Contains('\')) { $existingUser -ieq $User }
+    $sameAccount = if ($existingUser.Contains('\') -and $User.Contains('\')) {
+                       $oldPrefix, $newPrefix = ($existingUser -split '\\')[0], ($User -split '\\')[0]
+                       ($existingUser -split '\\')[-1] -ieq ($User -split '\\')[-1] -and
+                       ($oldPrefix -ieq $newPrefix -or ($newPrefix -ieq $env:COMPUTERNAME -and
+                           $oldPrefix -ine $env:COMPUTERNAME -and $oldPrefix -ine $env:USERDOMAIN))
+                   }
                    else { $existingUser -notmatch '\\' -and ($existingUser -ieq ($User -split '\\')[-1]) }
     if (-not $sameAccount) {
-        Fail "Task '$TaskName' runs as '$existingUser', not '$User'. Pass -User $existingUser to rotate its password."
+        Fail "Task '$TaskName' runs as '$existingUser', not '$User'. Pass -User $existingUser to rotate its password. A different computer or domain name is accepted only after a computer rename, when -User starts with this computer's name."
+    }
+    if ($existingUser -ine $User -and $existingUser.Contains('\') -and $User.Contains('\')) {
+        Write-Host "NOTE: the task runs as '$existingUser'. It will be registered again as '$User', the same account name after a computer rename."
     }
     if ("$($existing.Principal.LogonType)" -ne $LogonType) {
         Fail "Task '$TaskName' logs on as '$($existing.Principal.LogonType)', not '$LogonType'. Pass -LogonType $($existing.Principal.LogonType), or delete the task with Unregister-ScheduledTask -TaskName '$TaskName' and register it again."
@@ -296,6 +317,9 @@ if ($LogonType -eq "Password") {
 }
 try {
     Register-ScheduledTask @register | Out-Null
+} catch {
+    # A wrong password is the usual cause. The raw error is a CIM exception that does not say so.
+    Fail "Windows refused to register '$TaskName': $($_.Exception.Message) Check that the password is the one for $User and that this window is elevated, then run this script again. Nothing was registered or changed."
 } finally {
     $plain = $null
     $register.Remove("Password")
@@ -315,5 +339,5 @@ if ($StartNow) {
     }
     $text = Get-TaskResultText $result
     if ($result -ne 0) { Fail "First run of '$TaskName': LastTaskResult $text" }
-    Write-Host "First run of '$TaskName': LastTaskResult $text Run 'taskdash status' to see the result in ArcGIS Online."
+    Write-Host "First run of '$TaskName': LastTaskResult $text Run '$taskdashExe status' to see the result in ArcGIS Online."
 }

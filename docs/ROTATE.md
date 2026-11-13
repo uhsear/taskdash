@@ -11,12 +11,14 @@ minutes per password.
 
 Run every command on the computer that runs the collector. Use the two lines from step 1 of
 [INSTALL.md](INSTALL.md) in each new PowerShell window. They set the folder and `$td`. Commands that
-change the scheduled task need a PowerShell window **as administrator**. The other commands run in
-your normal window.
+change the scheduled task, write to `C:\TaskDash` or install into its environment need a PowerShell
+window **as administrator**. Your own account has Read & Execute only on that folder, as step 1 of
+[INSTALL.md](INSTALL.md) explains, so such a command fails with access denied in a normal window.
+Read-only commands, such as `status`, run in your normal window.
 
-The commands below use `C:\TaskDash\venv`. If you installed into a cloned ArcGIS Pro environment,
-use `C:\TaskDash\proenv` in its place, as "Use a cloned ArcGIS Pro environment instead" in
-[INSTALL.md](INSTALL.md) describes.
+The commands below use `C:\TaskDash\venv`. In a cloned ArcGIS Pro environment, replace `C:\TaskDash\venv\Scripts\python.exe` with
+`C:\TaskDash\proenv\python.exe`. Then replace every other `venv` in a path with `proenv`, as "Use a
+cloned ArcGIS Pro environment instead" in [INSTALL.md](INSTALL.md) describes.
 
 ## A reset is not a change
 
@@ -39,30 +41,45 @@ do not know which one happened, treat it as a reset.
 
 Do this when the password of the ArcGIS account changes. Store the new password twice: once for
 yourself, and once for the task account. Each Windows account has its own Credential Manager.
+`taskdash signin` does both without `runas`, and it checks the account's privileges first, as the
+install does.
 
 1. Change the password of the ArcGIS account in ArcGIS Online first.
-2. In your normal window, run the create command. Replace `ARCGIS_URL` with your `arcgis.url` and
-   `ARCGIS_USER` with the ArcGIS account name. Type the new password at the `Password:` prompt. The
-   command replaces the old profile.
+2. In your normal window, run the check. It asks for the ArcGIS user name and the new password at
+   hidden prompts, signs in, and checks the account and its privileges. It saves nothing. Each line
+   that starts with `[!!]` ends with the fix.
 
    ```powershell
-   C:\TaskDash\venv\Scripts\python.exe -c "import getpass; from arcgis.gis import ProfileManager; ProfileManager().create('taskdash', 'ARCGIS_URL', 'ARCGIS_USER', getpass.getpass())"
+   & $td signin
    ```
 
-3. Run the check command. It must print the ArcGIS account name.
+   When every line starts with `[ok]`, store the sign-in. The command saves the profile under the
+   name in `arcgis.profile`, replaces the old one, and signs in with it to prove that it works.
 
    ```powershell
-   C:\TaskDash\venv\Scripts\python.exe -c "from arcgis.gis import GIS; print(GIS(profile='taskdash').users.me.username)"
+   & $td signin --apply
    ```
 
-4. Open a window as the task account. Windows asks for the task account's password.
+3. Open PowerShell as administrator. Run the two lines from step 1 of [INSTALL.md](INSTALL.md).
+   Then seal the sign-in for the task account. The first command changes nothing. The second asks
+   for the ArcGIS password again, and for the mail password if `smtp.user` is set. Press Enter to
+   skip the mail password. It writes `taskdash_handoff.bin` in the TaskDash folder, so a normal
+   window fails with access denied. Only the task account, SYSTEM and Administrators can read that
+   file.
 
    ```powershell
-   runas /user:DOMAIN\svc-taskdash powershell.exe
+   & $td signin --for-task-account
+   & $td signin --for-task-account --apply
    ```
 
-   In the new window, run the create command and the check command again. If `runas` fails, see
-   step 3 of [INSTALL.md](INSTALL.md). Close the window when you are done.
+4. In the same administrator window, run the check as the task account. It asks for the password
+   of the task account. Its output shows a line that starts `Stored the sign-in` before the `credentials` result. That line means the task
+   account saved the new sign-in and deleted the hand-off file.
+
+   ```powershell
+   & $td preflight --as-task --apply
+   ```
+
 5. In the administrator window, run the task once, and wait until the state is `Ready`.
 
    ```powershell
@@ -77,6 +94,16 @@ yourself, and once for the task account. Each Windows account has its own Creden
    ```powershell
    & $td status
    ```
+
+If the hand-off fails, see "The hand-off sign-in was kept" in
+[TROUBLESHOOTING.md](TROUBLESHOOTING.md). If a hardened task account lets you use `runas`, you can
+store the sign-in in that account's window instead. Open the window, then run `$td = "C:\TaskDash\venv\Scripts\taskdash.exe"`,
+`& $td signin` and `& $td signin --apply` there. Windows asks for the account's password. If `runas`
+fails, see step 3 of [INSTALL.md](INSTALL.md). Close the window when you are done.
+
+```powershell
+runas /user:DOMAIN\svc-taskdash powershell.exe
+```
 
 If the run fails, see "The stored sign-in does not work" in [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
 
@@ -93,18 +120,38 @@ config. Store the new password twice: once for yourself, and once for the task a
    C:\TaskDash\venv\Scripts\python.exe -m keyring set taskdash-smtp <smtp.user>
    ```
 
-3. Open a window as the task account, as in step 4 of the ArcGIS section. In that window, run the
-   same keyring command.
-4. In the same window, run the two lines from step 1 of [INSTALL.md](INSTALL.md). Then send a test
-   message. The first command changes nothing. The second sends one message to every address in
-   `alerting.to`. It exits 0 when the server accepts it.
+3. Open PowerShell as administrator. Run the two lines from step 1 of [INSTALL.md](INSTALL.md).
+   Then seal the mail password for the task account. The command writes `taskdash_handoff.bin` in
+   the TaskDash folder. There is no hand-off for the mail password alone.
+   The command signs in to ArcGIS first, so type the current ArcGIS password at the first prompt.
+   Type the new mail password at the second prompt. The command stores the same ArcGIS sign-in
+   again, which changes nothing. The first command changes nothing.
+
+   ```powershell
+   & $td signin --for-task-account
+   & $td signin --for-task-account --apply
+   ```
+
+4. In the same administrator window, run the check as the task account. It asks for the password
+   of the task account. The output shows the `Stored the sign-in` line, and the `smtp` line must not start with `[!!]`. That proves that
+   the task account can read a mail password. It does not prove that the mail server accepts it.
+
+   ```powershell
+   & $td preflight --as-task --apply
+   ```
+
+5. In your normal window, send a test message. It proves that the server accepts the new password.
+   It reads your own saved password, so it does not test the task account's copy. The first command
+   changes nothing. The second sends one message to every address in `alerting.to`. It exits 0 when
+   the server accepts it.
 
    ```powershell
    & $td test-alert
    & $td test-alert --apply
    ```
 
-5. Close the `runas` window. The next hourly run uses the new password.
+The next hourly run uses the new password. If you cannot use the hand-off, open a `runas` window as
+the task account, as in the ArcGIS section, and run the keyring command of step 2 there.
 
 If the test fails, see "The alert e-mail failed" in [TROUBLESHOOTING.md](TROUBLESHOOTING.md). The
 mail steps are in [CONFIGURE.md](CONFIGURE.md).
@@ -129,7 +176,8 @@ task stores the password. Until you register the task again, every run fails wit
    The output has a line `Replace: yes`. Check that `Runs as` names the task account. The check
    mode reads the existing task and runs the same refusals as `-Apply`. It stops with a message if no
    task has the name, the account or logon type differs, or the task has no single program action.
-   The account must match as `DOMAIN\name`, ignoring case. On success it prints `Would keep` lines for
+   The account name must match, ignoring case. The computer or domain name may differ only after a
+   computer rename. On success it prints `Would keep` lines for
    the action, trigger and settings, and a line that starts with `Replace checks passed`.
 3. Run the same command with ` -Apply` added at the end. The script asks for the new password of the
    task account. Type it at the prompt; it does not echo. The script then registers the same task
@@ -148,11 +196,12 @@ task stores the password. Until you register the task again, every run fails wit
    `-LogonType` that you used at the install. Without `-Replace`, the script refuses to touch an
    existing task.
 4. If an administrator reset the password, store the ArcGIS sign-in and the mail password of the task
-   account again. Open a `runas` window as the task account, and type the new password. Run the
-   create command and the check command of the ArcGIS section there. If you use mail, run the keyring
-   command of the mail section too. After a plain change, skip this step.
+   account again. Do steps 2 to 4 of the ArcGIS section. The hand-off in step 3 asks for the mail
+   password too, if `smtp.user` is set. The check in step 4 asks for the new task account
+   password. After a plain change, skip this step.
 5. Run the task once and check it, as in steps 5 and 6 of the ArcGIS section. `LastTaskResult` must
-   be `0`.
+   be `0`. Then run `& $td preflight --as-task --apply` in the administrator window. It runs every
+   check as the task account, and it asks for the new password.
 
 If the task still fails, read "The scheduled task fails after a password change" in
 [TROUBLESHOOTING.md](TROUBLESHOOTING.md).

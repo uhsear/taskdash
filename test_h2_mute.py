@@ -104,7 +104,9 @@ def test_bounded_window_shows_its_end_and_logs_no_mute_warning(monkeypatch):
         {"task": "^Sync", "start": LONG_AGO, "end": "2026-09-26T00:00:00Z"}]}}
     inventory = [_inv("Sync A", attention_reason="Last run: Failed.")]
     assert publish.apply_mute_notes(inventory, config, NOW) == 0
-    assert inventory[0]["attention_reason"] == "Last run: Failed.; In maintenance until 2026-09-26 00:00 UTC"
+    # Local time, like the e-mail: the zone name is the machine's, so build the expected text the same way.
+    until = datetime(2026, 9, 26, tzinfo=timezone.utc).astimezone()
+    assert inventory[0]["attention_reason"] == f"Last run: Failed.; In maintenance until {until:%Y-%m-%d %H:%M %Z}"
     assert not any("muted" in line for line in lines)
 
 

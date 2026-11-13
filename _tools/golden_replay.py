@@ -15,7 +15,7 @@ metrics.log_directory_overrides in the replay config at a log snapshot taken wit
 
 "synthetic" replays tests/fixtures/synthetic_app_host_*.json against metric logs written for a frozen
 --now (a temp folder, metrics.days_back raised so the frozen logs never age out) and the prior inventory
-the host-01 fixture carries, so metrics and changes are filled. Its output is the committed
+each host fixture carries, so metrics and changes are filled. Its output is the committed
 tests/fixtures/synthetic_golden.json: inventory/runs/metrics/changes merged across hosts, alert per host.
 
 Approved list L is a JSON list of {"section", "key": {field: value, ...}, "field", "old", "new"}.
@@ -59,6 +59,8 @@ SYNTHETIC_FIXTURES = ("synthetic_app_host_01.json", "synthetic_app_host_02.json"
 # still be byte-identical on any machine. Only those are masked, so a date inside a log line or
 # task field still shows as a difference.
 _SINCE_IN_SUBJECT = re.compile(r"since (?:[A-Z][a-z]{2} \d\d )?\d\d:\d\d")
+# A first-run e-mail shows each failure's own last-run time, which is a local time as well.
+_OPEN_SINCE = re.compile(r"\(open since [^)]*\)")
 
 
 def _clean(rows: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -76,7 +78,8 @@ def replay(config: Dict[str, Any], fixture: Path, prior_inventory: Sequence[Dict
         prior = {taskdash_common.normalize_text(r.get("task_full_name")): r for r in prior_inventory}
         changes = publish.detect_task_changes(
             prior, collected["inventory"], collected["host_name"], now.isoformat(), {},
-            publish.privacy_hides(privacy, "hide_command_lines"), publish.privacy_hides(privacy, "hide_accounts"))
+            publish.privacy_hides(privacy, "hide_command_lines"), publish.privacy_hides(privacy, "hide_accounts"),
+            publish.privacy_hides(privacy, "hide_paths"))
         alert = publish.compose_alert(collected, config, alert_state or {}, now)
     return {
         "inventory": _clean(collected["inventory"]),
@@ -85,8 +88,9 @@ def replay(config: Dict[str, Any], fixture: Path, prior_inventory: Sequence[Dict
         "changes": _clean(changes),
         "alert": {"send": alert["send"], "reason": alert["reason"],
                   "subject": _SINCE_IN_SUBJECT.sub("since <TIME>", alert["subject"]),
-                  "body": alert["body"].replace(f"{now.astimezone():%Y-%m-%d %H:%M}", "<TIME>")
-                                       .replace(f"<TIME> {now.astimezone().tzname()}", "<TIME> <TZ>")},
+                  "body": _OPEN_SINCE.sub("(open since <TIME> <TZ>)", alert["body"])
+                          .replace(f"{now.astimezone():%Y-%m-%d %H:%M}", "<TIME>")
+                          .replace(f"<TIME> {now.astimezone().tzname()}", "<TIME> <TZ>")},
     }
 
 
@@ -110,14 +114,16 @@ def replay_synthetic(fixtures_dir: Path, now_text: str = SYNTHETIC_NOW, seed: in
             fixture = fixtures_dir / name
             payload = _read_json(fixture, "fixture")
             prior: List[Dict[str, Any]] = []
-            if "prior_tasks" in payload:
-                before = {k: v for k, v in payload.items() if k != "prior_tasks"}
-                before["tasks"] = payload["prior_tasks"]
+            before = gen.prior_fixture(payload)
+            if before is not None:
                 prior_path = tmp / f"prior_{name}"
                 prior_path.write_text(json.dumps(before), encoding="utf-8")
                 with contextlib.redirect_stdout(io.StringIO()):
                     prior = publish.collect_everything({}, prior_path)["inventory"]
-            result = replay(config, fixture, prior)
+            # A healthy earlier run left alert state: with none, every failure counts as already open
+            # and the golden would lose the shared-cause incident e-mail.
+            result = replay(config, fixture, prior,
+                            {"signature": [], "updated_utc": gen.parse_now(now_text).isoformat()})
             for section in merged:
                 if section != "alert":
                     merged[section] += result[section]

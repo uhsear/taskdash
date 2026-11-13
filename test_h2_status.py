@@ -15,11 +15,10 @@ import pytest
 import taskdash_cli as cli
 import taskdash_common as common
 
-NOW = datetime.now(timezone.utc)
-
-
 def _ms(minutes_ago: float) -> int:
-    return int((NOW - timedelta(minutes=minutes_ago)).timestamp() * 1000)
+    # The real clock at call time: status reads it too, and a slow run can start a test minutes
+    # after this module was imported (47 min read as 48 on a CI leg).
+    return int((datetime.now(timezone.utc) - timedelta(minutes=minutes_ago)).timestamp() * 1000)
 
 
 def _run(host: str, minutes_ago: float, status: str = "success") -> dict:
@@ -36,7 +35,7 @@ class FakeTable:
         where = kw["where"]
         self.wheres.append(where)
         rows = [r for r in self.rows
-                if ("host_name" not in where or f"host_name = '{r['host_name']}'" in where)
+                if ("host_name" not in where or f"host_name = '{r['host_name'].upper()}'" in where)
                 and ("exit_status = 'success'" not in where or r["exit_status"] == "success")]
         rows.sort(key=lambda r: r["started_utc"], reverse=True)
         return SimpleNamespace(features=[SimpleNamespace(attributes=dict(r)) for r in rows[:1]])
@@ -155,7 +154,7 @@ def test_host_all_reads_every_host(service):
 def test_host_with_a_quote_cannot_break_the_filter(service):
     table = service([])
     cli.main(["status", "--host", "x' OR '1'='1"])
-    assert table.wheres[0] == "host_name = 'x'' OR ''1''=''1'"
+    assert table.wheres[0] == "host_name = 'X'' OR ''1''=''1'"
 
 
 # ------------------------------------------------------------------ --prune

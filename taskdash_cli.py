@@ -7,7 +7,7 @@ Target: the subcommand's own main(); this module writes nothing, except that
 
     taskdash collect --apply --target prod     # taskdash_publish.main
     taskdash setup | preflight | dashboard     # taskdash_setup / taskdash_preflight / taskdash_dashboard
-    taskdash demo [--apply]                    # taskdash_demo: synthetic data in its own folder
+    taskdash demo [--apply | --remove [--apply]]  # taskdash_demo: synthetic data in its own folder
     taskdash remove [--apply]                  # undo setup from its manifest: list (--apply: delete) the items it made
     taskdash signin [--apply]                  # check the ArcGIS account; --apply stores the sign-in profile
     taskdash status [--offline] [--host NAME]  # last local run result + newest CollectorRuns row; exit 0-3
@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import getpass
 import importlib
 import json
 import os
@@ -64,8 +65,8 @@ def _write_import_fallback(message: str) -> None:
 
 try:
     from taskdash_common import (
-        TABLE_COLLECTOR_RUNS, TASKDASH_VERSION, RunLockHeld, emit, run_lock, runtime_dir, see_troubleshooting,
-        write_bootstrap_fail,
+        CONFIG_ARG_HELP, MANUAL_LOG_PREFIX, TABLE_COLLECTOR_RUNS, TASKDASH_VERSION, RunLockHeld, command_text,
+        emit, run_lock, runtime_dir, see_troubleshooting, write_bootstrap_fail,
     )
 except Exception:
     _write_import_fallback("taskdash_common failed to import. Reinstall TaskDash; if it persists, "
@@ -84,9 +85,36 @@ SUBCOMMAND_MODULES: Dict[str, str] = {
 }
 USAGE = (
     "usage: taskdash [--version] <command> [args...]\n"
-    "commands: collect, setup, preflight, dashboard, demo, remove, signin, status, test-alert\n"
-    "Run `taskdash <command> --help` for a command's own options."
+    "Commands, in install order (docs/INSTALL.md has the steps):\n"
+    "  signin      check the ArcGIS account and store the sign-in\n"
+    "  preflight   check the computer, the config and the sign-in\n"
+    "  setup       create the service, view, group and dashboard\n"
+    "  collect     collect task health and publish it (the hourly task runs this)\n"
+    "  dashboard   rebuild the dashboard\n"
+    "  status      show the last run and its age\n"
+    "  test-alert  check the alert e-mail path\n"
+    "  demo        try TaskDash on invented data\n"
+    "  remove      undo setup\n"
+    "  task        show the scripts that register, change and remove the Windows task\n"
+    "Run `taskdash <command> --help` for a command's own options; `taskdash help` shows this list."
 )
+
+
+def show_task_scripts() -> int:
+    """`taskdash task`: the Windows task and the installer are PowerShell scripts, not commands, so
+    point at them. Reads nothing from the config and changes nothing."""
+    from taskdash_common import data_dir
+    share = data_dir()
+    emit("The scheduled task is registered, changed and removed by PowerShell scripts, not by a taskdash "
+         "command. Run them in a PowerShell window as administrator.")
+    emit(f"  Register or replace the hourly task: {share / 'install_task.ps1'}")
+    emit("    Without -Apply it only prints the plan. -Replace changes the task account password: see ROTATE.md.")
+    emit("  Install on a new computer: Install-TaskDash.ps1 from the release page. See INSTALL.md (Quick "
+         "install). Upgrade an install by hand: see UPGRADE.md.")
+    emit("  Remove: run `taskdash remove --apply`, then `taskdash signin --forget --apply`, then "
+         "Unregister-ScheduledTask. See 'Undo the install' in INSTALL.md.")
+    emit(f"  The guides are in {share / 'docs'}.")
+    return 0
 
 
 def _run_module(module_name: str, rest: List[str]) -> int:
@@ -95,11 +123,14 @@ def _run_module(module_name: str, rest: List[str]) -> int:
     except ModuleNotFoundError as exc:
         if exc.name != module_name:
             write_bootstrap_fail(traceback.format_exc())
-            raise
+            raise SystemExit(f"{module_name} needs the Python package '{exc.name}', which is not installed. "
+                             "Reinstall TaskDash with its dependencies: python -m pip install --force-reinstall "
+                             "<wheel>.\n"
+                             + see_troubleshooting("A package that TaskDash needs is missing")) from exc
         message = (f"{module_name}.py is not part of this install, so this command is unavailable. "
                    "Reinstall TaskDash from a complete wheel.")
         write_bootstrap_fail(message)
-        raise SystemExit(message)
+        raise SystemExit(message + "\n" + see_troubleshooting("A command says it is not part of this install"))
     except Exception:
         write_bootstrap_fail(f"{module_name} failed to import. Reinstall TaskDash; if it persists, "
                              f"send this traceback to the maintainer.\n{traceback.format_exc()}")
@@ -108,21 +139,89 @@ def _run_module(module_name: str, rest: List[str]) -> int:
 
 
 def newest_run_log(log_dir: Path) -> Optional[Path]:
-    logs = sorted(log_dir.glob("taskdash_*.log"), key=lambda p: p.stat().st_mtime)
+    """The newest log of a scheduled run. A manual run (dry run, test run, --migrate) writes
+    taskdash_manual_*.log and is skipped: it would hide what the hourly task did."""
+    logs = sorted((p for p in log_dir.glob("taskdash_*.log") if not p.name.startswith(MANUAL_LOG_PREFIX + "_")),
+                  key=lambda p: p.stat().st_mtime)
     return logs[-1] if logs else None
 
 
+_LOG_RECORD_START = re.compile(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}")
+
+
 def last_result_line(log_path: Path) -> str:
+    """The last non-empty log line. A refusal ends with a 'See TROUBLESHOOTING.md' line that names no
+    error, so there the whole last record is joined into one line: the 'TaskDash exiting:' text first."""
     lines = [line.strip() for line in log_path.read_text(encoding="utf-8", errors="replace").splitlines()]
-    return next((line for line in reversed(lines) if line), "(log is empty)")
+    lines = [line for line in lines if line]
+    if not lines:
+        return "(log is empty)"
+    start = len(lines) - 1
+    if lines[start].startswith("See TROUBLESHOOTING.md"):
+        while start > 0 and not _LOG_RECORD_START.match(lines[start]):
+            start -= 1
+    return " ".join(lines[start:])
 
 
-def _local_status(log_dir: Path) -> None:
+def _collector_interval(config: Optional[dict]) -> float:
+    from taskdash_dashboard import DEFAULT_COLLECTOR_INTERVAL_MINUTES
+
+    return ((config or {}).get("scheduler") or {}).get("collector_interval_minutes", DEFAULT_COLLECTOR_INTERVAL_MINUTES)
+
+
+def _local_status(log_dir: Path, interval: float, offline: bool = True) -> int:
+    """Print the newest scheduled run's last line; return the exit code: 0 fresh and no ERROR line,
+    1 the log holds an ERROR line (the run failed), 2 no log or older than 2 collector intervals.
+    Online (offline False) only the "Local:" line prints: the service row decides, and this
+    computer may not be the collector, so its log must not produce advice or a verdict."""
     log_path = newest_run_log(log_dir)
     if log_path is None:
-        emit(f"Local: no taskdash_*.log in {log_dir} yet. Run `taskdash collect` first.")
-        return
+        if not offline:
+            emit(f"Local: no scheduled run log (taskdash_<time>.log) in {log_dir}.")
+            return 2
+        emit(f"Local: no scheduled run log (taskdash_<time>.log) in {log_dir} yet. Run "
+             f"{command_text('collect', '--apply')} once, or wait for the hourly task.")
+        return 2
     emit(f"Local: {log_path.name}: {last_result_line(log_path)}")
+    if not offline:
+        return 0
+    if " - ERROR - " in log_path.read_text(encoding="utf-8", errors="replace"):
+        emit("The newest scheduled run failed: its log holds an ERROR line. Open the log and search for "
+             "the first ERROR line.\n" + see_troubleshooting("The newest run failed"))
+        return 1
+    age = (time.time() - log_path.stat().st_mtime) / 60
+    if age > 2 * interval:
+        emit(f"The newest scheduled run is {_age_text(age)} old, more than {2 * interval:g} min "
+             "(2 x scheduler.collector_interval_minutes). Check that the collector task still runs.\n"
+             + see_troubleshooting("The newest success is too old"))
+        return 2
+    return 0
+
+
+def _handoff_status() -> None:
+    """Say so when a sign-in hand-off file waits: it is easy to forget, and it holds sealed passwords."""
+    from taskdash_handoff import handoff_waiting_text
+    text = handoff_waiting_text()
+    if text:
+        emit(f"WARNING: {text} " + see_troubleshooting("A hand-off file is waiting"))
+
+
+def _unsent_runs(log_dir: Path, target: str) -> List[dict]:
+    """The CollectorRuns rows a run saved because it could not reach the service (oldest first)."""
+    import taskdash_publish
+
+    path = log_dir / taskdash_publish.PENDING_COLLECTOR_RUNS_FILE.format(target=target)
+    return taskdash_publish._read_pending_collector_runs(path)
+
+
+def _unsent_status(log_dir: Path, target: str) -> int:
+    """Print the runs saved because they could not reach the service; return how many wait."""
+    unsent = _unsent_runs(log_dir, target)
+    if unsent:
+        newest = unsent[-1]
+        emit(f"Unsent: {len(unsent)} collector run(s) could not be saved to the service and wait for the next "
+             f"run that reaches it. Newest ({newest.get('exit_status')}): {newest.get('error_text') or 'no error text'}")
+    return len(unsent)
 
 
 def _epoch_text(value: object) -> str:
@@ -148,11 +247,10 @@ def _minutes_since(epoch_ms: object) -> float:
     return (datetime.now(timezone.utc).timestamp() * 1000 - float(epoch_ms)) / 60000
 
 
-def _remote_status(config: dict, target: str, host: Optional[str]) -> int:
+def _remote_status(config: dict, target: str, host: Optional[str], unsent: int = 0) -> int:
     """Print the newest CollectorRuns row and the age of the newest success; return the exit code:
     0 fresh success, 1 newest run failed, 2 newest success older than 2 collector intervals or no run."""
-    from taskdash_common import connect_agol, get_host_name, get_tables, normalize_text
-    from taskdash_dashboard import DEFAULT_COLLECTOR_INTERVAL_MINUTES
+    from taskdash_common import connect_agol, get_host_name, get_tables, host_clause, normalize_text
 
     key = "item_id" if target == "prod" else "test_item_id"
     item_id = normalize_text(config.get("arcgis", {}).get(key))
@@ -166,12 +264,12 @@ def _remote_status(config: dict, target: str, host: Optional[str]) -> int:
                          + see_troubleshooting("Status cannot find the service item"))
     table = get_tables(item).get(TABLE_COLLECTOR_RUNS)
     if table is None:
-        raise SystemExit(f"The service has no {TABLE_COLLECTOR_RUNS} table. Run `taskdash collect --migrate --apply` to create it.\n"
+        raise SystemExit(f"The service has no {TABLE_COLLECTOR_RUNS} table. Run `taskdash collect --migrate --target {target} --apply` to create it.\n"
                          + see_troubleshooting("The service has no CollectorRuns table"))
     # The default is this install's own host: on a shared service another host's runs must not
     # hide this one's failure. `--host all` reads every host.
     host = host or get_host_name(config)
-    where = "1=1" if host.lower() == "all" else "host_name = '" + host.replace("'", "''") + "'"
+    where = "1=1" if host.lower() == "all" else host_clause(host)
     scope = "any host" if where == "1=1" else f"host '{host}'"
     row = newest_collector_run(table, where)
     if row is None:
@@ -185,13 +283,15 @@ def _remote_status(config: dict, target: str, host: Optional[str]) -> int:
          f"exit_status {row.get('exit_status')}; "
          + (f"last success {_age_text(age)} ago" if success else "last success: none found") + f" ({scope})")
     if not succeeded:
-        emit("The newest run failed. Read its log in the log folder; see TROUBLESHOOTING.md.\n"
+        emit(f"The newest run failed. Run {command_text('status', '--offline')} for the last line of its "
+             "log, then read the log in the log folder.\n"
              + see_troubleshooting("The newest run failed"))
         return 1
-    interval = (config.get("scheduler") or {}).get("collector_interval_minutes", DEFAULT_COLLECTOR_INTERVAL_MINUTES)
+    interval = _collector_interval(config)
     if age > 2 * interval:
         emit(f"The newest success is older than {2 * interval:g} min (2 x scheduler.collector_interval_minutes). "
-             "Check that the collector task still runs.")
+             + ("The collector runs but cannot publish: read the Unsent line above and fix that error."
+                if unsent else "Check that the collector task still runs."))
         return 2
     return 0
 
@@ -346,13 +446,15 @@ def _prune(args: argparse.Namespace) -> int:
 
 
 def status(argv: Sequence[str]) -> int:
-    """Exit 0 fresh success, 1 newest run failed, 2 stale or no run, 3 cannot sign in or read."""
+    """Exit 0 fresh success, 1 newest run failed, 2 stale or no run, 3 cannot sign in or read.
+    --offline judges the newest scheduled run's log; otherwise the CollectorRuns table decides."""
     parser = argparse.ArgumentParser(
         prog="taskdash status", allow_abbrev=False,
         description="Read-only: last local run result and newest CollectorRuns row. "
                     "With --prune it lists old TaskDash backups and logs instead; --apply removes them.")
     parser.add_argument("--offline", action="store_true", help="Print only the local part; never sign in.")
-    parser.add_argument("--target", choices=("prod", "test"), default="prod")
+    parser.add_argument("--target", choices=("prod", "test"), default="prod",
+                        help="Which configured service to read.")
     parser.add_argument("--host", default=None, metavar="NAME",
                         help="Read the runs of this host. Default: this install's host. 'all' reads every host.")
     parser.add_argument("--prune", action="store_true", help="List old backups and logs. Removes nothing without --apply.")
@@ -360,8 +462,11 @@ def status(argv: Sequence[str]) -> int:
     parser.add_argument("--keep", type=int, default=None, metavar="N",
                         help=f"With --prune: how many to keep of each kind: dashboard backups per dashboard, "
                              f"config backups, bootstrap logs and crash records. Default {DEFAULT_KEEP_BACKUPS}.")
-    parser.add_argument("--config", default="", metavar="PATH", help="Config file. Default: the install's config.")
+    parser.add_argument("--config", default="", metavar="PATH", help=CONFIG_ARG_HELP)
+    parser.add_argument("--version", action="version", version=f"TaskDash {TASKDASH_VERSION}")
     args = parser.parse_args(argv)
+    if args.offline and args.host is not None:
+        parser.error("--host selects a CollectorRuns host, and --offline reads no service. Drop one of them.")
     if (args.apply or args.keep is not None) and not args.prune:
         parser.error("--apply and --keep work only with --prune.")
     if args.keep is not None and args.keep < 1:
@@ -370,12 +475,15 @@ def status(argv: Sequence[str]) -> int:
         return _prune(args)
     try:
         log_dir, config = _status_log_dir(args.config, args.offline)
-        _local_status(log_dir)
-        return 0 if args.offline else _remote_status(config, args.target, args.host)
+        local_code = _local_status(log_dir, _collector_interval(config), args.offline)
+        unsent = _unsent_status(log_dir, args.target)
+        _handoff_status()
+        return local_code if args.offline else _remote_status(config, args.target, args.host, unsent)
     except SystemExit as exc:
         emit(str(exc.code))
     except Exception as exc:
-        emit(f"Cannot read the service: {exc}. Check the sign-in and the network, then run again.")
+        emit(f"Cannot read the service: {exc}. Check the sign-in and the network, then run again, or run "
+             f"{command_text('status', '--offline')} to read only the local log.")
     return UNREADABLE_EXIT
 
 
@@ -386,7 +494,8 @@ def send_test_alert(argv: Sequence[str]) -> int:
         prog="taskdash test-alert", allow_abbrev=False,
         description="Check the alert e-mail path. Sends nothing unless you pass --apply.")
     parser.add_argument("--apply", action="store_true", help="Send one short test message.")
-    parser.add_argument("--config", default="", metavar="PATH", help="Config file. Default: the install's config.")
+    parser.add_argument("--config", default="", metavar="PATH", help=CONFIG_ARG_HELP)
+    parser.add_argument("--version", action="version", version=f"TaskDash {TASKDASH_VERSION}")
     args = parser.parse_args(argv)
 
     import taskdash_common as common
@@ -411,10 +520,15 @@ def send_test_alert(argv: Sequence[str]) -> int:
         emit("WARNING: alerting.enabled is false, so the hourly run sends no alerts yet.")
 
     host = common.get_host_name(config)
-    subject = f"TaskDash test alert from {host}"
+    subject = f"[TaskDash] test alert from {host}"
     body = (f"This is a test message from TaskDash on {host}. If you can read it, "
             "alert e-mails from this host reach you. No action is needed.")
     server = f"{mail['smtp server']}:{mail.get('smtp port', 587)}"
+    # Each Windows account has its own keyring: a pass here says nothing about the task account's password.
+    # A relay with no login has no password to read.
+    what = "mail settings and password" if mail.get("smtp password") else "mail settings"
+    emit(f"The {what} were read as {getpass.getuser()}. The hourly task reads "
+         "those of its own account: run 'taskdash preflight --as-task --apply' to check that account.")
     if not args.apply:
         emit(f"Would send one test message '{subject}' to {', '.join(recipients)} "
              f"from {mail['from address']} through {server}.")
@@ -424,8 +538,8 @@ def send_test_alert(argv: Sequence[str]) -> int:
     common.last_send_error = ""
     if not common.send_email(mail, recipients, subject, body):
         reason = common.last_send_error or "the mail server did not accept the message"
-        emit(f"Test alert failed: {taskdash_publish._scrub_secrets(reason)}. Check smtp.host, "
-             f"smtp.port, smtp.from and smtp.user in the config and the stored SMTP password.")
+        emit(f"Test alert failed: {taskdash_publish._scrub_secrets(reason)}. "
+             f"{common.mail_failure_hint(reason)}")
         return 1
     emit(f"Test alert sent to {', '.join(recipients)} through {server}.")
     return 0
@@ -433,7 +547,7 @@ def send_test_alert(argv: Sequence[str]) -> int:
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
-    if not args or args[0] in ("-h", "--help"):
+    if not args or args[0] in ("-h", "--help", "help"):
         print(USAGE)
         return 0 if args else 2
     command, rest = args[0], args[1:]
@@ -444,11 +558,44 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return status(rest)
     if command == "test-alert":
         return send_test_alert(rest)
+    if command == "task":
+        return show_task_scripts()
     if command not in SUBCOMMAND_MODULES:
         print(f"taskdash: unknown command {command!r}\n{USAGE}", file=sys.stderr)
         return 2
     return _run_module(SUBCOMMAND_MODULES[command], rest)
 
 
+def _scrubbed(text: str, withheld: str) -> str:
+    """`text` without secrets, or `withheld` when the scrubber fails. The scrubber is imported here, so a
+    broken taskdash_publish (the usual cause) still leaves the other commands usable."""
+    try:
+        from taskdash_publish import _scrub_secrets
+        return _scrub_secrets(text)
+    except Exception:
+        return withheld
+
+
+def _print_scrubbed_traceback(exc_type: object, exc: object, tb: object) -> None:
+    # A library error can echo a request URL with ?token= in it, and people paste this into tickets.
+    text = "".join(traceback.format_exception(exc_type, exc, tb))  # type: ignore[arg-type]
+    print(_scrubbed(text, "log line withheld: secret scrubbing failed\n"), file=sys.stderr, end="")
+
+
+def run() -> int:
+    """The `taskdash` console script: main() with the same secret scrubbing as the collector script."""
+    sys.excepthook = _print_scrubbed_traceback
+    try:
+        return main()
+    except SystemExit as exc:
+        # The interpreter prints a str exit code to stderr as it is.
+        if not isinstance(exc.code, str):
+            raise
+        raise SystemExit(_scrubbed(
+            exc.code, "message withheld: secret scrubbing failed. Reinstall TaskDash from a complete "
+                      "wheel (python -m pip install --force-reinstall <wheel>).\n"
+                      + see_troubleshooting("A module failed to import"))) from None
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(run())

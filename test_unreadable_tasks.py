@@ -76,7 +76,7 @@ def fake_world(monkeypatch):
     monkeypatch.setattr(publish, "connect_agol", lambda cfg: object())
     monkeypatch.setattr(publish, "ensure_service", lambda gis, cfg, target: item)
     monkeypatch.setattr(publish, "get_tables", lambda i: {})
-    monkeypatch.setattr(publish, "check_schema_drift", lambda tables: None)
+    monkeypatch.setattr(publish, "check_schema_drift", lambda tables, *a: None)
     monkeypatch.setattr(publish, "check_source_sharing", lambda *a: None)
     monkeypatch.setattr(publish, "publish", lambda *a, **k: {})
     monkeypatch.setattr(publish, "maybe_send_alert", lambda *a: False)

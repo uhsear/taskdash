@@ -5,6 +5,8 @@ Driver: `taskdash signin --for-task-account --apply` writes the file; the next `
 Source: the ArcGIS password and, when smtp.user is set, the mail password, typed at hidden prompts
 Target: one file, taskdash_handoff.bin, in the install folder. Both secrets are sealed with DPAPI at
         machine scope, and the file's ACL allows only the task account, SYSTEM and Administrators.
+        A second file, taskdash_handoff.json, names the account in plain text, no secret, so status,
+        preflight and Install-TaskDash.ps1 can tell who a waiting file is for.
         The collector run as the task account saves them into its own ArcGIS profile and keyring
         entry, checks that the profile signs in, and only then deletes the file.
 
@@ -15,16 +17,22 @@ The file never holds plaintext, and nothing here prints or logs a secret.
 
 from __future__ import annotations
 
+import contextlib
 import getpass
 import json
+import time
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from taskdash_common import (
-    SMTP_KEYRING_SERVICE, disable_arcpy_import, emit, normalize_text, runtime_dir, see_troubleshooting,
+    SMTP_KEYRING_SERVICE, command_text, disable_arcpy_import, emit, normalize_text, runtime_dir, see_troubleshooting,
 )
 
 HANDOFF_FILE = "taskdash_handoff.bin"
+# Beside the sealed file, in plain text and without a secret: only the target account. The sealed file
+# can be read by that account alone, so status, preflight and the installer read this one to see who
+# the waiting file is for.
+HANDOFF_INFO_FILE = "taskdash_handoff.json"
 # wincrypt.h and winnt.h values. pywin32's win32crypt and ntsecuritycon do not export all of them.
 CRYPTPROTECT_LOCAL_MACHINE = 0x4
 FILE_ALL_ACCESS = 0x1F01FF
@@ -44,6 +52,37 @@ class StoreError(Exception):
 
 def handoff_path() -> Path:
     return runtime_dir() / HANDOFF_FILE
+
+
+def handoff_info_path() -> Path:
+    return runtime_dir() / HANDOFF_INFO_FILE
+
+
+def handoff_waiting() -> Optional[Dict[str, Any]]:
+    """None when no hand-off file waits, else {"account": str, "age_hours": float}. The account is ''
+    when the info file is missing or unreadable (a file made before it existed). The age is the sealed
+    file's own modification time, which needs no right to read it."""
+    try:
+        age_hours = max(0.0, (time.time() - handoff_path().stat().st_mtime) / 3600)
+    except OSError:
+        return None
+    try:
+        account = normalize_text(json.loads(handoff_info_path().read_text(encoding="utf-8")).get("account"))
+    except (OSError, ValueError, AttributeError):
+        account = ""
+    return {"account": account, "age_hours": age_hours}
+
+
+def handoff_waiting_text() -> str:
+    """One sentence for status and preflight, or '' when no hand-off file waits."""
+    waiting = handoff_waiting()
+    if waiting is None:
+        return ""
+    hours = waiting["age_hours"]
+    age = f"{hours:.1f} h" if hours < 48 else f"{hours / 24:.1f} days"
+    who = waiting["account"] or "an account that was not recorded"
+    return (f"the sign-in hand-off file {HANDOFF_FILE} for {who} has waited {age}. The next collector "
+            f"run as that account stores it and deletes it.")
 
 
 def seal(payload: Dict[str, Any]) -> bytes:
@@ -94,8 +133,10 @@ def write_handoff(payload: Dict[str, Any], account: str) -> Path:
             win32file.WriteFile(handle, sealed)
         finally:
             handle.Close()
+        handoff_info_path().write_text(json.dumps({"account": account}), encoding="utf-8")
     except Exception:
         path.unlink(missing_ok=True)
+        handoff_info_path().unlink(missing_ok=True)
         raise
     return path
 
@@ -148,7 +189,7 @@ def consume_handoff() -> None:
     except Exception as exc:  # noqa: BLE001 - a wrong-machine or damaged file is one failure to the user
         raise SystemExit(
             "The hand-off file could not be opened. It is kept. Make it again on this computer with "
-            "taskdash signin --for-task-account --apply, or store the sign-in with runas as step 3 of "
+            f"{command_text('signin', '--for-task-account', '--apply')}, or store the sign-in with runas as step 3 of "
             f"docs/INSTALL.md describes. Detail: {type(exc).__name__}\n"
             + see_troubleshooting("The hand-off file could not be opened")) from None
     if _bare_name(account) != _bare_name(getpass.getuser()):
@@ -169,4 +210,7 @@ def consume_handoff() -> None:
         emit(f"WARNING: stored the sign-in, but could not delete {path.name} ({type(exc).__name__}). "
              "Delete it by hand; it holds the passwords sealed, not in plain text.")
         return
+    # A leftover info file is harmless: status and preflight look for the sealed file first.
+    with contextlib.suppress(OSError):
+        handoff_info_path().unlink(missing_ok=True)
     emit(f"Stored the sign-in from {path.name} for {account} and removed the file.")

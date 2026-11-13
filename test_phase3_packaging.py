@@ -198,7 +198,19 @@ def test_the_private_rules_profile_is_not_a_data_file():
     assert not any("rules/" in name and name != "rules/default.json" for name in flat)
 
 
+def test_the_guides_ship_in_the_wheel_so_a_message_can_point_at_them():
+    data = _pyproject()["tool"]["setuptools"]["data-files"]
+    assert data["share/taskdash/docs"] == ["docs/*.md"]
+    assert {"SECURITY.md", "CHANGELOG.md"} <= set(data["share/taskdash"])
+
+
+def test_pywin32_is_declared_for_windows_only():
+    # taskdash_handoff and --as-task import win32crypt and win32security; arcgis is not the contract for them.
+    dependencies = _pyproject()["project"]["dependencies"]
+    assert "pywin32>=223; sys_platform == 'win32'" in dependencies
+
+
 def test_the_console_script_and_version_come_from_the_code():
     project = _pyproject()
-    assert project["project"]["scripts"] == {"taskdash": "taskdash_cli:main"}
+    assert project["project"]["scripts"] == {"taskdash": "taskdash_cli:run"}
     assert project["tool"]["setuptools"]["dynamic"]["version"] == {"attr": "taskdash_common.TASKDASH_VERSION"}

@@ -2,7 +2,7 @@
 
 Driver: taskdash_setup.py (run by hand, once per organization)
 Source: TaskDash.config.json with the ArcGIS sign-in filled in and no arcgis item ids
-Target: one folder holding the hosted service (5 tables), its read-only view, a private viewers
+Target: one folder holding the hosted service with its tables, its read-only view, a private viewers
         group and the dashboard; the three new ids are written back to the config
 
     python taskdash_setup.py            # check: sign in, run the refusals, print the plan
@@ -29,7 +29,9 @@ import taskdash_publish as publish
 from taskdash_common import (
     DEFAULT_CONFIG_FILE,
     TASKDASH_VERSION,
+    CONFIG_ARG_HELP,
     atomic_write_json,
+    command_text,
     connect_agol,
     emit,
     get_tables,
@@ -51,14 +53,15 @@ Created = List[Tuple[str, str, str]]
 
 
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Set up a new, private TaskDash install.",
+    parser = argparse.ArgumentParser(prog="taskdash setup", description="Set up a new, private TaskDash install.",
                                      allow_abbrev=False)
-    parser.add_argument("--config", default="", metavar="PATH",
-                        help="Config file to read and update. Default: the config next to the scripts.")
+    parser.add_argument("--config", default="", metavar="PATH", help=CONFIG_ARG_HELP)
     parser.add_argument("--apply", action="store_true",
                         help="Create the folder, service, view, group and dashboard.")
     parser.add_argument("--folder", default="TaskDash", help="Folder that will hold the new items.")
     parser.add_argument("--title-prefix", default="", help="Text put before every item title.")
+    parser.add_argument("--demo", action="store_true",
+                        help="Mark the dashboard as invented data. `taskdash demo` passes it.")
     parser.add_argument("--group-title", default=None,
                         help="Title of the viewers group. Default: '<prefix>TaskDash viewers'.")
     parser.add_argument("--version", action="version", version=f"TaskDash {TASKDASH_VERSION}")
@@ -74,16 +77,22 @@ def planned_titles(prefix: str) -> Dict[str, str]:
             "dashboard": f"{prefix}TaskDash"}
 
 
+# Appended to every refusal that a second computer meets: its setup would make a second dashboard.
+SECOND_COMPUTER_HINT = ("\nIs this a second computer for an existing dashboard? Do not run setup: "
+                        "see 'Add another computer' in docs/INSTALL.md.")
+
+
 def refuse_existing_install(config: Dict[str, Any]) -> None:
+    from taskdash_preflight import DASHBOARD_FIX  # preflight imports this module, so not at the top
     agol = config.get("arcgis", {})
     used = [f"arcgis.{k}" for k in INSTALL_KEYS if normalize_text(agol.get(k))]
     if used:
         raise SystemExit(f"The config already sets {', '.join(used)}, so an install exists. Setup is "
-                         f"for a new install. To keep this install, maintain it with 'taskdash collect "
-                         f"--migrate --apply' and 'taskdash dashboard --target prod' (folder install: "
-                         f"python taskdash_publish.py --migrate --apply and python taskdash_dashboard.py). "
-                         f"To start again, delete the ArcGIS items and empty those keys: see 'The config "
-                         f"already holds an install' in docs/TROUBLESHOOTING.md.")
+                         f"for a new install. To keep this install, maintain it with "
+                         f"{command_text('collect', '--migrate', '--apply')}. If the dashboard is the "
+                         f"problem: {DASHBOARD_FIX} "
+                         f"To start again, delete the ArcGIS items and empty those keys.\n"
+                         + see_troubleshooting("The config already holds an install") + SECOND_COMPUTER_HINT)
 
 
 def refuse_name_clashes(gis: Any, args: argparse.Namespace) -> None:
@@ -94,7 +103,7 @@ def refuse_name_clashes(gis: Any, args: argparse.Namespace) -> None:
     if gis.content.folders.get(folder=args.folder) is not None:
         raise SystemExit(f"The folder '{args.folder}' already exists for this account. Choose "
                          f"another with --folder, or delete the empty folder in ArcGIS Online.\n"
-                         + see_troubleshooting("The folder already exists"))
+                         + see_troubleshooting("The folder already exists") + SECOND_COMPUTER_HINT)
     owner = gis.users.me.username
     titles = planned_titles(args.title_prefix)
     for title, item_type in ((titles["service"], FEATURE_SERVICE), (titles["view"], FEATURE_SERVICE),
@@ -104,7 +113,8 @@ def refuse_name_clashes(gis: Any, args: argparse.Namespace) -> None:
                 raise SystemExit(f"{item_type} '{title}' already exists ({item.id}). Setup never "
                                  f"reuses an item: pass --title-prefix to pick other titles, or "
                                  f"delete that item in ArcGIS Online.\n"
-                                 + see_troubleshooting("An item with the planned title already exists"))
+                                 + see_troubleshooting("An item with the planned title already exists")
+                                 + SECOND_COMPUTER_HINT)
     # Hosted service names are unique across the organization, so another account's service
     # blocks create_service after the folder exists; the owner search above cannot see it.
     for title in (titles["service"], titles["view"]):
@@ -116,7 +126,7 @@ def refuse_name_clashes(gis: Any, args: argparse.Namespace) -> None:
         if group.title == args.group_title:
             raise SystemExit(f"A group titled '{args.group_title}' already exists ({group.id}). "
                              f"Choose another with --group-title, or delete the group.\n"
-                             + see_troubleshooting("The viewers group already exists"))
+                             + see_troubleshooting("The viewers group already exists") + SECOND_COMPUTER_HINT)
 
 
 def print_plan(args: argparse.Namespace, config: Dict[str, Any]) -> None:
@@ -169,7 +179,7 @@ def create_service_item(gis: Any, config: Dict[str, Any], path: Path, args: argp
     item = publish.create_service(gis, title, config, folder=args.folder)
     created.append((title, FEATURE_SERVICE, item.id))
     write_config_key(path, config, "item_id", item.id)
-    # The three tables create_service makes are not the five the collector writes to.
+    # The three tables create_service makes are not all the collector writes to.
     publish.apply_migration(get_tables(item), item=item)
     return item
 
@@ -190,7 +200,9 @@ def create_group(gis: Any, args: argparse.Namespace, created: Created) -> Any:
                               snippet="TaskDash viewers", access="private", is_invitation_only=True)
     if group is None:
         raise SystemExit(f"ArcGIS did not create the group '{args.group_title}'. Check that the "
-                         f"account may create groups, then re-run; delete anything listed above first.\n"
+                         f"account may create groups. Then run {command_text('remove')}, then "
+                         f"{command_text('remove', '--apply')} to delete what is listed above, and run "
+                         f"setup again.\n"
                          + see_troubleshooting("The group could not be created"))
     created.append((args.group_title, "Group", group.id))
     return group
@@ -202,9 +214,10 @@ def create_dashboard_item(gis: Any, view: Any, folder: Any, group: Any, config: 
     title = planned_titles(args.title_prefix)["dashboard"]
     templates = dashboard.load_templates(gis, "")
     layer_ids = dashboard.resolve_layer_ids(gis, view.id, "prod")
-    definition = dashboard.build(view.id, templates, layer_ids, portal_url=gis.url, config=config)
+    definition = dashboard.build(view.id, templates, layer_ids, portal_url=gis.url, config=config,
+                                 demo=args.demo)
     dashboard.validate_definition(definition, layer_ids, config, data_item=view.id)
-    dash_id = dashboard.post_dashboard(gis, definition, title, None, config)
+    dash_id = dashboard.post_dashboard(gis, definition, title, None, config, demo=args.demo)
     created.append((title, DASHBOARD, dash_id))
     write_config_key(path, config, "dashboard_id", dash_id)
     item = gis.content.get(dash_id)
@@ -224,16 +237,22 @@ def protect_items(items: List[Any], protected: List[str]) -> None:
     """Turn on delete protection, so a stray click in ArcGIS Online cannot remove the install.
     Last, after the sharing checks: protection makes the undo list need one more step."""
     for item in items:
-        if not (item.protect(enable=True) or {}).get("success"):
+        try:
+            done = (item.protect(enable=True) or {}).get("success")
+        except Exception as exc:  # noqa: BLE001 - any arcgis error here must keep the undo list below
+            done = False
+            emit(f"WARNING: protecting item {item.id} failed ({type(exc).__name__}).")
+        if not done:
             raise SystemExit(f"Could not turn on delete protection for item {item.id}. Turn it on by hand "
                              f"(Item > Settings > Delete protection), or ask an administrator to.\n"
                              + see_troubleshooting("Delete protection could not be turned on"))
         protected.append(item.id)
 
 
-def print_created(created: Created, protected: Sequence[str] = ()) -> None:
-    emit("Created by this run (to undo, turn off delete protection first, then delete these in "
-         "ArcGIS Online):" if protected else "Created by this run (delete these in ArcGIS Online to undo):"
+def print_created(created: Created, protected: Sequence[str] = (), demo: bool = False) -> None:
+    undo = (command_text("demo", "--remove", "--apply") if demo else
+            f"{command_text('remove')}, then {command_text('remove', '--apply')}")
+    emit(f"Created by this run. To undo, run {undo}; it turns off delete protection and deletes these:"
          if created else "This run created nothing.")
     for title, kind, item_id in created:
         note = "  (delete protection on)" if item_id in protected else ""
@@ -252,6 +271,21 @@ def write_manifest(config_path: Path, args: argparse.Namespace, created: Created
     target = config_path.with_name(MANIFEST_FILE)
     atomic_write_json(target, manifest)
     emit(f"Manifest of the created items saved to {target}. `taskdash remove` reads it.")
+
+
+def replace_manifest_view(config_path: Path, old_id: str, view: Any) -> bool:
+    """Swap the manifest entry of a replaced view for the new view, keeping its place in the order,
+    so `taskdash remove` still deletes the view before the service. False when no entry matches."""
+    path = config_path.with_name(MANIFEST_FILE)
+    if not path.is_file():
+        return False
+    manifest = json.loads(path.read_text(encoding="utf-8-sig"))
+    entry = next((e for e in manifest["items"] if e["id"] == old_id and e["type"] == FEATURE_SERVICE), None)
+    if entry is None:
+        return False
+    entry["id"], entry["title"] = view.id, view.title
+    atomic_write_json(path, manifest)
+    return True
 
 
 def apply_setup(gis: Any, config: Dict[str, Any], path: Path, args: argparse.Namespace,
@@ -282,7 +316,7 @@ def setup(gis: Any, config: Dict[str, Any], path: Path, args: argparse.Namespace
     try:
         apply_setup(gis, config, path, args, created, protected)
     finally:
-        print_created(created, protected)
+        print_created(created, protected, args.demo)
         write_manifest(path, args, created)
     emit("Setup complete. The service is private; the view and dashboard are shared with the "
          f"group '{args.group_title}' only. Add members to that group to give them access.")

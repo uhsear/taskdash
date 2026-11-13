@@ -1,7 +1,8 @@
 # Proves the suite and a live dry-run collect on more than the one runner install.yml uses: two
 # Windows Server images, three Pythons, ConstrainedLanguage, German and Finnish cultures, two
-# daylight-saving time zones, and a 500-task synthetic host. It runs on a version tag, once a week
-# and on demand, not on every push, because it starts 14 Windows jobs. It uses no secret and never
+# daylight-saving time zones, and a 500-task synthetic host. It runs once a week, on demand, and as
+# the matrix job of release.yml, which makes the release wait for it. It does not run on every push,
+# because it starts 14 Windows jobs. It uses no secret and never
 # signs in to ArcGIS Online: a dry run never connects.
 #
 # Runner images: windows-2019 is not listed. GitHub retired that image on 30 June 2025, and a job
@@ -17,8 +18,8 @@
 name: ci-matrix
 
 on:
-  push:
-    tags: ["v*"]
+  # release.yml calls this file on a version tag. A push trigger as well would run it twice.
+  workflow_call:
   schedule:
     - cron: "17 5 * * 1"
   workflow_dispatch:
@@ -56,7 +57,7 @@ jobs:
 
   # One leg per environment. Only the listed legs run; there is no cross product. Each leg sets its
   # zone, culture and language mode, and a test asserts that the leg really runs in them. The
-  # live tests register six odd tasks, read them back with a real collect, and remove them.
+  # live tests register eight odd tasks, read them back with a real collect, and remove them.
   environment:
     name: environment (${{ matrix.leg }})
     runs-on: ${{ matrix.os }}

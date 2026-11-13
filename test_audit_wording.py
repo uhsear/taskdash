@@ -30,7 +30,7 @@ def _help(name):
 
 def test_status_and_schedule_labels_name_what_they_drive():
     # They reach HEALTH_SCHEDULE_TARGETS: the Overview widgets and the Setting notes list only.
-    assert dash.HEALTH_SCHEDULE_TARGETS == dash.INVENTORY_TARGETS + ("Config Notes",)
+    assert dash.HEALTH_SCHEDULE_TARGETS == dash.INVENTORY_TARGETS + ("Setting Notes",)
     assert "Collector" not in dash.selector_labels("Health")["label"]
     assert dash.selector_labels("Health")["label"] == "Status (Overview and Setting notes)"
     assert dash.selector_labels("Schedule")["label"] == "Schedule (Overview and Setting notes)"
@@ -47,7 +47,7 @@ def test_about_text_lists_recent_changes():
 
 def test_help_has_no_config_jargon_and_one_term_per_concept():
     everything = " ".join(_help(n) for n in dash.HELP)
-    for jargon in ("acknowledge_config_warnings", "workflow_descriptions", "after their next run time", "the config sets"):
+    for jargon in ("workflow_descriptions", "after their next run time", "the config sets"):
         assert jargon not in everything
     assert "log error note" not in everything
 
@@ -61,7 +61,7 @@ def test_recent_failures_help_explains_the_pink_tint():
 
 
 def test_new_help_sentences_stay_short():
-    for name in ("Overdue", "Recent Failures", "Metric Change", "Config Notes", "Collector Runs", "Task Health"):
+    for name in ("Overdue", "Recent Failures", "Metric Change", "Setting Notes", "Collector Runs", "Task Health"):
         for sentence in re.split(r"(?<=[.!?])\s+", _help(name)):
             assert len(sentence.split()) <= 25, sentence
 

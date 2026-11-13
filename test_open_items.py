@@ -197,7 +197,7 @@ def test_a_stored_v3_hash_is_also_a_baseline_under_v4():
     """Round 3 bumped v3 -> v4 (the Weekly/Daily wording, the 12-hour time/plain-date change, and
     the newly-hashed Settings-tab values are all hash inputs): a stored v3 hash must not
     startswith the new prefix, so it is a baseline too, not a spurious DEFINITION CHANGED row."""
-    assert publish.DEFINITION_HASH_PREFIX == "v9"
+    assert publish.DEFINITION_HASH_PREFIX == "v10"
     old = {"task_full_name": "\\T", "task_name": "T", "definition_hash": "v3" + "a" * 62,
           "last_run_failed": 0, "is_overdue": 0, "config_warnings": ""}
     new = dict(old, definition_hash=publish.compute_definition_hash(_task()))
@@ -434,7 +434,8 @@ def test_preview_respects_the_cooldown_and_leaves_alert_state_untouched(tmp_path
     before = state.read_bytes()
     text = publish.preview_alert(collected, config, tmp_path, now=NOW).read_text(encoding="utf-8")
     assert "Decision: would NOT send" in text
-    assert "re-alert due 2026-09-26 11:00 UTC" in text
+    due = (NOW - timedelta(hours=1) + timedelta(hours=24)).astimezone()
+    assert f"re-alert due {due:%Y-%m-%d %H:%M %Z}" in text
     assert state.read_bytes() == before
 
 

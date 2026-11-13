@@ -1,5 +1,6 @@
 {
   "config_keys": [],
   "cli_flags": [],
-  "exit_messages": []
+  "exit_messages": [],
+  "log_warnings": []
 }

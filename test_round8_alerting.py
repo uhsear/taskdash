@@ -200,6 +200,8 @@ def test_maybe_send_alert_records_incident_and_first_seen_then_holds_the_next_ad
     config = {"alerting": {"enabled": True, "to": ["a@b.c"]}, "arcgis": {"dashboard_id": "D"}}
     logs = tmp_path / "logs"
     logs.mkdir()
+    # An earlier alert exists: with no state at all the first e-mail lists old failures, not an incident.
+    (logs / "alert_state.json").write_text(json.dumps(_state(THREE[:2], None)), encoding="utf-8")
     collected = {"host_name": "H", "inventory": [_task(tmp_path, n) for n in THREE]}
     assert publish.maybe_send_alert(collected, config, logs) is True
     state = json.loads((logs / "alert_state.json").read_text(encoding="utf-8"))
@@ -418,7 +420,7 @@ def test_a_hold_keeps_the_first_seen_time_of_the_held_failure(tmp_path, monkeypa
 def test_causes_are_not_read_when_the_feature_is_off(tmp_path, monkeypatch):
     calls = []
     monkeypatch.setattr(publish, "_failure_cause", lambda t: calls.append(t) or "")
-    _compose(tmp_path, THREE, {})
+    _compose(tmp_path, THREE, _state(THREE[:2], None))
     assert calls  # on by default
     calls.clear()
     inv = [_task(tmp_path, n) for n in THREE]

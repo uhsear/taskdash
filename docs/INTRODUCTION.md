@@ -25,6 +25,21 @@ or is overdue, and when it recovers. It can also send one daily check e-mail.
 TaskDash protects what it publishes. By default, it hides command lines, account names, paths and
 log samples. It also removes secrets from the free text that it publishes. See [SECURITY.md](../SECURITY.md).
 
+### Words in this guide
+
+- **Task:** a scheduled task in Windows Task Scheduler. TaskDash watches tasks.
+- **Computer:** the Windows computer whose tasks TaskDash reads. The dashboard shows its name in the
+  **Host** column.
+- **Collector:** the run of `taskdash collect --apply` that the hourly scheduled task starts. It
+  reads the tasks and publishes the rows.
+- **Service and view:** the service is the hosted feature layer that holds the six tables. The view
+  is a read-only layer on the service. The dashboard reads the view.
+- **Heartbeat:** the time since the collector last saved data. The dashboard shows it as a tile.
+- **Setting note:** a risk in the setup of a task, such as catch-up turned off. It is not a failure.
+- **Metric:** a named number that a task's script writes to its log, such as a record count.
+- **Workflow:** the script or program that a task runs. TaskDash uses this word only in the file
+  name `workflow_descriptions.json` and in the **Workflow Metrics** tab. That tab shows the metrics.
+
 ## Deploy the solution
 
 Follow [INSTALL.md](INSTALL.md). It takes you from nothing to a working dashboard in about one
@@ -47,9 +62,11 @@ After the install, use these guides:
 - **Account that installs and runs TaskDash:** a built-in ArcGIS account with a user name and a
   password. Multifactor authentication must be off for it. An account that signs in only through
   single sign-on (SAML) cannot be used.
-- **User type:** Creator. A Creator has the privileges that TaskDash needs. `taskdash preflight`
-  checks these privileges:
+- **User type:** Creator. A Creator has the privileges that TaskDash needs. For a production install,
+  use a dedicated account with a custom role that holds only these privileges. `taskdash preflight`
+  checks them:
   - create items;
+  - publish hosted feature layers;
   - create groups;
   - share items to groups;
   - edit features.
@@ -67,11 +84,12 @@ The computer that runs TaskDash needs these components:
 - **Windows:** Windows 10, Windows 11 or Windows Server 2016 or later.
 - **PowerShell:** Windows PowerShell (`powershell.exe`). TaskDash calls it to read the Task
   Scheduler, and the task installer is a PowerShell script.
-- **Python:** 64-bit Python 3.11 from python.org, installed for all users. This is the tested version.
-  The package declares Python 3.11 or later.
+- **Python:** 64-bit Python 3.13 from python.org, installed for all users. This is the supported
+  version. The package installs on 3.11 and 3.12, and CI tests both, but they are not supported.
 - **The `arcgis` package:** version 2.4 or later and earlier than 3. The wheel installs it.
-- **The `keyring` package:** the install guide's `pip install` line adds it with the `smtp` extra.
-  TaskDash reads it only if you set a mail user name. The mail password comes from the Windows keyring.
+- **The `pywin32` and `keyring` packages:** the wheel installs `pywin32`. The `arcgis` package installs
+  `keyring`, and the `smtp` extra in the install guide's `pip install` line names it too.
+  TaskDash reads `keyring` only if you set a mail user name. The mail password comes from the Windows keyring.
 - **A Windows account for the task:** a member of the local Administrators group, with a password.
   A standard account sees only some of the tasks.
 - **ArcGIS Pro:** TaskDash does not need it. Install it only where the tasks you monitor run arcpy.
@@ -80,7 +98,9 @@ The computer that runs TaskDash needs these components:
 
 ### Tested scale
 
-TaskDash is tested on one computer with 29 tasks that run at most hourly. Larger installs may work.
+TaskDash is tested on one computer with 29 tasks that run at most hourly. A weekly automated test
+also runs the offline passes on 500 synthetic tasks and checks that they finish in 15 minutes.
+Larger installs may work.
 Your computer can monitor more tasks, or tasks that repeat more often than hourly. Then the message
 on the `tested scale` line of `taskdash preflight` starts with `WARNING`. That line is not a failure.
 
@@ -124,7 +144,7 @@ These periods are the defaults of `retention.runs_days` (TaskRuns and CollectorR
 removes older rows. It also removes an inventory row when its task is gone.
 
 The alert e-mail is off by default. It needs `alerting.enabled` set to `true`, at least one address
-in `alerting.to`, and a mail server in the `smtp` section of the config. It names the host, the
+in `alerting.to`, and a mail server in the `smtp` section of the config. It names the computer, the
 failed and overdue tasks, and the other tasks that need attention. When several tasks fail for one
 reason, it names the likely shared cause. It quotes the last 15 lines of a failed task's log and
 links to the dashboard. It removes secrets from the log lines it quotes. The daily check e-mail is
@@ -136,10 +156,13 @@ sent only when `alerting.heartbeat_hour` is set. The example config sets it to 7
 
 Easier install and upkeep, and less work per hourly run. `Install-TaskDash.ps1` installs in one
 window, and `taskdash signin` and `taskdash preflight --as-task` set up and check the task account.
-New commands remove an install, retire a renamed computer and prune old dashboards. The hourly run
+New commands remove the items that setup made, retire a computer that you took out of service,
+and prune old local backup and log files. The hourly run
 reads 30 days of runs, sends only changed metric files, and Metric Change reads a small new table.
-Rules files can read comma decimals. Before you upgrade, note that TaskDash now needs Python 3.11 or
-later. See [UPGRADE.md](UPGRADE.md) and [CHANGELOG.md](../CHANGELOG.md).
+Rules files can read comma decimals. `Install-TaskDash.ps1 -Upgrade` does an upgrade in order, and
+preflight stops on an unsafe install folder or a mail password sent without encryption. Before you
+upgrade, note that Python 3.13 is the supported version. See [UPGRADE.md](UPGRADE.md) and
+[CHANGELOG.md](../CHANGELOG.md).
 
 ### 1.1.0 (2026-10-27)
 
@@ -189,16 +212,19 @@ See [CHANGELOG.md](../CHANGELOG.md) for the full history.
 ## Known limits
 
 - One computer per install is recommended. Several computers can publish to one service, because
-  every row holds the host name. This layout is not tested.
+  every row holds the computer name. This layout is not tested.
 - The dashboard shows run times in the time zone of the viewer's device. The schedules use the
   clock of the computer that runs the tasks.
 - TaskDash is tested on ArcGIS Online only. ArcGIS Enterprise is not tested yet.
 - Scrubbing secrets from command lines and log samples is best effort. A secret in an unusual form
   may pass. Keep the privacy switches on.
-- TaskDash is tested on one computer with 29 tasks that run at most hourly.
+- TaskDash is tested on one computer with 29 tasks that run at most hourly. A weekly automated
+  test also runs the offline passes on 500 synthetic tasks.
 - TaskDash must run on the computer it watches. It cannot read another computer's tasks.
 - The install must run at the computer's console or through Remote Desktop. A PowerShell remoting
   session cannot read the saved sign-in.
 - The task account must be an administrator on the computer.
 - The ArcGIS account must be a built-in account without multifactor authentication.
-- Run history starts at the moment the Task Scheduler event log is turned on.
+- Run history starts at the moment the Task Scheduler event log is turned on. On a busy log, the
+  first run keeps only the newest `history.first_run_max_events` events, so it can start later.
+  "Keep more or less history" in `docs/CONFIGURE.md` explains how to read more.

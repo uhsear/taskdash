@@ -117,7 +117,7 @@ def _patch_publish_and_dashboard(monkeypatch, gis, path, log, fail_view=False):
         log.append(("share", item.id, tuple(getattr(g, "id", g) for g in kw.get("groups", ())),
                     kw.get("org", False)))
 
-    def post_dashboard(g, definition, title, existing, config=None):
+    def post_dashboard(g, definition, title, existing, config=None, demo=False):
         log.append(("post_dashboard", title, existing, definition))
         return "dash1"
 
@@ -125,7 +125,7 @@ def _patch_publish_and_dashboard(monkeypatch, gis, path, log, fail_view=False):
     monkeypatch.setattr(publish, "get_tables", lambda item: {"t": 1})
     monkeypatch.setattr(setup, "get_tables", lambda item: {"t": 1})
     monkeypatch.setattr(publish, "apply_migration",
-                        lambda tables, item=None: log.append(("apply_migration", item.id)))
+                        lambda tables, item=None, **k: log.append(("apply_migration", item.id)))
     monkeypatch.setattr(publish, "create_view", create_view)
     monkeypatch.setattr(publish, "share_item", share_item)
     monkeypatch.setattr(publish, "table_urls", lambda *items: ["https://h/0"])
@@ -134,7 +134,7 @@ def _patch_publish_and_dashboard(monkeypatch, gis, path, log, fail_view=False):
     monkeypatch.setattr(dashboard, "resolve_layer_ids",
                         lambda g, item_id, target: log.append(("layer_ids", item_id, target)) or {})
     monkeypatch.setattr(dashboard, "build",
-                        lambda item_id, templates, layer_ids, portal_url, config: {"read": item_id})
+                        lambda item_id, templates, layer_ids, portal_url, config, demo=False: {"read": item_id})
     monkeypatch.setattr(dashboard, "post_dashboard", post_dashboard)
     monkeypatch.setattr(dashboard, "validate_definition",
                         lambda definition, layer_ids, config, data_item="": log.append(("validate", data_item)))
@@ -351,7 +351,7 @@ def test_create_service_apply_also_migrates(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(publish, "connect_agol", lambda config: "gis")
     monkeypatch.setattr(publish, "create_service", lambda g, name, config: item)
     monkeypatch.setattr(publish, "get_tables", lambda i: {"t": 1})
-    monkeypatch.setattr(publish, "apply_migration", lambda tables, item=None: log.append(item.id))
+    monkeypatch.setattr(publish, "apply_migration", lambda tables, item=None, **k: log.append(item.id))
     args = publish.parse_args(["--create-service", "--apply"])
     assert publish._main_dispatch(args, {}, tmp_path) == 0
     assert log == ["svcX"]

@@ -1,4 +1,5 @@
-"""List what the docs must cover: every config key, every CLI flag and every SystemExit message.
+"""List what the docs must cover: every config key, every CLI flag, every SystemExit message and
+every WARNING line of the collector's log.
 
     python _tools/doc_inventory.py                  # print what the docs do not cover yet
     python _tools/doc_inventory.py --write-pending  # rewrite tests/docs_pending.json from that
@@ -11,7 +12,9 @@ Covered means:
 - a config key appears in docs/CONFIGURE.md as `dotted.key` (in backticks);
 - a CLI flag appears in docs/CONFIGURE.md as `--flag`;
 - a SystemExit message's key text appears in docs/TROUBLESHOOTING.md. The key text is the
-  longest literal run of the message (f-string placeholders split it), with whitespace collapsed.
+  longest literal run of the message (f-string placeholders split it), with whitespace collapsed;
+- a log WARNING's key text appears in docs/TROUBLESHOOTING.md. A log WARNING is a string that begins
+  `WARNING: ` in a module that writes the collector's log. Its key text is found as above.
 """
 import argparse
 import ast
@@ -114,6 +117,43 @@ def exit_messages(short=None):
     return found
 
 
+# The modules whose emit() lines reach the collector's log. The other modules print to a window.
+LOG_MODULES = ("taskdash_collect.py", "taskdash_common.py", "taskdash_metrics.py", "taskdash_publish.py")
+
+
+def _warning_nodes(tree):
+    """The outermost string expressions that begin `WARNING: `."""
+    found = []
+
+    def visit(node):
+        if isinstance(node, (ast.Constant, ast.JoinedStr, ast.BinOp)):
+            runs = _literal_runs(node)
+            if runs and runs[0].startswith("WARNING: "):
+                found.append(node)
+                return
+            if not isinstance(node, ast.BinOp):
+                return
+        for child in ast.iter_child_nodes(node):
+            visit(child)
+
+    visit(tree)
+    return found
+
+
+def log_warnings():
+    """{key text: 'file:line'} for every WARNING line that the collector can write to its log."""
+    found = {}
+    for name in LOG_MODULES:
+        path = ROOT / name
+        for node in _warning_nodes(ast.parse(path.read_text(encoding="utf-8"))):
+            runs = [" ".join(r.split()) for r in _literal_runs(node)]
+            runs[0] = runs[0][len("WARNING: "):]
+            key = max(runs, key=len).strip(" .:;,'\"(-")
+            if len(key) >= 12:
+                found.setdefault(key, f"{name}:{node.lineno}")
+    return found
+
+
 def _text(path):
     return " ".join(path.read_text(encoding="utf-8").split()) if path.is_file() else ""
 
@@ -124,6 +164,7 @@ def uncovered():
         "config_keys": sorted(k for k in config_keys() if f"`{k}`" not in configure),
         "cli_flags": sorted(f for f in cli_flags() if f"`{f}`" not in configure),
         "exit_messages": sorted(m for m in exit_messages() if m not in troubleshooting),
+        "log_warnings": sorted(m for m in log_warnings() if m not in troubleshooting),
     }
 
 

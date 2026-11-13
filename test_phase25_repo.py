@@ -24,6 +24,8 @@ MUST_BE_IGNORED = [
     "dashboard_taskdash.json", "archive/old.json", "__pycache__/m.cpython-313.pyc", "m.pyc",
     ".pytest_cache/v", ".coverage", "conn." + "sd" + "e", ".claude/settings.local.json",
     "collector_runs_pending_prod.json",
+    "taskdash_handoff.bin", ".alert_state.json.tmp4242", "build/lib/m.py", "dist/taskdash-1.0.0-py3-none-any.whl",
+    "taskdash.egg-info/PKG-INFO",
 ]
 
 
@@ -92,6 +94,20 @@ def test_example_config_documents_every_key_and_stays_private_by_default():
     ids = [v for k, v in example["arcgis"].items() if k.endswith("item_id") or k == "dashboard_id"]
     # Empty, not placeholders: taskdash setup refuses a config that already names an item.
     assert ids and all(v == "" for v in ids)
+
+
+def test_example_notes_come_in_three_groups_in_the_order_a_new_admin_works():
+    # TD-108: keys to set, then keys that setup fills, then the optional ones; the development and
+    # deprecated keys close the list. The minimum is the same list as docs/CONFIGURE.md.
+    notes = list(_example()["_notes"])
+    first, second, third = (notes.index(f"_{n}") for n in ("1_keys_you_set", "2_keys_setup_fills", "3_optional_keys"))
+    assert notes[0] == "about" and 0 < first < second < third
+    assert notes[first + 1:second] == ["arcgis.url", "arcgis.profile", "rules.profiles"]
+    assert notes[second + 1:third] == ["arcgis.item_id", "arcgis.view_item_id", "arcgis.dashboard_id"]
+    assert notes[-3:] == ["arcgis.test_item_id", "arcgis.test_view_item_id", "alerting.mail_config_path"]
+    guide = (ROOT / "docs" / "CONFIGURE.md").read_text(encoding="utf-8")
+    minimum = guide.split("### Minimum config")[1].split("### ")[0]
+    assert all(f"`{key}`" in minimum for key in notes[first + 1:second] + notes[second + 1:third])
 
 
 def test_example_config_points_at_no_organization():

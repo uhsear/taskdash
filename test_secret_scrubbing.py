@@ -216,6 +216,48 @@ def test_a_systemexit_message_is_scrubbed_before_the_interpreter_prints_it(monke
     assert SECRET not in caught.value.code and "token=<redacted>" in caught.value.code
 
 
+def test_the_installed_command_scrubs_a_systemexit_message(monkeypatch):
+    import taskdash_cli as cli
+    monkeypatch.setattr(cli, "main", lambda argv=None: (_ for _ in ()).throw(
+        SystemExit(f"cannot sign in: ?token={SECRET}")))
+    monkeypatch.setattr("sys.excepthook", sys.excepthook)
+    with pytest.raises(SystemExit) as caught:
+        cli.run()
+    assert SECRET not in caught.value.code and "token=<redacted>" in caught.value.code
+
+
+def test_the_installed_command_tells_you_to_reinstall_when_the_scrubber_cannot_load(monkeypatch):
+    import taskdash_cli as cli
+    monkeypatch.setattr(cli, "main", lambda argv=None: (_ for _ in ()).throw(SystemExit("anything")))
+    monkeypatch.setattr("sys.excepthook", sys.excepthook)
+    monkeypatch.setitem(sys.modules, "taskdash_publish", None)  # makes `from taskdash_publish import ...` raise ImportError
+    with pytest.raises(SystemExit) as caught:
+        cli.run()
+    assert "Reinstall TaskDash" in caught.value.code and "anything" not in caught.value.code
+
+
+def test_the_installed_command_prints_a_scrubbed_traceback(monkeypatch, capsys):
+    import taskdash_cli as cli
+    def boom(argv=None):
+        raise RuntimeError(f"upload failed for https://host.example/api?token={SECRET}&n=1")
+    monkeypatch.setattr(cli, "main", boom)
+    monkeypatch.setattr("sys.excepthook", sys.excepthook)
+    with pytest.raises(RuntimeError) as caught:
+        cli.run()
+    sys.excepthook(caught.type, caught.value, caught.tb)
+    shown = capsys.readouterr().err
+    assert "RuntimeError" in shown and SECRET not in shown and "token=<redacted>&n=1" in shown
+
+
+def test_the_installed_command_keeps_a_numeric_exit_code(monkeypatch):
+    import taskdash_cli as cli
+    monkeypatch.setattr(cli, "main", lambda argv=None: (_ for _ in ()).throw(SystemExit(3)))
+    monkeypatch.setattr("sys.excepthook", sys.excepthook)
+    with pytest.raises(SystemExit) as caught:
+        cli.run()
+    assert caught.value.code == 3
+
+
 def test_a_numeric_systemexit_passes_through(monkeypatch):
     monkeypatch.setattr(publish, "main", lambda argv=None: (_ for _ in ()).throw(SystemExit(3)))
     with pytest.raises(SystemExit) as caught:

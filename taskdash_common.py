@@ -5,9 +5,9 @@ Source: Windows Task Scheduler + Microsoft-Windows-TaskScheduler/Operational log
 Target: ArcGIS Online hosted table service (TaskInventory / TaskRuns / TaskMetrics)
 
 Config lives in TaskDash.config.json next to this file (installed from a wheel: in TASKDASH_HOME,
-else the working directory). Host identity comes from
-`host_name_override` so a machine rename is a one-line config change -- a task-server
-migration once silently forked the dataset because identity was socket.gethostname().
+else the working directory). Host identity is `host_name_override` when set, else the computer
+name. After a rename use `host_previous_names`: it moves the old name's inventory rows -- a
+task-server migration once silently forked the dataset because identity was socket.gethostname().
 """
 
 from __future__ import annotations
@@ -29,14 +29,75 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 # Shown in the dashboard's About panel and the wheel name; release.yml checks it against the tag.
-TASKDASH_VERSION = "1.2.0"
+TASKDASH_VERSION = "1.2.0rc1"
 # Bump when TABLE_SPECS or TABLE_INDEXES change. A service stamped with a newer number was
 # migrated by a newer TaskDash, which this one may write wrongly.
 SCHEMA_VERSION = 2
 
 DEFAULT_CONFIG_FILE = "TaskDash.config.json"
-DEFAULT_POWERSHELL_TIMEOUT_SECONDS = 180
-DEFAULT_CHUNK_SIZE = 200
+# What the code uses when a known config key is absent: the one place these values live. Read a
+# value with config_default(). The wording `preflight --config-diff` prints comes from here too, and
+# a test compares it with the Default column of docs/CONFIGURE.md. Taken from the code, never from
+# TaskDash.config.example.json, whose values are placeholders. The sign-in password keys are left
+# out: nothing about them is printed. A string such as "true when smtp.port is 465, else false"
+# stands for a default that depends on another key.
+CONFIG_DEFAULTS: Dict[str, Any] = {
+    "host_name_override": "", "host_previous_names": "",
+    "powershell_timeout_seconds": 180,
+    "arcgis.url": "https://www.arcgis.com",
+    "arcgis.profile": "", "arcgis.username": "", "arcgis.username_env": "",
+    "arcgis.item_id": "", "arcgis.test_item_id": "",
+    "arcgis.view_item_id": "", "arcgis.test_view_item_id": "", "arcgis.dashboard_id": "",
+    "arcgis.service_description": "TaskDash - scheduled task monitoring",
+    "arcgis.service_tags": "taskdash,monitoring,scheduled tasks",
+    "arcgis.dashboard_tags": "taskdash,monitoring",
+    "alerting.enabled": False, "alerting.to": "", "alerting.mail_config_path": "",
+    "alerting.healthcheck_url": "", "alerting.include_log_tail": True,
+    "alerting.dashboard_url": "", "alerting.heartbeat_hour": None,
+    "alerting.realert_hours": 24, "alerting.shared_cause_min_tasks": 3,
+    "alerting.incident_digest_hours": 6, "alerting.maintenance_windows": [],
+    "scheduler.task_name_regex": "", "scheduler.task_path_regex": "",
+    "scheduler.action_regex": "", "scheduler.exclude_task_name_regex": "",
+    "scheduler.exclude_microsoft_tasks": True, "scheduler.include_disabled": True,
+    "scheduler.exclude_command_target_types": [],
+    "scheduler.interactive_required_pattern": "\\ArcGIS\\Pro\\bin\\Python",
+    "scheduler.collector_task_name": "TaskDash Collector",
+    "scheduler.collector_interval_minutes": 60,
+    "scheduler.overdue_grace_minutes": 15.0,
+    "scheduler.heartbeat_ignore_after_days": 7,
+    "history.max_events_per_run": 5000, "history.days_back": 30, "history.first_run_max_events": 30000,
+    "metrics.days_back": 30, "metrics.max_log_files_per_task": 40, "metrics.max_lines_per_file": 5000,
+    "metrics.log_directory_overrides": {}, "metrics.log_roots": [], "metrics.tasks": {},
+    "upload.chunk_size": 200,
+    "retention.runs_days": 90, "retention.metrics_days": 90, "retention.changes_days": 365,
+    "logging.log_dir": "", "logging.max_log_age_days": 30,
+    "smtp.host": "", "smtp.port": 587, "smtp.from": "", "smtp.user": "",
+    "smtp.starttls": True, "smtp.ssl": "true when smtp.port is 465, else false",
+    "smtp.allow_plaintext_auth": False,
+    "privacy.hide_command_lines": True, "privacy.hide_sample_lines": True,
+    "privacy.hide_accounts": True, "privacy.hide_paths": True,
+    "rules.profiles": "none (required)",
+}
+
+
+# Keys whose map entry is wording, not a value the code can use.
+_WORDING_ONLY_DEFAULTS = frozenset({"smtp.ssl", "rules.profiles"})
+
+
+def config_default(dotted_key: str) -> Any:
+    """The code default of a known config key, such as "history.days_back".
+
+    A list or dict comes back as a copy, so a caller cannot change the map.
+    """
+    if dotted_key in _WORDING_ONLY_DEFAULTS:
+        # A truthy wording string read as smtp.ssl would switch SSL on.
+        raise KeyError(f"{dotted_key} has no single default value; compute it from the other keys")
+    value = CONFIG_DEFAULTS[dotted_key]
+    return value.copy() if isinstance(value, (list, dict)) else value
+
+
+DEFAULT_POWERSHELL_TIMEOUT_SECONDS = config_default("powershell_timeout_seconds")
+DEFAULT_CHUNK_SIZE = config_default("upload.chunk_size")
 
 TABLE_INVENTORY = "TaskInventory"
 TABLE_RUNS = "TaskRuns"
@@ -137,6 +198,26 @@ _CONFIG_NUMBER_KEYS = {
     "upload.chunk_size", "retention.runs_days", "retention.metrics_days",
     "retention.changes_days", "logging.max_log_age_days", "smtp.port",
 }
+# Dotted key -> (lowest, highest or None, lowest allowed itself, whole numbers only). Only values that
+# break a run are ruled out. retention.*_days, logging.max_log_age_days and metrics.max_lines_per_file
+# are absent on purpose: 0 or less is a documented setting there (keep everything, read the whole file).
+_CONFIG_RANGES = {
+    "powershell_timeout_seconds": (0, None, False, False),
+    "alerting.heartbeat_hour": (0, 23, True, True),
+    "alerting.realert_hours": (0, None, True, False),
+    "alerting.shared_cause_min_tasks": (0, None, True, True),
+    "alerting.incident_digest_hours": (0, None, True, False),
+    "scheduler.overdue_grace_minutes": (0, 525600, True, False),
+    "scheduler.collector_interval_minutes": (0, None, False, False),
+    "scheduler.heartbeat_ignore_after_days": (0, None, False, False),
+    "history.max_events_per_run": (1, None, True, True),
+    "history.days_back": (0, None, False, False),
+    "history.first_run_max_events": (1, None, True, True),
+    "metrics.days_back": (0, None, False, False),
+    "metrics.max_log_files_per_task": (1, None, True, True),
+    "upload.chunk_size": (1, None, True, True),
+    "smtp.port": (1, 65535, True, True),
+}
 _CONFIG_BOOL_KEYS = {"alerting.enabled", "alerting.include_log_tail", "scheduler.exclude_microsoft_tasks",
                     "scheduler.include_disabled", "arcgis.allow_plaintext_password",
                     "smtp.starttls", "smtp.ssl", "smtp.allow_plaintext_auth",
@@ -186,7 +267,7 @@ def config_diff(config: Dict[str, Any]) -> Dict[str, List[Any]]:
 
     The example file's values are placeholders and often differ from the code default (the example
     sets heartbeat_hour 7, the code default sends no daily e-mail), so they are no source of
-    defaults. taskdash_preflight.CONFIG_DEFAULTS holds the code defaults.
+    defaults. CONFIG_DEFAULTS in this module holds the code defaults.
 
     unknown: dotted keys TaskDash ignores (likely typos); absent: dotted known keys the config
     lacks; renamed: [(old, new)]. '_' keys are notes. Nested objects such as metrics.tasks are not
@@ -220,6 +301,27 @@ def _redact_config_value(dotted_key: str, value: Any) -> Any:
     if "password" in dotted_key.lower() or "secret" in dotted_key.lower():
         return "<redacted>"
     return value
+
+
+def config_range_problem(dotted_key: str, value: Any) -> Optional[str]:
+    """'<key> must be <what>, got <value>' when value is not a finite number inside the key's range
+    in _CONFIG_RANGES, else None. load_config and the dashboard command share it."""
+    low, high, low_allowed, whole = _CONFIG_RANGES[dotted_key]
+    number = "a whole number" if whole else "a number"
+    expected = (f"{number} from {low:g} to {high:g}" if high is not None
+                else f"{number} of {low:g} or more" if low_allowed else f"{number} above {low:g}")
+    ok = (isinstance(value, (int, float)) and not isinstance(value, bool) and value == value
+          and abs(value) != float("inf") and (value > low or (low_allowed and value == low))
+          and (high is None or value <= high) and (not whole or value == int(value)))
+    return None if ok else f"{dotted_key} must be {expected}, got {_redact_config_value(dotted_key, value)!r}"
+
+
+_CONFIG_REGEX_KEYS = ("scheduler.task_name_regex", "scheduler.task_path_regex", "scheduler.action_regex",
+                      "scheduler.exclude_task_name_regex")
+# A folder such as \Nightly\ is the usual way to hit this: JSON turns "\\Nightly\\" into \Nightly\,
+# and the regex engine then reads \N and a trailing backslash as escapes.
+_REGEX_BACKSLASH_HINT = (r'In the JSON file, write each backslash twice: "^\\\\Nightly\\\\$" is the regex '
+                         r"^\\Nightly\\$, which matches the folder \Nightly\.")
 
 
 def _previous_names_errors(config: Dict[str, Any]) -> List[str]:
@@ -275,7 +377,22 @@ def _maintenance_window_warnings(config: Dict[str, Any]) -> List[str]:
         if not isinstance(task, str) or not task.strip():
             warnings.append(f"WARNING: {where} has no non-empty \"task\" (a regex), so it matches nothing. "
                             f"Add it, or remove the entry.")
+        for field in ("start", "end"):
+            if _is_naive_iso_time(window.get(field)):
+                warnings.append(f"WARNING: {where}.{field} has no offset, so TaskDash reads it as UTC, which can be "
+                                f"hours off your local time. Add the offset, such as -05:00, or Z for UTC.")
     return warnings
+
+
+def _is_naive_iso_time(value: Any) -> bool:
+    """True for a readable ISO 8601 time that carries no offset. Other values are not this warning's concern."""
+    text = value.strip() if isinstance(value, str) else ""
+    if not text or text.endswith("Z"):
+        return False
+    try:
+        return datetime.fromisoformat(re.sub(r"(\.\d{6})\d+", r"\1", text)).tzinfo is None
+    except ValueError:
+        return False
 
 
 def _validate_config(config: Dict[str, Any]) -> List[str]:
@@ -291,7 +408,7 @@ def _validate_config(config: Dict[str, Any]) -> List[str]:
 
     for key in _CONFIG_STRING_KEYS:
         value = _config_path_value(config, key)
-        # false turns the Interactive-logon rule off (a licence that is not Single Use).
+        # false turns the Interactive-logon rule off (a licence that also works in a background session).
         if key == "scheduler.interactive_required_pattern" and value is False:
             continue
         if value is not _MISSING and value is not None:
@@ -301,8 +418,19 @@ def _validate_config(config: Dict[str, Any]) -> List[str]:
         value = _config_path_value(config, key)
         if value is not _MISSING and value is not None:
             # json accepts NaN/Infinity; int(nan) and timedelta(hours=inf) would break the run.
-            check(key, value, "a finite number", isinstance(value, (int, float))
-                  and not isinstance(value, bool) and value == value and abs(value) != float("inf"))
+            finite = (isinstance(value, (int, float)) and not isinstance(value, bool)
+                      and value == value and abs(value) != float("inf"))
+            check(key, value, "a finite number", finite)
+            if finite and key in _CONFIG_RANGES:
+                errors.extend(filter(None, [config_range_problem(key, value)]))
+
+    for key in _CONFIG_REGEX_KEYS:
+        value = _config_path_value(config, key)
+        if isinstance(value, str) and value:
+            try:
+                re.compile(value)
+            except re.error as exc:
+                errors.append(f"{key} is not a valid regular expression ({exc}). {_REGEX_BACKSLASH_HINT}")
 
     for key in _CONFIG_BOOL_KEYS:
         value = _config_path_value(config, key)
@@ -419,9 +547,9 @@ def load_config(config_path: Optional[Path] = None, *, defer_warnings: bool = Fa
 def get_host_name(config: Dict[str, Any]) -> str:
     """Stable logical host identity. Override wins so a rename never forks the dataset.
 
-    The override is what survives a machine rename, but it also means running this from the
-    wrong box would file that box's tasks under the configured host. Warn loudly rather than
-    block: after a genuine rename the mismatch is expected and correct.
+    Running this from the wrong box would file that box's tasks under the configured host. This
+    function only warns; `collect --apply` refuses to publish on a mismatch (host_mismatch in
+    taskdash_publish). After a rename leave the override empty and use `host_previous_names`.
     """
     import socket
 
@@ -502,10 +630,24 @@ def see_troubleshooting(heading: str) -> str:
     return f"See TROUBLESHOOTING.md, section {heading}."
 
 
+# One help string for every --config option: the file is the install's own, not "next to the scripts".
+CONFIG_ARG_HELP = "Config file. Default: the install's config."
+
+
+def command_text(command: str, *flags: str) -> str:
+    """The one form a message uses to name a command to run: `taskdash <command> <flags>`.
+    A bare flag names no command, and `python taskdash_publish.py` does not exist in a wheel
+    install. test_audit_s04_commands checks the shipped messages for both."""
+    return "`" + " ".join(("taskdash", command, *flags)) + "`"
+
+
 # setup_logging's own "{prefix}_{stamp}.log", the bootstrap*.log files written directly by
 # run_taskdash.cmd (its stdout/stderr redirect, before setup_logging ever runs), and the
 # --preview-alert output.
 TASKDASH_LOG_GLOBS = ("taskdash_*.log", "bootstrap*.log", "alert_preview_*.txt")
+# Prefix of the run log of every collect run except the hourly prod publish (a dry run, a test run,
+# --migrate). `taskdash status --offline` skips these, so a manual run cannot hide the task's result.
+MANUAL_LOG_PREFIX = "taskdash_manual"
 
 
 def write_bootstrap_fail(message: str) -> None:
@@ -560,9 +702,12 @@ class RunLockHeld(Exception):
     that has been stuck holding the lock for hours -- see STALE_LOCK_HOURS.
     """
 
-    def __init__(self, message: str, held_since: Optional[datetime] = None):
+    def __init__(self, message: str, held_since: Optional[datetime] = None, pid: Optional[int] = None,
+                 lock_path: Optional[Path] = None):
         super().__init__(message)
         self.held_since = held_since
+        self.pid = pid
+        self.lock_path = lock_path
 
 
 STALE_LOCK_HOURS = 2  # a run stuck this long is treated as dead, not a normal overlap
@@ -619,8 +764,11 @@ def run_lock(log_dir: Path, name: str = "taskdash.lock"):
         handle.close()
         metadata = _lock_metadata(lock_path)
         detail = f" ({metadata})" if metadata else ""
+        pid_match = re.search(r"pid=(\d+)", metadata)
         raise RunLockHeld(f"Run lock at {lock_path} is held by another process{detail}.",
-                          held_since=_lock_started(metadata)) from exc
+                          held_since=_lock_started(metadata),
+                          pid=int(pid_match.group(1)) if pid_match else None,
+                          lock_path=lock_path) from exc
     try:
         handle.seek(1)
         handle.truncate()
@@ -690,6 +838,16 @@ def safe_float(value: Any) -> Optional[float]:
 
 def escape_sql_string(value: str) -> str:
     return str(value).replace("'", "''")
+
+
+def host_clause(*names: str, exclude: bool = False) -> str:
+    """The where clause that picks (or with exclude, skips) rows of the named computers. The column stays
+    bare so the hosted database can seek its host_name indexes; it compares text without regard to case.
+    The one place that quotes the value."""
+    values = ",".join(f"'{escape_sql_string(name.upper())}'" for name in names)
+    if len(names) == 1:
+        return f"host_name {'<>' if exclude else '='} {values}"
+    return f"host_name {'NOT IN' if exclude else 'IN'} ({values})"
 
 
 def parse_iso_datetime(value: Any) -> Optional[datetime]:
@@ -950,7 +1108,7 @@ def with_retry(
     if isinstance(last_exc, requests.exceptions.SSLError):
         raise SystemExit(f"{label} failed after {attempts} attempts. SSLError: the certificate of "
                          f"the ArcGIS server was not trusted. " + _ssl_fix_text(last_exc)
-                         + see_troubleshooting("TaskDash cannot reach ArcGIS")) from last_exc
+                         + see_troubleshooting("The certificate was not trusted (SSLError)")) from last_exc
     raise SystemExit(f"{label} failed after {attempts} attempts: {last_exc}\n"
                      + see_troubleshooting("An ArcGIS call failed after several tries"))
 
@@ -1020,13 +1178,47 @@ def _open_gis(url: str, *args: Any, **kwargs: Any) -> Any:
         raise SystemExit(
             f"SSLError: the certificate of arcgis.url '{url}' was not trusted. "
             + _ssl_fix_text(exc)
-            + see_troubleshooting("TaskDash cannot reach ArcGIS")) from exc
+            + see_troubleshooting("The certificate was not trusted (SSLError)")) from exc
     except requests.exceptions.ConnectionError as exc:
         raise SystemExit(
             f"Cannot reach arcgis.url '{url}'. Check the URL in the config (ArcGIS Online is "
             f"https://www.arcgis.com or https://<org>.maps.arcgis.com), the network and any proxy. "
             f"Detail: {type(exc).__name__}: {str(exc)[:200]}\n"
             + see_troubleshooting("TaskDash cannot reach ArcGIS")) from exc
+
+
+SIGNIN_FIX = (f"Run {command_text('signin', '--apply')} as the Windows account that runs this command. To "
+              f"sign in the scheduled task's account without runas, run "
+              f"{command_text('signin', '--for-task-account', '--apply')} in your own window.")
+
+
+def _sign_in_or_exit(url: str, what: str, *args: Any, secret: str = "", **kwargs: Any) -> Any:
+    """_open_gis, with any other sign-in failure (a wrong or expired password) turned into the one
+    exit that names the fix. SSL and connection failures already exit from _open_gis. The text is cut
+    and the secret removed, because an ArcGIS error can quote what was sent. A timeout, an HTTP 5xx
+    and a broken arcgis package are not credential faults: they propagate, so main() logs the
+    traceback and the user is not told to store a working sign-in again."""
+    import requests
+
+    try:
+        return _open_gis(url, *args, **kwargs)
+    except (ImportError, AttributeError, requests.exceptions.Timeout):
+        raise
+    except Exception as exc:
+        response = getattr(exc, "response", None)
+        if isinstance(exc, requests.exceptions.HTTPError) and (getattr(response, "status_code", 0) or 0) >= 500:
+            raise
+        text = f"{type(exc).__name__}: {exc}"
+        text = (text.replace(secret, "***") if secret else text)[:200]
+        raise SystemExit(f"ArcGIS sign-in with {what} failed: {text}. {SIGNIN_FIX}\n"
+                         + see_troubleshooting("The stored sign-in does not work")) from None
+
+
+def _empty_env_names(*names: str) -> str:
+    """The *_env settings that name a variable this process does not have, as one sentence or ''."""
+    empty = [name for name in names if name and not os.environ.get(name)]
+    return (f" The environment variable {' and '.join(repr(n) for n in empty)} is empty or not set for "
+            f"the account that runs TaskDash.") if empty else ""
 
 
 def connect_agol(config: Dict[str, Any]) -> Any:
@@ -1041,11 +1233,10 @@ def connect_agol(config: Dict[str, Any]) -> Any:
     if profile:
         if agol.get("password"):
             emit("WARNING: arcgis.password is unused with arcgis.profile; delete it from the config.")
-        gis = _open_gis(url, profile=profile)
+        gis = _sign_in_or_exit(url, f"the stored profile '{profile}'", profile=profile)
         if gis.users.me is None:
             raise SystemExit(
-                f"arcgis.profile '{profile}' did not sign in. Store it once with "
-                f"GIS(url, user, password, profile='{profile}') as the account the scheduled task runs under.\n"
+                f"arcgis.profile '{profile}' did not sign in. {SIGNIN_FIX}\n"
                 + see_troubleshooting("The stored sign-in does not work"))
         emit(f"Connected to ArcGIS portal as: {gis.users.me.username}")
         return gis
@@ -1057,20 +1248,21 @@ def connect_agol(config: Dict[str, Any]) -> Any:
 
     if not username or not password:
         raise SystemExit(
-            "No ArcGIS credentials resolved. Set arcgis.username/password in the config, "
-            "or set arcgis.username_env/password_env to environment variable names.\n"
+            "No ArcGIS credentials resolved: arcgis.profile is empty. Set arcgis.profile to taskdash in "
+            f"the config. Then store the sign-in. {SIGNIN_FIX}"
+            + _empty_env_names(user_env, pass_env) + "\n"
             + see_troubleshooting("TaskDash finds no ArcGIS credentials")
         )
 
     if agol.get("password") and not pass_env and agol.get("allow_plaintext_password") is not True:
         raise SystemExit(
-            "arcgis.password is stored in plaintext in the config. Store a profile once, as the "
-            "account the scheduled task runs under: GIS(url, user, password, profile=\"name\"), "
-            "then set arcgis.profile to that name and delete arcgis.password. To accept the "
-            "risk instead, set arcgis.allow_plaintext_password to true.\n"
+            f"arcgis.password is stored in plaintext in the config, which TaskDash refuses. {SIGNIN_FIX} "
+            "Then set arcgis.profile to the profile name and delete arcgis.password. Only if you accept "
+            "the risk, set arcgis.allow_plaintext_password to true.\n"
             + see_troubleshooting("The config holds a plaintext password"))
 
-    gis = _open_gis(url, username, password)
+    gis = _sign_in_or_exit(url, "the user name and password from the config", username, password,
+                           secret=password)
     emit(f"Connected to ArcGIS portal as: {gis.users.me.username}")
     return gis
 
@@ -1300,6 +1492,22 @@ SMTP_KEYRING_SERVICE = "taskdash-smtp"
 # Why the newest send_email call failed. send_email keeps its bool return so every caller and test
 # double still works; a caller that needs the reason reads it here right after a False.
 last_send_error = ""
+# Said by every warning that leaves a run without usable mail settings: the run does not carry on
+# without alerts, it fails when an alert is due.
+_CANNOT_ALERT = "TaskDash cannot send alerts, so a run with an alert due exits 1."
+
+
+def mail_failure_hint(reason: str) -> str:
+    """The fix for a failed send, picked by its cause (the "Type: text" of last_send_error). A relay on
+    port 25 that offers no STARTTLS fails the default STARTTLS step; the firewall is not the cause."""
+    if "SMTPNotSupportedError" in reason and "STARTTLS" in reason:
+        return ("The mail server does not offer STARTTLS. If it is a relay on port 25 that takes mail "
+                "without encryption and needs no sign-in, set smtp.starttls to false. Otherwise use "
+                "port 587 with smtp.starttls, or port 465 with smtp.ssl.")
+    return ("Check smtp.host, smtp.port, smtp.from and smtp.user in the config, and the SMTP password "
+            "stored for the account that runs the task. Run `taskdash preflight --as-task --apply` "
+            "and read its smtp line to check that account. `taskdash test-alert --apply` sends from "
+            "your own account, so it cannot prove the task account's password.")
 
 
 def _smtp_block_settings(smtp: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -1310,35 +1518,35 @@ def _smtp_block_settings(smtp: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     host = normalize_text(smtp.get("host"))
     sender = normalize_text(smtp.get("from"))
     if not host or not sender:
-        emit("WARNING: smtp block needs host and from; alerting disabled for this run.")
+        emit(f"WARNING: smtp block needs host and from. {_CANNOT_ALERT}")
         return None
-    port = smtp.get("port", 587)
-    use_ssl = smtp["ssl"] if "ssl" in smtp else port == 465
+    port = smtp.get("port", config_default("smtp.port"))
+    use_ssl = smtp.get("ssl")
+    if use_ssl is None:  # absent or null: the port decides, so changing only the port to 465 works
+        use_ssl = port == 465
     mail: Dict[str, Any] = {
         "smtp server": host, "from address": sender,
-        "smtp port": port, "use tls": smtp.get("starttls", True), "use ssl": use_ssl,
+        "smtp port": port, "use tls": smtp.get("starttls", config_default("smtp.starttls")), "use ssl": use_ssl,
         "strict tls": True,
     }
     user = normalize_text(smtp.get("user"))
     if user and not (use_ssl or mail["use tls"]) and smtp.get("allow_plaintext_auth") is not True:
         emit("WARNING: smtp.user is set but the connection is unencrypted (smtp.starttls and "
              "smtp.ssl are both off); refusing to send the password. Enable smtp.starttls or "
-             "smtp.ssl, or set smtp.allow_plaintext_auth to true to accept the risk. "
-             "Alerting disabled for this run.")
+             f"smtp.ssl, or set smtp.allow_plaintext_auth to true to accept the risk. {_CANNOT_ALERT}")
         return None
     if user:
         try:
             import keyring
             password = keyring.get_password(SMTP_KEYRING_SERVICE, user)
         except Exception as exc:  # noqa: BLE001 - a broken keyring backend must not fail the publish
-            emit(f"WARNING: could not read the SMTP password from keyring ({type(exc).__name__}); "
-                 "alerting disabled for this run.")
+            emit(f"WARNING: could not read the SMTP password from keyring ({type(exc).__name__}). "
+                 f"{_CANNOT_ALERT}")
             return None
         if not password:
             emit(f"WARNING: no SMTP password in keyring for service '{SMTP_KEYRING_SERVICE}', "
                  f"user '{user}'. Store one as the account the scheduled task runs under: "
-                 f"python -m keyring set {SMTP_KEYRING_SERVICE} {user}. "
-                 "Alerting disabled for this run.")
+                 f"\"{sys.executable}\" -m keyring set {SMTP_KEYRING_SERVICE} {user}. {_CANNOT_ALERT}")
             return None
         mail["smtp username"] = user
         mail["smtp password"] = password
@@ -1351,7 +1559,7 @@ def legacy_mail_warnings(mail: Dict[str, Any]) -> List[str]:
     warnings = [
         "alerting.mail_config_path is deprecated and TLS is not verified for it, so the mail server's "
         "certificate is never checked. Move to the smtp block (smtp.host, smtp.from, smtp.user; store "
-        "the password with 'python -m keyring set taskdash-smtp <smtp.user>'), then clear "
+        f"the password with '\"{sys.executable}\" -m keyring set taskdash-smtp <smtp.user>'), then clear "
         "alerting.mail_config_path."]
     if mail.get("smtp username") and mail.get("smtp password") and not mail.get("use tls", True):
         warnings.append(
@@ -1361,30 +1569,31 @@ def legacy_mail_warnings(mail: Dict[str, Any]) -> List[str]:
 
 
 def load_mail_settings(config: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """Read SMTP settings from the organization's existing mail-service config.
+    """The mail settings send_email reads, or None (after a WARNING) when they are unusable.
 
-    Deliberately NOT copied into TaskDash.config.json: that would put the same mail password
-    in a second plaintext file. One source of truth, and it is already on this server.
+    The config's smtp block wins. Its password lives in the keyring of the account that runs the
+    call, never in the config. Without an smtp block, the deprecated alerting.mail_config_path
+    file is read instead.
     """
     if config.get("smtp"):
         return _smtp_block_settings(config["smtp"])
     alerting = config.get("alerting", {})
     configured = normalize_text(alerting.get("mail_config_path"))
     if not configured:
-        emit("WARNING: no smtp block and no alerting.mail_config_path in the config; "
-             "alerting disabled for this run. Set one of them to enable e-mail.")
+        emit("WARNING: no smtp block and no alerting.mail_config_path in the config. "
+             f"Set one of them to enable e-mail. {_CANNOT_ALERT}")
         return None
     path = Path(configured)
     if not path.exists():
-        emit(f"WARNING: mail config not found at {path}; alerting disabled for this run.")
+        emit(f"WARNING: mail config not found at {path}. {_CANNOT_ALERT}")
         return None
     try:
         mail = json.loads(path.read_text(encoding="utf-8-sig")).get("email settings", {})
     except (OSError, ValueError) as exc:
-        emit(f"WARNING: could not read mail config ({exc}); alerting disabled for this run.")
+        emit(f"WARNING: could not read mail config ({exc}). {_CANNOT_ALERT}")
         return None
     if not mail.get("smtp server") or not mail.get("from address"):
-        emit("WARNING: mail config has no smtp server/from address; alerting disabled.")
+        emit(f"WARNING: mail config has no smtp server/from address. {_CANNOT_ALERT}")
         return None
     return mail
 

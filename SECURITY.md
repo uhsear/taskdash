@@ -5,10 +5,13 @@
 Report a vulnerability privately. Do not open an issue, because issues are visible to everyone with
 access to the repository.
 
-1. If the repository's **Security** tab offers **Report a vulnerability**, select it and describe the
-   problem there.
-2. If it does not, contact the repository owner through GitHub and ask for a private channel. Do not
-   put the details in the first message.
+The channel is the public release repository, <https://github.com/uhsear/taskdash-releases>. The
+code repository is not open to readers of the release page, so do not look for a channel there.
+
+1. Private vulnerability reporting is on for the release repository. Open its **Security** tab,
+   select **Report a vulnerability** and describe the problem there.
+2. If the button is missing, contact the owner of the release repository, `uhsear`, through GitHub and ask for
+   a private channel. Do not put the details in the first message.
 
 Include the TaskDash version (`taskdash --version`), the steps that show the problem and what an
 attacker gains. Do not include real passwords or tokens. Before you include a message or a log
@@ -45,8 +48,9 @@ These controls limit what leaves the computer and who can read it.
 - **Read-only view.** The dashboard reads `TaskDash_view`, not the hosted service. The view allows
   queries only and cannot be edited. Setup creates it with the Query capability.
 - **Owner-only service.** Setup never shares the editable service. If the service is shared with
-  everyone, TaskDash refuses to create the view. Once a view is configured, `collect` also refuses to
-  publish, and it only warns when the service is shared with the organization or a group.
+  everyone, TaskDash refuses to create the view, and every `collect` run refuses to publish, with or
+  without a configured view. Once a view is configured, `collect` only warns when the service is
+  shared with the organization or a group.
   `taskdash preflight` fails for any sharing level except Owner, until the service is private again.
   `collect` also refuses to publish while the view or the dashboard is shared with everyone.
 - **Private viewers group.** Setup shares the view and the dashboard only with the group
@@ -77,11 +81,15 @@ These controls limit what leaves the computer and who can read it.
   `smtp.allow_plaintext_auth` to `true`.
 - **Locked install folder.** The install guide removes inherited permissions from `C:\TaskDash`.
   Only SYSTEM, the Administrators group, the installing user and the task account can open it.
-  `icacls C:\TaskDash` shows the result.
+  `icacls C:\TaskDash` shows the result. Administrators own the folder, and the installing user gets
+  Read & Execute only. Write access to this folder equals control of the task account, because the
+  task runs the folder's code and config as an administrator. `taskdash preflight` fails while a
+  non-administrator can write to the folder or owns it.
 - **Confined log reads.** A task author chooses the folder that TaskDash reads logs from, and
   TaskDash runs as an administrator. If `metrics.log_roots` lists folders, TaskDash reads logs, and
   quotes them in alert e-mails, only inside those folders. It skips junctions and symbolic links. The
-  list is empty by default, which reads any folder a task names.
+  list is empty by default, which reads any folder a task names. `taskdash preflight` warns while it
+  is empty.
 - **Nothing is written without `--apply`.** Without `--apply`, `collect`, `setup` and `dashboard`
   write nothing to ArcGIS Online, and `collect` sends no e-mail. `preflight --enable-event-log`
   changes the event log only with `--apply`. Setup never updates an item it did not create in the
@@ -92,6 +100,12 @@ These controls limit what leaves the computer and who can read it.
 The release workflow signs the wheel and `SHA256SUMS.txt` with Sigstore, without a stored key. It
 uses the identity that GitHub gives the sign job. Each release lists a `.sigstore.json` bundle for
 each signed file. `docs/INSTALL.md` shows how to verify a bundle.
+
+The signing identity is the private repository that builds the release. The maintainer copies the
+signed files to the public release page by hand, so the identity names that repository. For the tag
+`<tag>`, the identity is `https://github.com/uhsear/taskdash/.github/workflows/release.yml@refs/tags/<tag>`. Check a file with
+`python -m sigstore verify github --cert-identity <identity> --bundle <file>.sigstore.json <file>`.
+Release `v1.1.0` carries exactly this identity for `v1.1.0`.
 
 Sigstore records every signature in a public transparency log. The log entry names the signing
 identity, which is the repository and the workflow path. It holds none of the file contents.

@@ -24,6 +24,8 @@ def test_every_action_is_pinned_to_a_full_commit_sha_with_a_version_comment(name
     uses = [line.strip() for line in _text(name).splitlines() if re.match(r"\s*-?\s*uses:", line)]
     assert uses
     for line in uses:
+        if re.match(r"uses: \./\.github/workflows/[\w.-]+\.yml$", line):
+            continue  # a workflow of this repository is pinned by the tag's own commit
         assert re.search(r"uses: [\w.-]+/[\w.-]+@[0-9a-f]{40} # v\d+\.\d+\.\d+$", line), line
 
 
@@ -41,16 +43,17 @@ def test_top_level_permissions_are_read_only(name):
     assert re.search(r"^permissions:\n  contents: read\n(?!  )", text, flags=re.M)
 
 
-def test_only_the_publish_job_can_write_and_it_waits_for_the_tests_the_build_and_the_signing():
+def test_only_the_publish_job_can_write_and_it_waits_for_the_tests_the_matrix_the_build_and_the_signing():
     text = _text("release.yml")
     assert "contents: write" not in _text("install.yml")
     jobs = _jobs(text)
-    assert set(jobs) == {"test", "build", "sign", "publish"}
+    assert set(jobs) == {"test", "matrix", "wheel", "build", "sign", "publish"}
     assert [n for n, body in jobs.items() if "contents: write" in body] == ["publish"]
     assert text.count("contents: write") == 1
-    assert re.search(r"needs: \[test, build, sign\]", jobs["publish"])
+    assert re.search(r"needs: \[test, matrix, build, sign\]", jobs["publish"])
     assert re.search(r"needs: \[?build\]?", jobs["sign"])
-    assert re.search(r"needs: \[?test\]?", jobs["build"])
+    assert re.search(r"needs: \[?wheel\]?", jobs["build"])
+    assert re.search(r"needs: \[?test\]?", jobs["wheel"])
     assert "gh release create" in jobs["publish"] and "gh release create" not in jobs["build"]
 
 
@@ -113,8 +116,9 @@ def test_the_publish_job_attaches_the_sigstore_bundles_it_downloads_from_the_sig
 
 
 def test_build_job_makes_a_hash_pinned_lock_with_pinned_pip_tools():
-    build = _jobs(_text("release.yml"))["build"]
-    assert re.search(r'pip install "build==\d+\.\d+\.\d+"', build)
+    jobs = _jobs(_text("release.yml"))
+    build = jobs["build"]
+    assert re.search(r'pip install "build==\d+\.\d+\.\d+"', jobs["wheel"])
     assert re.search(r'pip install "pip-tools==\d+\.\d+\.\d+"', build)
     compile_line = re.search(r"python -m piptools compile .+", build).group(0)
     for flag in ("--generate-hashes", "--strip-extras", "--extra smtp", "pyproject.toml"):
@@ -166,7 +170,7 @@ def test_the_one_window_installer_is_a_release_asset_and_in_the_checksums():
 def test_install_guide_documents_the_locked_install():
     guide = (WORKFLOWS.parent.parent / "docs" / "INSTALL.md").read_text(encoding="utf-8")
     for needle in ("python.exe -m pip install --require-hashes -r", "requirements.lock",
-                   "--no-deps", ".cdx.json", "Python 3.11", "64-bit"):
+                   "--no-deps", ".cdx.json", "Python 3.13", "64-bit"):
         assert needle in guide, needle
 
 
@@ -208,3 +212,32 @@ def test_gitleaks_archive_is_verified_against_its_checksums_before_extraction():
     step = _jobs(_text("install.yml"))["secrets-scan"]
     assert "checksums.txt" in step
     assert step.index("sha256sum -c") < step.index("tar -xz")
+
+
+def test_the_guides_are_a_checksummed_release_asset_and_the_notes_come_from_a_file():
+    # The code repository is private, so the release page is the only place a reader finds INSTALL.md.
+    jobs = _jobs(_text("release.yml"))
+    build = jobs["build"]
+    assert re.search(r"Compress-Archive -Path docs, README.md, SECURITY.md, CHANGELOG.md -DestinationPath \"dist\\taskdash-docs-\$version.zip\"", build)
+    assert build.index("Compress-Archive") < build.index("WriteAllText")
+    listing = re.search(r"\$lines = Get-ChildItem (.+) \|", build).group(1)
+    assert r"dist\taskdash-docs-*.zip" in listing
+    assert "dist/taskdash-docs-*.zip" in build and "dist/release-notes.md" in build
+    release = re.search(r"gh release create .+", jobs["publish"]).group(0)
+    assert r"dist\taskdash-docs-*.zip" in release
+    assert r"--notes-file dist\release-notes.md" in release and "--generate-notes" not in release
+    # UPGRADE.md and SECURITY.md send readers to the release page, so the notes carry the version's section.
+    assert "has no '## [$release]' section" in build
+    # A candidate's wheel version is 1.2.0rc1, but CHANGELOG.md has only a 1.2.0 section.
+    rule = re.search(r"\$release = \$version -replace '(.+)', ''", build).group(1)
+    assert [re.sub(rule, "", v) for v in ("1.2.0rc1", "1.2.0b2", "1.2.0")] == ["1.2.0"] * 3
+    assert build.index("ReadAllText(\"$PWD\\CHANGELOG.md\")") < build.index("WriteAllText(\"$PWD\\dist\\release-notes.md\"")
+    notes = (WORKFLOWS.parent / "release-notes.md").read_text(encoding="utf-8")
+    for needle in ("taskdash-docs-<version>.zip", "Install-TaskDash.ps1", "requirements.lock", "SHA256SUMS.txt", "-Apply"):
+        assert needle in notes, needle
+
+
+def test_security_policy_names_the_public_release_repository_as_the_channel():
+    policy = (WORKFLOWS.parent.parent / "SECURITY.md").read_text(encoding="utf-8")
+    assert "https://github.com/uhsear/taskdash-releases" in policy
+    assert "Report a vulnerability" in policy

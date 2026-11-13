@@ -100,8 +100,8 @@ def test_cap_numbers_sit_in_title_on_lists_and_charts_and_the_cap_check_passes()
         assert not any(ch.isdigit() for ch in _plain(widgets[name].get("topCaption", ""))), name
     assert "Newest 48" in _plain(widgets["Collector Runs"]["topCaption"])  # a table: topCaption draws
     assert widgets["Metric Trend"]["title"] == "Metric trend"
-    assert "not failures" in widgets["Config Notes"]["topCaption"]
-    assert "Setting notes" in widgets["Config Notes"]["title"]
+    assert "not failures" in widgets["Setting Notes"]["topCaption"]
+    assert "Setting notes" in widgets["Setting Notes"]["title"]
 
 
 def test_tile_title_the_owner_chose_is_unchanged():

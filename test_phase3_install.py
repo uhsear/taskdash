@@ -210,8 +210,10 @@ def _account_check(tmp_path, existing_user, user):
     script = tmp_path / "account.ps1"
     script.write_text(f"$existingUser = '{existing_user}'\n$User = '{user}'\n{snippet}$sameAccount\n",
                       encoding="utf-8")
+    # This computer is NEW-PC and CORP is its domain, whatever machine runs the test.
+    env = {**os.environ, "COMPUTERNAME": "NEW-PC", "USERDOMAIN": "CORP"}
     result = subprocess.run([POWERSHELL, "-NoProfile", "-NonInteractive", "-File", str(script)],
-                            capture_output=True, text=True, timeout=120)
+                            capture_output=True, text=True, timeout=120, env=env)
     assert result.returncode == 0, result.stderr
     return result.stdout.strip() == "True"
 
@@ -219,12 +221,16 @@ def _account_check(tmp_path, existing_user, user):
 @needs_powershell
 @pytest.mark.parametrize("existing_user, user, accepted", [
     ("CORP\\svc-taskdash", "corp\\SVC-TASKDASH", True),   # the full name, case-insensitive
-    ("CORP\\svc-taskdash", "PC01\\svc-taskdash", False),  # same short name, another domain
+    ("OLD-PC\\svc-taskdash", "NEW-PC\\svc-taskdash", True),   # a renamed computer's local account keeps its task
+    ("CORP\\svc-taskdash", "NEW-PC\\svc-taskdash", False),   # a domain account is not the same-named local one
+    ("NEW-PC\\svc-taskdash", "CORP\\svc-taskdash", False),   # and the local account is not the domain one
+    ("OLD-PC\\svc-taskdash", "OTHER-PC\\svc-taskdash", False),  # -User must name this computer
+    ("CORP\\svc-taskdash", "CORP\\other", False),         # another account name is another task
     ("svc-taskdash", "CORP\\svc-taskdash", True),         # the scheduler reports a bare name
     ("svc-taskdash", "CORP\\other", False),
     ("CORP\\svc-taskdash", "svc-taskdash", False),        # the scheduler names a domain, -User does not
 ])
-def test_replace_compares_the_full_account_name(tmp_path, existing_user, user, accepted):
+def test_replace_compares_the_account_name_and_accepts_another_prefix(tmp_path, existing_user, user, accepted):
     assert _account_check(tmp_path, existing_user, user) is accepted
 
 
@@ -269,7 +275,17 @@ def test_script_wraps_the_interpreter_override_and_runs_taskdash_exe_directly():
 def test_script_rejects_an_install_dir_without_the_wrapper(tmp_path):
     result = _run("-InstallDir", str(tmp_path))
     assert result.returncode == 1
-    assert "run_taskdash.cmd is not in" in result.stderr
+    assert r"Neither run_taskdash.cmd nor venv\Scripts\taskdash.exe is in" in result.stderr
+
+
+@needs_powershell
+def test_a_wheel_install_without_the_wrapper_defaults_to_the_venv_exe(tmp_path):
+    exe = tmp_path / "venv" / "Scripts" / "taskdash.exe"
+    exe.parent.mkdir(parents=True)
+    exe.write_bytes(b"")
+    result = _run("-InstallDir", str(tmp_path))
+    assert result.returncode == 0, result.stderr
+    assert f"{exe} collect --apply" in result.stdout
 
 
 def test_workflow_has_the_expected_jobs_and_steps():
@@ -317,7 +333,7 @@ FAKE_TRACKED = [
     "taskdash_publish.py", "rules/default.json", "rules/mar" + "ion.json",
     "workflow_descriptions.json", "tests/fixtures/workflow_descriptions.json",
     "dashboard_taskdash.json", "TaskDash.config.json", "TaskDash.config.example.json",
-    "_tools/repair_estimated_durations.py", "_tools/export_public.py",
+    "_tools/export_public.py",
     "archive/old/x.py", "Logs/run.txt", "conn." + "sd" + "e", "sub/conn." + "SD" + "E",
     "install_task.ps1",
 ]
@@ -327,7 +343,7 @@ def test_export_selection_drops_every_listed_path_and_keeps_the_rest():
     kept, dropped = export_public.select_files(FAKE_TRACKED)
     assert sorted(dropped) == sorted([
         "rules/mar" + "ion.json", "workflow_descriptions.json", "dashboard_taskdash.json",
-        "TaskDash.config.json", "_tools/repair_estimated_durations.py", "archive/old/x.py",
+        "TaskDash.config.json", "archive/old/x.py",
         "Logs/run.txt", "conn." + "sd" + "e", "sub/conn." + "SD" + "E"])
     assert "tests/fixtures/workflow_descriptions.json" in kept
     assert "TaskDash.config.example.json" in kept

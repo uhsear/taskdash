@@ -1,6 +1,6 @@
 """Docs coverage (roadmap Phase 4 item 8): every config key and CLI flag in docs/CONFIGURE.md, and
-every SystemExit message in docs/TROUBLESHOOTING.md, or listed in tests/docs_pending.json. The
-pending list may only shrink; Phase 4 is done when it is empty."""
+every SystemExit message and log WARNING line in docs/TROUBLESHOOTING.md, or listed in
+tests/docs_pending.json. The pending list may only shrink; Phase 4 is done when it is empty."""
 
 import json
 import sys
@@ -35,3 +35,6 @@ def test_inventory_finds_the_known_anchors():
     assert {"arcgis.url", "alerting.maintenance_windows", "scheduler.task_name_regex"} <= doc_inventory.config_keys()
     assert {"--apply", "--offline", "--title-prefix", "--enable-event-log"} <= doc_inventory.cli_flags()
     assert any("Set it, or use `taskdash status --offline`" in m for m in doc_inventory.exit_messages())
+    warnings = doc_inventory.log_warnings()
+    assert any("smtp.user is set but the connection is unencrypted" in k for k in warnings)
+    assert any("could not read the SMTP password from keyring" in k for k in warnings)

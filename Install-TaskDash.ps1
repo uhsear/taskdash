@@ -6,11 +6,15 @@ stops at the first step that fails, printing the list of what it created so far.
 
     .\Install-TaskDash.ps1 -InstallDir C:\TaskDash -Wheel C:\Users\me\Downloads\taskdash-1.3.0-py3-none-any.whl -TaskAccount DOMAIN\svc-taskdash
     .\Install-TaskDash.ps1 -InstallDir C:\TaskDash -Wheel C:\Users\me\Downloads\taskdash-1.3.0-py3-none-any.whl -TaskAccount DOMAIN\svc-taskdash -Apply
+    .\Install-TaskDash.ps1 -InstallDir C:\TaskDash -Wheel C:\Users\me\Downloads\taskdash-1.4.0-py3-none-any.whl -TaskAccount DOMAIN\svc-taskdash -Upgrade -Apply
 
 The steps, in order:
   1. Check that the window is elevated.
-  2. Create InstallDir and lock its permissions, create the venv, and install the wheel. When a file
-     named like the wheel plus .sha256 sits beside it, its SHA-256 must match first.
+  2. Create InstallDir and lock its permissions, create the venv, and install the locked packages
+     of requirements.lock, then the wheel. The wheel needs its SHA-256 in SHA256SUMS.txt (or in a file
+     named like the wheel plus .sha256) beside it. The lock needs SHA256SUMS.txt. The script stops
+     when a file is missing or its value does not match. The hash shows that a file is the one the
+     release lists. It does not show who built it: the Sigstore bundles in INSTALL.md do.
   3. Copy TaskDash.config.example.json to TaskDash.config.json when the config is missing.
   4. taskdash signin: store the ArcGIS sign-in for this account, then hand one to the task account.
   5. taskdash preflight (after the event-log fix, which preflight needs to pass).
@@ -18,22 +22,46 @@ The steps, in order:
   7. install_task.ps1 with -EnableEventLog and -StartNow.
   8. taskdash status.
 
-A step that is already done prints "nothing to do", so the script is safe to run again. It does not
-change an installed version: UPGRADE.md covers that. It never asks for, reads or prints a password:
+A step that is already done prints "nothing to do", so the script is safe to run again. Without
+-Upgrade it does not change an installed version. It never asks for, reads or prints a password:
 taskdash signin and install_task.ps1 prompt for them in the console.
 
--Wheel is needed only while TaskDash is not installed in InstallDir.
+-Upgrade moves an installed TaskDash to the version of -Wheel, in the steps of docs/UPGRADE.md. Pass
+the same -InstallDir and -TaskAccount, and the new -Wheel with its requirements.lock and
+SHA256SUMS.txt. Without -Apply it only checks and prints the plan. With -Apply it runs these steps
+and stops at the first failure, printing how to roll back:
+  1. Disable the collector task and wait for a run in progress to end.
+  2. Copy the install folder, except venv and proenv, to a locked <InstallDir>_backup_<time> folder.
+  3. Check the wheel and the lock against SHA256SUMS.txt, then install them as a first install does.
+  4. taskdash collect --migrate --apply. It is safe to repeat: it adds only what is missing.
+  5. taskdash preflight.
+  6. Enable the task and run it once.
+  7. With -RebuildDashboard only: taskdash dashboard --target prod, then with --apply. A rebuild
+     replaces hand edits made in the ArcGIS dashboard editor, so it is never done without the switch.
+  8. taskdash status.
+If several computers publish to one service, upgrade each of them before you use -RebuildDashboard.
+
+-Wheel is needed only while TaskDash is not installed in InstallDir. Keep requirements.lock and
+SHA256SUMS.txt from the same release in the wheel's folder.
+
+-PythonVersion names the Python that makes the venv, as "py -<version>" finds it. The default, 3.13,
+is the one version that requirements.lock is built for. 3.11 and 3.12 pass the test suite but are not
+supported: the lock may not install on them.
 #>
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)][string]$InstallDir,
     [string]$Wheel = "",
     [Parameter(Mandatory = $true)][string]$TaskAccount,
+    [ValidatePattern('^3\.\d{1,2}$')][string]$PythonVersion = "3.13",
+    [switch]$Upgrade,
+    [switch]$RebuildDashboard,
     [switch]$Apply
 )
 
 $ErrorActionPreference = "Stop"
 $script:created = @()
+$script:rollbackHint = ""
 
 # A copy of install_task.ps1's Get-AdminMembership: the installer must refuse the account before it
 # creates anything, and install_task.ps1 runs its own checks when loaded. A test keeps the two equal.
@@ -57,6 +85,7 @@ function Stop-Install([string]$Message) {
     } else {
         Write-Host "Created so far: nothing"
     }
+    if ($script:rollbackHint) { Write-Host "Roll back: $script:rollbackHint" }
     # [Console]::Error keeps the message on one line; a thrown error is wrapped at the console width.
     [Console]::Error.WriteLine("ERROR: $Message")
     exit 1
@@ -97,24 +126,41 @@ function Confirm-WheelHash([string]$WheelPath, [string]$HashPath = $WheelPath) {
         $sumName = Split-Path -Leaf $sumFile
         $expected = Get-ExpectedHash $sumFile
         if (-not $expected) {
-            Stop-Install "'$sumFile' does not start with a 64-character SHA-256 value. Download the .sha256 file again, or delete it to skip the check."
+            Stop-Install "'$sumFile' does not start with a 64-character SHA-256 value. Download the .sha256 file again."
         }
     } elseif (Test-Path -LiteralPath $sumsFile -PathType Leaf) {
         $sumFile = $sumsFile
         $sumName = "SHA256SUMS.txt"
         $expected = Get-ListedHash $sumsFile $wheelName
         if (-not $expected) {
-            Stop-Install "'$sumsFile' does not list '$wheelName'. It may belong to another release. Download SHA256SUMS.txt from the same release as the wheel, or delete it to skip the check."
+            Stop-Install "'$sumsFile' does not list '$wheelName'. It may belong to another release. Download SHA256SUMS.txt from the same release as the wheel."
         }
     } else {
-        Report "wheel" "no $wheelName.sha256 or SHA256SUMS.txt beside the wheel, so its SHA-256 was not checked. Download SHA256SUMS.txt from the release into the same folder to check it."
-        return
+        Stop-Install "There is no $wheelName.sha256 or SHA256SUMS.txt beside the wheel, so the wheel cannot be checked. Download SHA256SUMS.txt from the same release into the wheel's folder, then run this script again."
     }
     $actual = (Get-FileHash -LiteralPath $HashPath -Algorithm SHA256).Hash.ToLower()
     if ($actual -ne $expected) {
         Stop-Install "The SHA-256 of '$WheelPath' does not match '$sumFile'. Do not install this file. Download the wheel and $sumName again."
     }
     Report "wheel" "SHA-256 matches $sumName."
+}
+
+# requirements.lock decides which packages pip installs as an administrator, so it must match the
+# release too. Only SHA256SUMS.txt lists it. Like the wheel, the sums are read from beside $LockPath
+# and the bytes hashed are those of $HashPath (a locked copy).
+function Confirm-LockHash([string]$LockPath, [string]$HashPath = $LockPath) {
+    $sumsFile = Join-Path (Split-Path -Parent $LockPath) "SHA256SUMS.txt"
+    if (-not (Test-Path -LiteralPath $sumsFile -PathType Leaf)) {
+        Stop-Install "There is no SHA256SUMS.txt beside requirements.lock, so the lock cannot be checked. Download SHA256SUMS.txt from the same release into the wheel's folder, then run this script again."
+    }
+    $expected = Get-ListedHash $sumsFile "requirements.lock"
+    if (-not $expected) {
+        Stop-Install "'$sumsFile' does not list 'requirements.lock'. It may belong to another release. Download SHA256SUMS.txt from the same release as the wheel."
+    }
+    if ((Get-FileHash -LiteralPath $HashPath -Algorithm SHA256).Hash.ToLower() -ne $expected) {
+        Stop-Install "The SHA-256 of '$LockPath' does not match '$sumsFile'. Do not install from this file. Download requirements.lock and SHA256SUMS.txt again."
+    }
+    Report "lock" "SHA-256 matches SHA256SUMS.txt."
 }
 
 # Returns the installed version, or $null when the venv has no taskdash.exe.
@@ -143,7 +189,8 @@ function Get-TrustedSids {
 # INTERACTIVE or one named user can be as dangerous as Users, so only trusted accounts are listed.
 # Compared by SID, so it holds on any Windows language. A deny rule grants nothing, so it is skipped.
 # CREATOR OWNER passes its rights to whoever creates a child, and that right to create is checked.
-# The task account is trusted once it resolves; an account that does not resolve counts as loose.
+# The task account is trusted once it resolves (the main code sets $taskSid once); one that does not
+# resolve counts as loose.
 # GENERIC_WRITE (0x40000000) and GENERIC_ALL (0x10000000) are not FileSystemRights names, but an
 # inherit-only (GW) or (GA) entry is stored with them, and files made later inherit a write right.
 # preflight's WRITE_RIGHTS counts them too.
@@ -151,13 +198,7 @@ function Test-LooseRules($Rules,
         [System.Security.AccessControl.FileSystemRights]$Write = "WriteData, AppendData, WriteExtendedAttributes, WriteAttributes, Delete, DeleteSubdirectoriesAndFiles, ChangePermissions, TakeOwnership",
         [int]$Generic = 0x50000000) {
     $trusted = @(Get-TrustedSids) + "S-1-3-0"
-    if ($TaskAccount) {
-        try {
-            $trusted += (New-Object System.Security.Principal.NTAccount $TaskAccount).Translate([System.Security.Principal.SecurityIdentifier]).Value
-        } catch {
-            Write-Host "WARNING: '$TaskAccount' did not resolve to a SID, so its rights count as an ordinary user's."
-        }
-    }
+    if ($taskSid) { $trusted += $taskSid }
     foreach ($rule in $Rules) {
         if ($rule.AccessControlType -ne "Allow") { continue }
         if ([int]($rule.FileSystemRights -band $Write) -eq 0 -and ([int]$rule.FileSystemRights -band $Generic) -eq 0) { continue }
@@ -224,7 +265,7 @@ function Assert-TrustedInstallDir {
 
 # The owner and permissions are part of the create call, so no other user can put a file in the
 # folder before it is locked. The grants are those of step 1 of the guide.
-function New-LockedFolder([string]$Path) {
+function New-LockedFolder([string]$Path, [switch]$BackupOnly) {
     $sid = { param($Value) New-Object System.Security.Principal.SecurityIdentifier $Value }
     try {
         $task = (New-Object System.Security.Principal.NTAccount $TaskAccount).Translate([System.Security.Principal.SecurityIdentifier])
@@ -235,7 +276,10 @@ function New-LockedFolder([string]$Path) {
     $security.SetAccessRuleProtection($true, $false)
     $security.SetOwner((& $sid "S-1-5-32-544"))
     $me = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
-    foreach ($grant in @(@((& $sid "S-1-5-18"), "FullControl"), @((& $sid "S-1-5-32-544"), "FullControl"), @($me, "FullControl"), @($task, "Modify"))) {
+    $grants = @(@((& $sid "S-1-5-18"), "FullControl"), @((& $sid "S-1-5-32-544"), "FullControl"), @($me, "ReadAndExecute"), @($task, "Modify"))
+    # A backup holds the config, which names accounts and addresses, and nothing runs from it.
+    if ($BackupOnly) { $grants = $grants[0..1] }
+    foreach ($grant in $grants) {
         $security.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($grant[0], $grant[1], "ContainerInherit,ObjectInherit", "None", "Allow")))
     }
     # Windows PowerShell has the CreateDirectory overload; PowerShell 7 has the extension method instead.
@@ -250,17 +294,20 @@ function New-LockedFolder([string]$Path) {
     }
 }
 
-function Install-Venv([string]$WheelPath, [string]$WheelVersion) {
+function Install-Venv([string]$WheelPath, [string]$WheelVersion, [string]$LockPath) {
     # The task account cannot run a Python installed in a user profile, so only the all-users launcher counts.
     # Every Python call runs with -I, so a venv, pip or arcgis folder in the current folder is not imported.
     $launcher = Join-Path $env:SystemRoot "py.exe"
     if (-not (Test-Path -LiteralPath $launcher -PathType Leaf)) {
-        Stop-Install "py.exe is not in '$env:SystemRoot'. Install 64-bit Python 3.11 for all users (see Requirements in docs/INSTALL.md), then run this script again."
+        Stop-Install "py.exe is not in '$env:SystemRoot'. Install 64-bit Python $PythonVersion for all users (see Requirements in docs/INSTALL.md), then run this script again."
+    }
+    if ($PythonVersion -ne "3.13") {
+        Write-Host "WARNING: Python $PythonVersion is tested but not supported. requirements.lock is built for 3.13 and may not install."
     }
     if (-not (Test-Path -LiteralPath $InstallDir)) {
         New-LockedFolder $InstallDir
         $script:created += "folder $InstallDir"
-        Report "venv" "created $InstallDir, owned by Administrators and open only to SYSTEM, Administrators, you and $TaskAccount."
+        Report "venv" "created $InstallDir, owned by Administrators and open only to SYSTEM, Administrators, $TaskAccount and you (read and execute)."
     }
     # Another user may have created the folder after Step-Venv checked it.
     Assert-TrustedInstallDir
@@ -270,14 +317,24 @@ function Install-Venv([string]$WheelPath, [string]$WheelVersion) {
     Copy-Item -LiteralPath $WheelPath -Destination $wheelCopy -Force
     $script:created += $wheelCopy
     Confirm-WheelHash $WheelPath $wheelCopy
+    $lockCopy = Join-Path $InstallDir "requirements.lock"
+    Copy-Item -LiteralPath $LockPath -Destination $lockCopy -Force
+    $script:created += $lockCopy
+    Confirm-LockHash $LockPath $lockCopy
     if (-not (Test-Path -LiteralPath $venvPython -PathType Leaf)) {
-        & $launcher -3.11 -I -m venv $venvDir
+        & $launcher "-$PythonVersion" -I -m venv $venvDir
         if ($LASTEXITCODE -ne 0) {
-            Stop-Install "'py -3.11 -m venv' failed with exit code $LASTEXITCODE. Run 'py -0p' to see the installed Pythons. Install 64-bit Python 3.11 for all users, then run this script again."
+            Stop-Install "'py -$PythonVersion -m venv' failed with exit code $LASTEXITCODE. Run 'py -0p' to see the installed Pythons. Install 64-bit Python $PythonVersion for all users, then run this script again."
         }
         $script:created += "venv $venvDir"
     }
-    & $venvPython -I -m pip install "${wheelCopy}[smtp]"
+    # The lock names every dependency with its hash, so pip refuses a package the release did not build with.
+    # The smtp extra is already in the lock, so the wheel itself needs no dependencies.
+    & $venvPython -I -m pip install --require-hashes -r $lockCopy
+    if ($LASTEXITCODE -ne 0) {
+        Stop-Install "pip could not install the packages of '$lockCopy' (exit code $LASTEXITCODE). Read the pip output above. A package that does not match its hash must not be installed. Check the connection to pypi.org, then run this script again."
+    }
+    & $venvPython -I -m pip install --no-deps $wheelCopy
     if ($LASTEXITCODE -ne 0) {
         Stop-Install "pip could not install '$wheelCopy' (exit code $LASTEXITCODE). Read the pip output above. Check the connection to pypi.org, then run this script again."
     }
@@ -306,7 +363,7 @@ function Step-Venv {
     $installed = Get-InstalledVersion
     if ($installed) {
         if ($wheelVersion -and $wheelVersion -ne $installed) {
-            Stop-Install "'$InstallDir' already has TaskDash $installed and -Wheel is $wheelVersion. This script does not change an installed version: follow docs/UPGRADE.md."
+            Stop-Install "'$InstallDir' already has TaskDash $installed and -Wheel is $wheelVersion. Run this script again with -Upgrade to move to $wheelVersion, or follow docs/UPGRADE.md."
         }
         Report "venv" "TaskDash $installed is already installed in $venvDir; nothing to do."
         return
@@ -314,11 +371,16 @@ function Step-Venv {
     if (-not $wheelPath) {
         Stop-Install "TaskDash is not installed in '$venvDir', so -Wheel is required. Pass -Wheel <path of the downloaded wheel>."
     }
+    $lockPath = Join-Path (Split-Path -Parent $wheelPath) "requirements.lock"
+    if (-not (Test-Path -LiteralPath $lockPath -PathType Leaf)) {
+        Stop-Install "requirements.lock is not beside the wheel. Download it from the same release into '$(Split-Path -Parent $wheelPath)', then run this script again."
+    }
+    Confirm-LockHash $lockPath
     if (-not $Apply) {
-        Report "venv" "would create $InstallDir, lock its permissions, create the venv and install TaskDash $wheelVersion from $wheelPath."
+        Report "venv" "would create $InstallDir, lock its permissions, create the venv, install the locked packages and TaskDash $wheelVersion from $wheelPath."
         return
     }
-    Install-Venv $wheelPath $wheelVersion
+    Install-Venv $wheelPath $wheelVersion $lockPath
 }
 
 function Step-Config {
@@ -364,15 +426,32 @@ function Test-CollectorTask {
     return [bool](Get-ScheduledTask -TaskName $collectorTask -ErrorAction SilentlyContinue)
 }
 
+# True when a hand-off file waits for this account. The file is sealed, so the account it is for comes
+# from the plain file that taskdash writes beside it. A file for another account, or one made before that
+# name was recorded, is not "done": a re-run with a corrected -TaskAccount must write a new one.
+function Test-HandoffFor([string]$Account) {
+    if (-not (Test-Path -LiteralPath (Join-Path $InstallDir "taskdash_handoff.bin") -PathType Leaf)) { return $false }
+    try {
+        $info = Get-Content -LiteralPath (Join-Path $InstallDir "taskdash_handoff.json") -Raw -Encoding UTF8 | ConvertFrom-Json
+        $recorded = "$($info.account)"
+    } catch {
+        return $false
+    }
+    return $recorded -and (($recorded -split '\\')[-1] -ieq ($Account -split '\\')[-1])
+}
+
 function Step-Signin {
     $profileName = Get-ConfigValue "arcgis" "profile"
     if (-not $profileName) { $profileName = "taskdash" }
     $haveProfile = Test-SigninProfile $profileName
     # The task account cannot be read from here. Its sign-in is done once the task exists, or while
-    # the hand-off file waits for the task's first run.
-    $haveHandoff = (Test-CollectorTask) -or (Test-Path -LiteralPath (Join-Path $InstallDir "taskdash_handoff.bin") -PathType Leaf)
-    if ($haveProfile) { Report "signin" "profile '$profileName' is already stored for this account; nothing to do." }
+    # the hand-off file for it waits for the task's first run.
+    $haveHandoff = (Test-CollectorTask) -or (Test-HandoffFor $TaskAccount)
+    $wrongHandoff = (-not $haveHandoff) -and (Test-Path -LiteralPath (Join-Path $InstallDir "taskdash_handoff.bin") -PathType Leaf)
+    $me = "$env:USERDOMAIN\$env:USERNAME"
+    if ($haveProfile) { Report "signin" "profile '$profileName' is already stored for $me; nothing to do." }
     if ($haveHandoff) { Report "signin" "the collector task or a hand-off file exists for $TaskAccount; nothing to do." }
+    if ($wrongHandoff) { Report "signin" "a hand-off file waits for another account, or does not name its account. It is replaced by one for $TaskAccount." }
     if ($haveProfile -and $haveHandoff) { return }
     if (-not $Apply) {
         Report "signin" "would run taskdash signin for this account and for $TaskAccount. It asks for the ArcGIS user name and password; the password is not shown."
@@ -380,7 +459,8 @@ function Step-Signin {
     }
     if (-not $haveProfile) {
         Invoke-Taskdash @("signin", "--apply")
-        $script:created += "ArcGIS sign-in profile '$profileName' for $env:USERNAME"
+        $script:created += "ArcGIS sign-in profile '$profileName' for $me"
+        Report "signin" "Sign-in stored for $me; run status and preflight as this account."
     }
     if (-not $haveHandoff) {
         Invoke-Taskdash @("signin", "--for-task-account", "--task-user", $TaskAccount, "--apply")
@@ -416,7 +496,7 @@ function Step-Setup {
         return
     }
     if (-not $Apply) {
-        Report "setup" "would run taskdash setup (the check), then taskdash setup --apply, to create the ArcGIS items."
+        Report "setup" "would run taskdash setup (the check), then taskdash setup --apply, to create the ArcGIS items. On a second computer for an existing dashboard, do not run setup: stop and see 'Add another computer' in docs/INSTALL.md."
         return
     }
     Invoke-Taskdash @("setup")
@@ -465,9 +545,133 @@ function Step-Status {
     Invoke-Taskdash @("status")
 }
 
+# Waits until the collector is not running, so the upgrade never replaces files that a run is using.
+function Wait-CollectorIdle {
+    $began = Get-Date
+    while ("$((Get-ScheduledTask -TaskName $collectorTask).State)" -eq "Running") {
+        if (((Get-Date) - $began).TotalMinutes -ge 10) {
+            Stop-Install "'$collectorTask' was still running 10 minutes after it was disabled. It stays disabled. Wait until 'Get-ScheduledTask -TaskName ""$collectorTask""' does not say Running, then run this script again."
+        }
+        Start-Sleep -Seconds 5
+    }
+}
+
+# Starts the enabled task once and returns its LastTaskResult, or $null when the run is still going after 10 minutes.
+function Invoke-CollectorOnce {
+    $before = (Get-ScheduledTaskInfo -TaskName $collectorTask).LastRunTime
+    $began = Get-Date
+    Start-ScheduledTask -TaskName $collectorTask
+    while (((Get-Date) - $began).TotalSeconds -lt 600) {
+        Start-Sleep -Seconds 5
+        $info = Get-ScheduledTaskInfo -TaskName $collectorTask
+        # LastTaskResult keeps the previous run's value until this run ends. A run that fails at logon
+        # may not move LastRunTime, so after 30 seconds a task that is not Running has settled.
+        $settled = $info.LastRunTime -gt $before -or ((Get-Date) - $began).TotalSeconds -ge 30
+        if ("$((Get-ScheduledTask -TaskName $collectorTask).State)" -ne "Running" -and $settled) { return [int64]$info.LastTaskResult }
+    }
+    return $null
+}
+
+# Moves an installed TaskDash to the version of -Wheel. The checks run in check mode too, so a missing
+# file or a wrong hash stops before anything is changed.
+function Step-Upgrade {
+    # Nothing in the folder runs before it is trusted: a user could have planted venv\Scripts	askdash.exe.
+    Assert-TrustedParents
+    Assert-TrustedInstallDir
+    $installed = Get-InstalledVersion
+    if (-not $installed) {
+        Stop-Install "TaskDash is not installed in '$venvDir', so there is nothing to upgrade. Run this script without -Upgrade to install it."
+    }
+    if (-not $Wheel) {
+        Stop-Install "-Upgrade needs -Wheel <path of the new taskdash-<version>-py3-none-any.whl>."
+    }
+    if (-not (Test-Path -LiteralPath $Wheel -PathType Leaf)) {
+        Stop-Install "-Wheel '$Wheel' does not exist. Pass the path of the downloaded taskdash-<version>-py3-none-any.whl."
+    }
+    $wheelPath = (Resolve-Path -LiteralPath $Wheel).Path
+    $wheelVersion = Get-WheelVersion $wheelPath
+    if (-not $wheelVersion) {
+        Stop-Install "'$(Split-Path -Leaf $wheelPath)' is not named taskdash-<version>-py3-none-any.whl. pip rejects a renamed wheel: download the file again and keep its name."
+    }
+    Confirm-WheelHash $wheelPath
+    if ($wheelVersion -eq $installed) {
+        Report "upgrade" "TaskDash $installed is already installed in $venvDir; nothing to do."
+        return
+    }
+    $lockPath = Join-Path (Split-Path -Parent $wheelPath) "requirements.lock"
+    if (-not (Test-Path -LiteralPath $lockPath -PathType Leaf)) {
+        Stop-Install "requirements.lock is not beside the wheel. Download it from the same release into '$(Split-Path -Parent $wheelPath)', then run this script again."
+    }
+    Confirm-LockHash $lockPath
+    if (-not (Test-Path -LiteralPath $configPath -PathType Leaf)) {
+        Stop-Install "There is no config at '$configPath', so this is not an installed TaskDash. Run this script without -Upgrade."
+    }
+    if (-not (Test-CollectorTask)) {
+        Stop-Install "The task '$collectorTask' is not registered, so the upgrade cannot disable it first. If the task has another name, follow docs/UPGRADE.md by hand."
+    }
+    # The lock holds hashes for one Python. A venv on another version needs a new environment (UPGRADE.md, step 6).
+    $venvPythonVersion = "$(& $venvPython -I -c "import sys; print('%d.%d' % sys.version_info[:2])")".Trim()
+    if ($venvPythonVersion -ne $PythonVersion) {
+        Stop-Install "'$venvDir' runs Python $venvPythonVersion, and -PythonVersion is $PythonVersion, the version that requirements.lock is built for. Make a new environment first (step 6 of docs/UPGRADE.md). To stay on $venvPythonVersion, which is not supported, pass -PythonVersion $venvPythonVersion."
+    }
+    $backup = "$($InstallDir.TrimEnd('\'))_backup_$(Get-Date -Format 'yyyyMMdd_HHmmss')"
+    if (-not $Apply) {
+        Report "upgrade" "would move TaskDash from $installed to $wheelVersion."
+        Report "upgrade" "would disable '$collectorTask' and wait for a run in progress to end."
+        Report "upgrade" "would copy $InstallDir, without venv and proenv, to the locked folder $backup."
+        Report "upgrade" "would install the locked packages of $lockPath and the wheel into $venvDir."
+        Report "upgrade" "would run taskdash collect --migrate --apply, then taskdash preflight."
+        Report "upgrade" "would enable '$collectorTask' and run it once."
+        if ($RebuildDashboard) { Report "upgrade" "would rebuild the dashboard with taskdash dashboard --target prod --apply." }
+        else { Report "upgrade" "would not rebuild the dashboard. A rebuild replaces hand edits in the dashboard editor: add -RebuildDashboard to do it after the first run." }
+        Report "upgrade" "would run taskdash status."
+        return
+    }
+    $previousWheel = "taskdash-$installed-py3-none-any.whl"
+    $script:rollbackHint = "the task '$collectorTask' may be disabled and the config backup is $backup. Install the previous wheel (download $previousWheel from the release page and check its SHA-256 value) with: & '$venvPython' -I -m pip install --no-deps <path of $previousWheel>. Then run Enable-ScheduledTask -TaskName '$collectorTask'. See 'Roll back' in docs/UPGRADE.md."
+    Disable-ScheduledTask -TaskName $collectorTask | Out-Null
+    $script:created += "task '$collectorTask' disabled"
+    Wait-CollectorIdle
+    Report "upgrade" "'$collectorTask' is disabled."
+    New-LockedFolder $backup -BackupOnly
+    $script:created += "backup folder $backup"
+    & (Join-Path $env:SystemRoot "System32\robocopy.exe") ($InstallDir.TrimEnd('\')) $backup /E /XD $venvDir (Join-Path $InstallDir "proenv") /NFL /NDL /NJH /NJS | Out-Null
+    # robocopy exit codes 0 to 7 mean success; 8 and above mean a copy failed.
+    if ($LASTEXITCODE -ge 8) {
+        Stop-Install "robocopy could not copy '$InstallDir' to '$backup' (exit code $LASTEXITCODE). Nothing was upgraded. Free disk space or fix the folder's permissions, then run this script again."
+    }
+    Report "upgrade" "copied the install folder to $backup."
+    Install-Venv $wheelPath $wheelVersion $lockPath
+    if ((Get-InstalledVersion) -ne $wheelVersion) {
+        Stop-Install "pip finished, but '$taskdashExe --version' does not report $wheelVersion. Read the pip output above."
+    }
+    Invoke-Taskdash @("collect", "--migrate", "--apply")
+    $script:created += "service schema migrated (nothing changes when it is current)"
+    Invoke-Taskdash @("preflight")
+    Enable-ScheduledTask -TaskName $collectorTask | Out-Null
+    $result = Invoke-CollectorOnce
+    if ($null -eq $result) {
+        Stop-Install "'$collectorTask' was still running 10 minutes after the upgrade started it. It stays enabled. Check it later with Get-ScheduledTaskInfo -TaskName '$collectorTask', and read the newest file in the Logs folder of '$InstallDir'."
+    }
+    if ($result -ne 0) {
+        Stop-Install "The first run of '$collectorTask' after the upgrade ended with LastTaskResult $result. Read the newest file in the Logs folder of '$InstallDir', and see TROUBLESHOOTING.md."
+    }
+    $script:created += "task '$collectorTask' enabled and run once"
+    if ($RebuildDashboard) {
+        Invoke-Taskdash @("dashboard", "--target", "prod")
+        Invoke-Taskdash @("dashboard", "--target", "prod", "--apply")
+        $script:created += "dashboard rebuilt; the old definition is saved as dashboard_backup_*.json in the Logs folder"
+    }
+    Invoke-Taskdash @("status")
+    $script:rollbackHint = ""
+}
+
 # --- main: every step reads real state first, so a second run skips what is done.
 if (-not [System.IO.Path]::IsPathRooted($InstallDir)) {
     Stop-Install "-InstallDir '$InstallDir' is not a full path. Pass one such as C:\TaskDash."
+}
+if ($RebuildDashboard -and -not $Upgrade) {
+    Stop-Install "-RebuildDashboard works only with -Upgrade. To rebuild the dashboard by hand, follow docs/UPGRADE.md."
 }
 $venvDir = Join-Path $InstallDir "venv"
 $venvPython = Join-Path $venvDir "Scripts\python.exe"
@@ -485,6 +689,17 @@ if ($principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator))
     $notElevated = "This window is not elevated. The install creates a folder under C:\, a scheduled task and an event-log setting, and each needs an administrator. Open PowerShell with Run as administrator, then run the command again."
     if ($Apply) { Stop-Install $notElevated }
     Write-Host "WARNING: -Apply would refuse. $notElevated"
+}
+
+# A misspelled account would read below as "not in the Administrators group", which sends the reader to
+# the wrong fix. Resolve it to a SID first, once, so the spelling is what the message names.
+$taskSid = ""
+try {
+    $taskSid = (New-Object System.Security.Principal.NTAccount $TaskAccount).Translate([System.Security.Principal.SecurityIdentifier]).Value
+} catch {
+    $unknownAccount = "'$TaskAccount' is not an account that this computer knows. Check the spelling of -TaskAccount. Write a domain account as DOMAIN\name and a local account as COMPUTERNAME\name."
+    if ($Apply) { Stop-Install $unknownAccount }
+    Write-Host "WARNING: -Apply would refuse. $unknownAccount"
 }
 
 # install_task.ps1 refuses a non-admin task account, but only after setup has created the ArcGIS
@@ -512,6 +727,22 @@ if ($adminState -eq 'none') {
 # taskdash finds its config, Logs and state through TASKDASH_HOME. Only this process sees the value.
 $env:TASKDASH_HOME = $InstallDir
 
+if ($Upgrade) {
+    Step-Upgrade
+    if (-not $Apply) {
+        Write-Host "CHECK MODE - nothing changed. Re-run with -Apply."
+        exit 0
+    }
+    if ($script:created.Count -eq 0) {
+        Write-Host "Nothing to do: TaskDash is already at this version."
+    } else {
+        Write-Host "Changed by this upgrade:"
+        foreach ($item in $script:created) { Write-Host "    $item" }
+        Write-Host "Done. Run '$taskdashExe status' at any time to check the install."
+    }
+    exit 0
+}
+
 Step-Venv
 Step-Config
 Step-Signin
@@ -530,4 +761,16 @@ if ($script:created.Count -eq 0) {
     Write-Host "Created by this run:"
     foreach ($item in $script:created) { Write-Host "    $item" }
 }
+# The dashboard link and the steps that make it useful scrolled away in the middle of the output.
+$dashboardId = Get-ConfigValue "arcgis" "dashboard_id"
+if ($dashboardId) {
+    $portal = Get-ConfigValue "arcgis" "url"
+    if (-not $portal) { $portal = "https://www.arcgis.com" }
+    Write-Host "Dashboard: $($portal.TrimEnd('/'))/apps/dashboards/$dashboardId"
+}
+Write-Host "Next steps:"
+Write-Host "    1. Invite viewers: in ArcGIS Online, open the group 'TaskDash viewers' and select Invite members (step 9 of docs/INSTALL.md)."
+Write-Host "    2. Set alerting.healthcheck_url in $configPath to the ping address of an outside monitor ('Set up an outside health check' in docs/INSTALL.md)."
+Write-Host "    3. Turn on e-mail alerts when you want them ('Turn on alert e-mails' in docs/CONFIGURE.md)."
+Write-Host "    4. Run status and preflight as $env:USERDOMAIN\$env:USERNAME, the account that holds the sign-in."
 Write-Host "Done. Run '$taskdashExe status' at any time to check the install."

@@ -140,7 +140,7 @@ def test_smtp_block_without_tls_disables_alerting_before_reading_keyring(monkeyp
     mail = common.load_mail_settings({"smtp": {
         "host": "h.example.test", "from": "a@example.test", "user": "u", "starttls": False}})
     assert mail is None
-    assert any("allow_plaintext_auth" in m and "Alerting disabled" in m for m in messages)
+    assert any("allow_plaintext_auth" in m and "cannot send alerts" in m for m in messages)
 
 
 def test_smtp_block_plaintext_auth_opt_in_is_carried(monkeypatch, messages):

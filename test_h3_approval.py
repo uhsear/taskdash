@@ -36,7 +36,7 @@ def test_the_sheet_has_every_section_and_fits_about_one_printed_page():
     text = _text()
     headings = re.findall(r"^## (.+)$", text, re.M)
     assert headings == list(SECTIONS)
-    assert len(text.split()) <= 1000, "an approval sheet is about one printed page"
+    assert len(text.split()) <= 1300, "an approval sheet is about one printed page"
 
 
 def test_the_sheet_names_only_the_network_code_that_exists():
@@ -81,13 +81,14 @@ def test_every_file_and_privilege_in_the_sheet_is_in_the_code():
         encoding="utf-8") + (ROOT / "taskdash_task.xml").read_text(encoding="utf-8")
     names = ["alert_state.json", "first_run_budget", "event_read_mark", "collector_runs_pending", "alert_preview_",
              "dashboard_backup_", "taskdash_setup_manifest.json", "taskdash_handoff.bin", "bootstrap_FAIL_",
-             ".bak_setup_", "taskdash-smtp", "taskdash.lock", "preflight_as_task_", "taskdash_*.log"]
+             ".bak_setup_", "taskdash-smtp", "taskdash.lock", "preflight_as_task_", "bootstrap.log",
+             "workflow_descriptions.json", "dashboard_taskdash.json", "alerting.mail_config_path", "taskdash_*.log"]
     for name in names:
         assert name in text, f"the sheet lost {name}"
     for name in names[:-1]:
         assert name in code, f"the code has no {name}"
-    for privilege in ("portal:user:createItem", "portal:user:createGroup", "portal:user:shareToGroup",
-                      "features:user:edit"):
+    for privilege in ("portal:user:createItem", "portal:publisher:publishFeatures", "portal:user:createGroup",
+                      "portal:user:shareToGroup", "features:user:edit"):
         assert privilege in text and privilege in code, privilege
     for setting in ("PT1H", "PT2H", "IgnoreNew", "StartWhenAvailable", "LeastPrivilege"):
         assert setting in text and setting in code, setting

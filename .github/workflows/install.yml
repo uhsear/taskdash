@@ -1,5 +1,6 @@
-# Proves a clean install works on a stock Windows runner: wheel, console script, offline preflight,
-# real task registration with a stored password, a fixture dry run and an offline dashboard build.
+# Proves a clean install works on a stock Windows runner: wheel, console script, the one-window
+# installer in check mode, offline preflight, real task registration with a stored password, a
+# fixture dry run and an offline dashboard build.
 # No secret is used. Nothing here signs in to ArcGIS Online: preflight and dashboard run --offline,
 # and collect without --apply never connects.
 name: install
@@ -21,7 +22,7 @@ jobs:
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: "3.11"
+          python-version: "3.13"
 
       - name: Build the wheel
         shell: powershell
@@ -34,7 +35,9 @@ jobs:
         run: |
           python -m venv "$env:RUNNER_TEMP\venv"
           $wheel = (Get-ChildItem dist\*.whl | Select-Object -First 1).FullName
-          & "$env:RUNNER_TEMP\venv\Scripts\python.exe" -m pip install $wheel
+          # The smtp extra is what a user with mail alerts installs, so CI installs it too.
+          & "$env:RUNNER_TEMP\venv\Scripts\python.exe" -m pip install "${wheel}[smtp]"
+          if ($LASTEXITCODE -ne 0) { throw "pip install exited $LASTEXITCODE." }
           "TASKDASH_HOME=$env:RUNNER_TEMP\home" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           "TASKDASH_EXE=$env:RUNNER_TEMP\venv\Scripts\taskdash.exe" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
@@ -43,6 +46,31 @@ jobs:
         run: |
           & $env:TASKDASH_EXE --version
           if ($LASTEXITCODE -ne 0) { throw "taskdash --version exited $LASTEXITCODE." }
+
+      # The primary install path. Without -Apply it creates nothing. It must accept a SHA256SUMS.txt
+      # in the form release.yml writes, refuse a wrong hash, and leave the install folder absent.
+      - name: Run the one-window installer in check mode
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Continue"
+          $wheel = Get-ChildItem dist\*.whl | Select-Object -First 1
+          $sums = Join-Path $wheel.DirectoryName "SHA256SUMS.txt"
+          $hash = (Get-FileHash $wheel.FullName -Algorithm SHA256).Hash.ToLower()
+          [IO.File]::WriteAllText($sums, "$hash  $($wheel.Name)`n")
+          $account = "$env:COMPUTERNAME\ci_installer"
+          $output = powershell -NoProfile -ExecutionPolicy Bypass -File .\Install-TaskDash.ps1 -InstallDir C:\TaskDashInstallCheck -Wheel $wheel.FullName -TaskAccount $account 2>&1 | Out-String
+          $code = $LASTEXITCODE
+          Write-Host $output
+          if ($code -ne 0) { throw "Install-TaskDash.ps1 in check mode exited $code. Read its output above." }
+          if ($output -notmatch "SHA-256 matches SHA256SUMS.txt") { throw "The installer did not check the wheel against SHA256SUMS.txt." }
+          if ($output -notmatch "CHECK MODE") { throw "The installer did not finish in check mode." }
+          if (Test-Path C:\TaskDashInstallCheck) { throw "Check mode created C:\TaskDashInstallCheck." }
+          [IO.File]::WriteAllText($sums, ("0" * 64) + "  $($wheel.Name)`n")
+          powershell -NoProfile -ExecutionPolicy Bypass -File .\Install-TaskDash.ps1 -InstallDir C:\TaskDashInstallCheck -Wheel $wheel.FullName -TaskAccount $account *> $null
+          if ($LASTEXITCODE -ne 1) { throw "A wrong wheel hash made the installer exit $LASTEXITCODE, not 1." }
+          Remove-Item $sums
+          # A PowerShell step ends with the last native exit code, so the expected 1 must not leak out.
+          exit 0
 
       - name: Offline preflight on the example config
         shell: powershell

@@ -28,3 +28,14 @@ __pycache__/
 
 # Written by taskdash setup --apply; ids and titles only, but per-install state.
 taskdash_setup_manifest.json
+
+# The sealed hand-off secrets, written by taskdash signin --for-task-account until the task's first run.
+taskdash_handoff.bin
+taskdash_handoff.json
+
+# Atomic-write temp files (.<name>.tmp<pid>) and build output.
+.*.tmp*
+build/
+dist/
+*.egg-info/
+*.whl

@@ -56,7 +56,7 @@ class _RunsTable:
         self.queries = []
 
     def _matches(self, row, where):
-        if row["host_name"] != re.search(r"host_name = '([^']*)'", where).group(1):
+        if row["host_name"].upper() != re.search(r"host_name = '([^']*)'", where).group(1):
             return False
         if "NOT IN" in where:
             if row["run_status"] in re.findall(r"'([^']+)'", where.split("NOT IN")[1]):

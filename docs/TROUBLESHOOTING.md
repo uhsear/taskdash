@@ -5,7 +5,12 @@ what causes it, and how to fix it. Find your message by its first words. A `<nam
 stands for a value that changes, such as a path or an item ID.
 
 Most messages end with the line `See TROUBLESHOOTING.md, section <heading>.`. The heading is the name
-of the entry in this guide that explains the message. A few messages do not name a section yet.
+of the entry in this guide that explains the message. Some messages end without that line. Search
+this guide for the first words of such a message. The guide lists every message.
+
+A message that names a file in `docs/` means the guide of that name. Every release lists
+`taskdash-docs-<version>.zip` with all the guides. The install also keeps them in
+`C:\TaskDash\venv\share\taskdash\docs`.
 
 In the commands below, `taskdash` stands for the `taskdash.exe` that you installed. The install
 guide calls it `$td`. Run the commands in the folder where TaskDash keeps its config, as step 1 of
@@ -17,8 +22,11 @@ Entries are grouped by command:
 - [Any command](#any-command)
 - [Sign-in and config](#sign-in-and-config)
 - [Collect and publish](#collect-and-publish)
+- [Alert e-mail](#alert-e-mail)
+- [Warnings in the log](#warnings-in-the-log)
 - [Setup](#setup)
 - [Remove](#remove)
+- [The signin command](#the-signin-command)
 - [Preflight](#preflight)
 - [Rebuild or move the ArcGIS items](#rebuild-or-move-the-arcgis-items)
 - [Dashboard](#dashboard)
@@ -49,8 +57,10 @@ this guide does not list. The lines after it show where. Remove identifying valu
 [Issues](../README.md#issues) says. Then send them to the TaskDash maintainer.
 
 When you run a command in a window, it prints its message there. The `collect` command also
-writes the message to its log. The `setup`, `remove`, `dashboard`, `demo` and `status` commands write
-no log of their own. A message ends the command with exit code 1.
+writes the message to its log. The other commands write no log of their own. They are `setup`, `preflight`,
+`dashboard`, `demo`, `remove`, `signin`, `status`, `task` and `test-alert`. A `collect` run that is not the
+hourly prod publish, such as a dry run, writes `taskdash_manual_<time>.log`. `taskdash status --offline`
+reads only the `taskdash_<time>.log` files. A message ends the command with exit code 1.
 
 The `preflight` command does not stop at a message. It shows the message in a `[!!]` line, after
 `SystemExit:`, and runs the other checks.
@@ -64,8 +74,10 @@ To see the last line of the newest log without opening it, run `taskdash status 
 > `<module>`.py is not part of this install, so this command is unavailable. Reinstall TaskDash from a complete wheel.
 
 **Cause.** The `taskdash` command found the command's Python file missing. The files are
-`taskdash_publish` (`collect`), `taskdash_setup`, `taskdash_remove` (`remove`), `taskdash_preflight`,
-`taskdash_dashboard` and `taskdash_demo`. A damaged install or an incomplete wheel causes this.
+`taskdash_publish` (`collect`), `taskdash_setup` (`setup`), `taskdash_preflight` (`preflight`),
+`taskdash_dashboard` (`dashboard`), `taskdash_demo` (`demo`), `taskdash_remove` (`remove`) and
+`taskdash_signin` (`signin`). The `status` and `test-alert` commands live in `taskdash_cli`, so
+this message never names them. A damaged install or an incomplete wheel causes this.
 
 **Fix.** Run the install again with the full wheel from the release. If pip says the package is
 already installed, add `--force-reinstall --no-deps` to the `pip install` command from step 1 of
@@ -88,6 +100,18 @@ secrets, because the scrubber lives in the module that failed. It holds only an 
 
 **Fix.** Read the traceback. Run the install again with the full wheel from the release, as in the
 fix above.
+
+### A package that TaskDash needs is missing
+
+> `<module>` needs the Python package '`<name>`', which is not installed. Reinstall TaskDash with its dependencies: python -m pip install --force-reinstall <wheel>.
+
+**Cause.** The command's Python file loaded, but a package that it imports is not in the
+environment. A damaged install or a hand-built environment causes this. A wheel install also saves
+the traceback in `Logs\bootstrap_FAIL_<time>.log`, as "A module failed to import" describes.
+
+**Fix.** Run the install again with the full wheel, as step 1 of [INSTALL.md](INSTALL.md) describes.
+Add `--force-reinstall` to the `pip install` command. If the package is `pywin32`, see "The as-task
+check does not run".
 
 ### A command prints a usage line and an error
 
@@ -181,6 +205,12 @@ line of the first kind reads `<key> must be <type>, got <value>`. A line of the 
 purpose. Otherwise the field it was meant to hide would stay published. TaskDash shows a password
 value as `<redacted>` in these lines.
 
+A line can also name a number outside its range, such as `upload.chunk_size must be a whole number
+of 1 or more, got 0`, or `alerting.heartbeat_hour must be a whole number from 0 to 23, got 24`. A
+line that reads `<key> is not a valid regular expression` names one of the four `scheduler` regex
+keys. In the config file, write each backslash of a regex twice. The folder `\Nightly\` needs
+`"^\\\\Nightly\\\\$"`. See "Choose which tasks to monitor" in [CONFIGURE.md](CONFIGURE.md).
+
 Two more lines concern `host_previous_names`. One says it `must not hold an empty name`. The other
 says it `must not list the current host name`. Remove that entry. Keep only earlier names of this
 computer. The current name is `host_name_override`, or the computer name if that key is empty.
@@ -238,6 +268,9 @@ the network may be down, or a proxy may block the connection.
 3. If only the scheduled task still fails, restart the computer. Task Scheduler then sees the new
    variable.
 
+If the detail names `SSLError` or a certificate, the network is not the cause. See "The certificate
+was not trusted (SSLError)" below.
+
 ### The certificate was not trusted (SSLError)
 
 > SSLError: the certificate of arcgis.url '`<url>`' was not trusted. A proxy that inspects TLS traffic is the usual cause. Add the proxy's root certificate to the Windows certificate store, or save it as a PEM file and set the REQUESTS_CA_BUNDLE variable to that file's path. Open a new PowerShell window afterwards. Detail: `<error>`
@@ -258,7 +291,7 @@ does not trust the proxy's root certificate.
 
 ### The arcgis package is outside the tested range
 
-> WARNING: arcgis `<version>` is outside the tested range (arcgis>=2.4,<3).
+> WARNING: arcgis `<version>` is outside the tested range (arcgis>=2.4,<3). TaskDash may fail in ways its tests do not cover. Install a version in that range with pip install "arcgis>=2.4,<3".
 
 **Cause.** TaskDash is tested with `arcgis` 2.4 up to, but not including, 3. The collector and
 `taskdash preflight` warn once when the installed version is outside that range.
@@ -268,7 +301,11 @@ version, so install it in the virtual environment that runs TaskDash.
 
 ### The stored sign-in does not work
 
-> arcgis.profile '`<name>`' did not sign in. Store it once with GIS(url, user, password, profile='`<name>`') as the account the scheduled task runs under.
+> arcgis.profile '`<name>`' did not sign in. Run `taskdash signin --apply` as the Windows account that runs this command. To sign in the scheduled task's account without runas, run `taskdash signin --for-task-account --apply` in your own window.
+
+A wrong or expired password gives the same advice, after `ArcGIS sign-in with the stored profile '<name>' failed:` and the error name.
+In the collector log, the warning `could not sign in to ArcGIS before publishing` names this problem.
+`could not reach AGOL before publishing` means the sign-in worked and the service did not answer.
 
 **Cause.** The Windows account that runs the command has no saved sign-in under that profile name,
 or the saved password is no longer correct. Each Windows account has its own Credential Manager.
@@ -328,6 +365,25 @@ Two more messages come from the new switches:
   `taskdash.exe`, or install TaskDash into `<InstallDir>\venv`.
 - `'taskdash preflight --enable-event-log --apply' failed with exit code <n>`: nothing was registered.
   Read the output above the message, fix the cause, and run the installer again.
+- `Neither run_taskdash.cmd nor venv\Scripts\taskdash.exe is in '<folder>'`: point `-InstallDir` at
+  the install folder, or pass `-Python` with the full path of `taskdash.exe`. Without `-Python`,
+  the installer runs `run_taskdash.cmd` if the folder holds it, and the venv's `taskdash.exe` if not.
+  `run_taskdash.cmd` is the wrapper of a folder install and stays in the product. A wheel install has none.
+- `Windows refused to register '<name>'`: the message after it comes from Windows. A wrong password
+  for the task account is the usual cause. Run the installer again and type the right password.
+  Nothing was registered or changed.
+- `A task named '<name>' already exists`: add `-Replace` to give it a new password, or delete it
+  with `Unregister-ScheduledTask -TaskName '<name>'` first. See [ROTATE.md](ROTATE.md).
+- `-Replace found no task named '<name>'`, or `Task '<name>' runs as '<account>', not '<account>'`:
+  `-Replace` changes only the password of the task that exists, for the same account name. It accepts
+  another name in front of the account name only after a computer rename: the task's old name is
+  not this computer's name, and `-User` starts with this computer's name. `CORP\svc` and `PC\svc`
+  are different accounts, so `-Replace` refuses to swap one for the other. Pass the right
+  `-TaskName` and `-User`.
+- `Task '<name>' registered with logon type '<type>'`: delete the task and register it again. The
+  installer never changes the logon type of a registered task.
+- After `-StartNow`, the last line prints the full path of `taskdash.exe`, because `taskdash` is not
+  on the PATH of an administrator window. Run `& "<that path>" status`.
 
 ### The one-window installer stops
 
@@ -346,6 +402,9 @@ already done prints `nothing to do`, so the script continues where it stopped. T
   script cannot confirm that the task account is an administrator. The task account gets write
   access to the install folder, so the script stops. Run `net localgroup Administrators`. If the
   list shows an account that no longer exists, remove it, then run the command again.
+- `'<account>' is not an account that this computer knows`: the `-TaskAccount` name has a typo, or its
+  domain cannot be reached. Write a domain account as `DOMAIN\name` and a local account as
+  `COMPUTERNAME\name`. Check mode prints this as `WARNING: -Apply would refuse`.
 - `'<account>' is not in the local Administrators group`: add the task account to the group with
   `net localgroup Administrators <account> /add` in an elevated window. Check mode prints this as
   `WARNING: -Apply would refuse`. The script checks it before it creates anything.
@@ -354,16 +413,29 @@ already done prints `nothing to do`, so the script continues where it stopped. T
 - `'<file>' is not named taskdash-<version>-py3-none-any.whl`: download the wheel again and keep its
   name. pip rejects a renamed wheel.
 - `'<file>.sha256' does not start with a 64-character SHA-256 value`: download the `.sha256` file
-  again. Or move it away to skip the check.
-- `'<folder>\SHA256SUMS.txt' does not list '<wheel>'`: the file belongs to another release. Download
-  `SHA256SUMS.txt` from the same release as the wheel. Or move it away to skip the check.
-- `The SHA-256 of '<wheel>' does not match`: do not install the file. Download the wheel and its
-  `SHA256SUMS.txt` (or `.sha256`) file again.
-- `'<folder>' already has TaskDash <a> and -Wheel is <b>`: the script does not change an installed
-  version. Follow [UPGRADE.md](UPGRADE.md).
+  again.
+- `There is no <wheel>.sha256 or SHA256SUMS.txt beside the wheel` or `There is no SHA256SUMS.txt
+  beside requirements.lock`: the script does not install a file it cannot check. Download
+  `SHA256SUMS.txt` from the same release into the wheel's folder.
+- `requirements.lock is not beside the wheel`: download `requirements.lock` from the same release
+  into the wheel's folder.
+- `'<folder>\SHA256SUMS.txt' does not list '<wheel>'` or `... does not list 'requirements.lock'`: the
+  file belongs to another release. Download `SHA256SUMS.txt` from the same release as the wheel.
+- `The SHA-256 of '<wheel>' does not match` or `The SHA-256 of '<folder>\requirements.lock' does not
+  match`: do not install the file. Download the wheel, `requirements.lock` and `SHA256SUMS.txt` again.
+- `'<folder>' already has TaskDash <a> and -Wheel is <b>`: without `-Upgrade`, the script does not
+  change an installed version. Run the command again with `-Upgrade`, as [UPGRADE.md](UPGRADE.md)
+  describes.
+- `'<venv>' runs Python <a>, and -PythonVersion is <b>`: only with `-Upgrade`. The lock in the
+  release is built for one Python, 3.13. Make a new environment first, as step 6 of the manual
+  upgrade describes. To stay on <a>, which is not supported, pass `-PythonVersion <a>`.
+- `The task '<name>' is not registered, so the upgrade cannot disable it first`: only with
+  `-Upgrade`. If the task has another name, follow the manual upgrade in [UPGRADE.md](UPGRADE.md).
+- A line that starts `Roll back:` after `ERROR:`: the upgrade failed after it disabled the task. The
+  line names the config backup and the previous wheel. Follow "Roll back" in [UPGRADE.md](UPGRADE.md).
 - `TaskDash is not installed in '<venv>', so -Wheel is required`: pass `-Wheel`.
-- `py.exe is not in '<folder>'`: install 64-bit Python 3.11 for all users, as the Requirements in
-  [INSTALL.md](INSTALL.md) describe.
+- `py.exe is not in '<folder>'`: install 64-bit Python 3.13 for all users, or the version that you
+  pass with `-PythonVersion`, as the Requirements in [INSTALL.md](INSTALL.md) describe.
 - `'<folder>' already exists, and an ordinary user owns it or can write to it`: any user can create
   a folder under `C:\` and put files in it. The script would run them as an administrator, and
   `taskdash signin` would send your password to the URL in that folder's config. So the script
@@ -381,8 +453,10 @@ already done prints `nothing to do`, so the script continues where it stopped. T
 - `'<account>' is not an account that this computer knows`: check the `-TaskAccount` name.
 - `'<folder>' changed while this script created it`: another user made the folder first. Move the
   folder away, then run the command again.
-- `'py -3.11 -m venv' failed`, `pip could not install '<wheel>'`, or `pip finished, but '<exe>' does
-  not exist`: read the output above the message. Check the connection to `pypi.org`. If the
+- `'py -3.11 -m venv' failed`, `pip could not install the packages of '<lock>'`, `pip could not
+  install '<wheel>'`, or `pip finished, but '<exe>' does not exist`: read the output above the
+  message. A package that does not match its hash in the lock must not be installed. Check the
+  connection to `pypi.org`. If the
   virtual environment is broken, move the `venv` folder away and run the command again.
 - `'<exe> --version' failed ... The venv is broken`: move the `venv` folder away and run the command
   again.
@@ -406,10 +480,11 @@ If the run took more than 10 minutes, wait for it. Then run `taskdash status`.
 
 ### TaskDash finds no ArcGIS credentials
 
-> No ArcGIS credentials resolved. Set arcgis.username/password in the config, or set arcgis.username_env/password_env to environment variable names.
+> No ArcGIS credentials resolved: arcgis.profile is empty. Set arcgis.profile to taskdash in the config. Then store the sign-in. Run `taskdash signin --apply` as the Windows account that runs this command. To sign in the scheduled task's account without runas, run `taskdash signin --for-task-account --apply` in your own window.
 
-**Cause.** `arcgis.profile` is empty. TaskDash then looks for a user name and a password in the
-config or in environment variables, and found none.
+**Cause.** `arcgis.profile` is empty. TaskDash then looks for a user name and a password in
+environment variables, and found none. When `arcgis.username_env` or `arcgis.password_env` names a
+variable that is empty or not set for the account that runs TaskDash, the message names that variable.
 
 **Fix.** Set `arcgis.profile` to `taskdash`, and store the sign-in as step 3 of
 [INSTALL.md](INSTALL.md) describes. This is the safe option, because the password stays out of the
@@ -417,7 +492,7 @@ config.
 
 ### The config holds a plaintext password
 
-> arcgis.password is stored in plaintext in the config. Store a profile once, as the account the scheduled task runs under: GIS(url, user, password, profile="name"), then set arcgis.profile to that name and delete arcgis.password. To accept the risk instead, set arcgis.allow_plaintext_password to true.
+> arcgis.password is stored in plaintext in the config, which TaskDash refuses. Run `taskdash signin --apply` as the Windows account that runs this command. To sign in the scheduled task's account without runas, run `taskdash signin --for-task-account --apply` in your own window. Then set arcgis.profile to the profile name and delete arcgis.password. Only if you accept the risk, set arcgis.allow_plaintext_password to true.
 
 **Cause.** The config has an `arcgis.password` value, and no `arcgis.profile`. TaskDash refuses to
 use a password that anyone with access to the file can read.
@@ -444,7 +519,9 @@ before it exits with the error.
 
 **Cause.** TaskDash reads run history from the Windows event log
 `Microsoft-Windows-TaskScheduler/Operational`. The log does not exist, or the account that runs
-TaskDash may not read it. `<reason>` is the error that Windows reported.
+TaskDash may not read it. `<reason>` is the error that Windows reported. The same applies when the
+history query fails after the log check passed. The run still publishes the task list and sends
+alerts. It records the message in `error_text` of the `CollectorRuns` row, then exits with code 1.
 
 **Fix.**
 
@@ -455,7 +532,7 @@ TaskDash may not read it. `<reason>` is the error that Windows reported.
 
 ### The Task Scheduler log is turned off
 
-> Event log '`<log name>`' is disabled, so run history cannot be collected. Enable it with: wevtutil sl "`<log name>`" /e:true (run elevated), then retry.
+> Event log '`<log name>`' is disabled, so run history cannot be collected. Enable it with `taskdash preflight --enable-event-log --apply` (run elevated), which also sets the size the log needs, then retry.
 
 **Cause.** Windows often ships this log turned off. TaskDash cannot collect run history while it is
 off. The run still publishes the task list and the overdue state, and it still sends alerts. It
@@ -466,7 +543,7 @@ Step 5 of [INSTALL.md](INSTALL.md) lists the full steps. Run history starts when
 
 ### A task could not be read
 
-> WARNING: `<n>` scheduled task problem(s); the readable tasks are still collected: `<task>: <message>`
+> WARNING: `<n>` scheduled task problem(s); the readable tasks are still collected: `<task>: <message>`. Repair or re-create the task, or give the task account read access to it.
 
 **Cause.** Task Scheduler refused to read one task definition. A common message is 0x80041321, "The
 task image is corrupt or has been tampered with". Access denied gives the same warning. The run does
@@ -514,15 +591,34 @@ metrics. The run itself is fine.
 list the link's target folder instead. See "Limit where TaskDash reads logs" in
 [CONFIGURE.md](CONFIGURE.md).
 
+### A task has no recent log files
+
+> WARNING: no recent log files for task '`<task>`'; checked: `<folders>`
+
+**Cause.** TaskDash found the log folders of the task, but no file in them counts. The files may be
+older than `metrics.days_back` days. They may belong to a manual run, or to another task that
+shares the folder. A task that has never run has no counted logs. The warning ends with a note when
+the folder is shared. The task then shows no log metrics. The run itself is fine.
+
+**Fix.**
+
+1. Open the folders in the message. Check that the newest log of the task changed recently.
+2. If the folder is shared, name each log after its script. Or set
+   `metrics.log_directory_overrides` to a folder of its own for each task.
+3. If the logs are in another folder, set `metrics.log_directory_overrides` to that folder.
+
+"Which log files count" in [CONFIGURE.md](CONFIGURE.md) lists every rule.
+
 ### The alert state file was corrupt
 
 > WARNING: `<path>\alert_state.json` was ignored: `<reason>`. TaskDash rebuilds it on this run, so alerts already sent may repeat once. The bad file was kept as `alert_state.json.corrupt-<stamp>`.
 
 **Cause.** `alert_state.json` is not valid JSON, it does not hold a JSON object, or one of its
-fields has the wrong type (`signature` and `digest_pending` must be lists of text, and
-`problem_last_alert_utc` and `problem_first_seen_utc` must be objects). A disk full or
+fields has the wrong type (`signature`, `digest_pending` and `incident_causes` must be lists of text,
+and `problem_last_alert_utc` and `problem_first_seen_utc` must be objects). A disk full or
 a crash while the file was written can cause this. TaskDash starts with an empty state and
-carries on.
+carries on. If tasks are failing at that moment, the e-mail lists them as already open and does
+not group them into one incident.
 
 **Fix.** No fix is needed. The next run writes a new file. You may delete the `.corrupt-` copy
 after you check it. If the warning returns every run, check the disk space and the folder
@@ -582,7 +678,42 @@ timeout, and the error codes 429, 498, 499, 500, 502, 503 and 504. It waits long
 - If it names a network or proxy problem, fix the connection. See "TaskDash cannot reach ArcGIS".
 - If it names a sign-in or token problem, test the stored sign-in. Run `taskdash preflight`, and read
   its `credentials` line.
-- If ArcGIS Online had an outage, wait. The next hourly run tries again.
+- If ArcGIS Online had an outage, wait. The next hourly run tries again. See "ArcGIS Online was
+  unreachable for a while" for what TaskDash does meanwhile.
+
+### ArcGIS Online was unreachable for a while
+
+```text
+WARNING: <n> unsent CollectorRuns row(s) dropped; only the newest 200 are kept in <path>.
+```
+
+While ArcGIS Online is unreachable, each hourly run still reads the task list and the Task Scheduler
+log. It still evaluates the alert rules and sends alert e-mails. It publishes nothing, and it exits
+with code 1. The e-mail says that the dashboard is out of date, gives the error, and gives the time
+since publishing failed.
+
+**What TaskDash keeps.**
+
+- Each failed run saves its row for the collector run table in `collector_runs_pending_prod.json`, in
+  the log folder. The next run that reaches ArcGIS Online writes those rows first.
+- The file keeps the newest 200 rows, which is about 8 days of hourly runs. When it is full, the
+  oldest rows are dropped and the warning above appears. Those runs never show in the table.
+- TaskDash saves no task run rows during the outage. The first run that publishes reads the Task
+  Scheduler log again, from the last run that was published. It reads at most
+  `history.max_events_per_run` events in one run, and it picks up the rest in the next runs.
+- A run that ended during the outage is replayed only while its events are still in the Task
+  Scheduler log. If the log wrapped, the run is lost, and the log shows an `Event records were
+  skipped` warning.
+- Metrics are sent again on the first run that publishes.
+
+**What the dashboard shows.** The **Collector heartbeat** tile goes **Late**, then **Down**, and names
+the computer. After `scheduler.heartbeat_ignore_after_days` days (7 by default) without a row in the
+service, the tile adds `1 computer silent`. It keeps counting that computer until you retire it. The
+changes of tasks that began and ended during the outage have no row. See "Changes to task
+definitions" in [USE.md](USE.md).
+
+**Fix.** Wait until ArcGIS Online is back. Then run `taskdash status` on each computer. When it prints
+no `Unsent:` line, the saved rows have been written.
 
 ### ArcGIS refused a write
 
@@ -617,13 +748,23 @@ fit its field is one cause.
 describes. To add a service to an existing install, run `taskdash collect --create-service --apply`
 and paste the item ID it prints into the config.
 
+### The service id holds a view or a dashboard
+
+> arcgis.`<item_id or test_item_id>` is `<id>`, which is a hosted view. It must be the hosted table service that the collector writes to. Put the view's id in arcgis.`<view_item_id or test_view_item_id>` and the dashboard's id in arcgis.dashboard_id.
+
+**Cause.** The service key holds the item ID of the read-only view or of the dashboard. The message
+says which one, or names the item type. The collector writes to the table service, not to either of them.
+
+**Fix.** Open the three items in ArcGIS Online and copy the ID of the hosted table service. Put it in
+`arcgis.item_id`. Keep the view's ID in `arcgis.view_item_id` and the dashboard's ID in `arcgis.dashboard_id`.
+
 ### The service or view item cannot be found
 
 > ArcGIS item `<id>` not found or not visible to this account.
 
 > View item `<id>` not found or not visible to this account.
 
-> Service item `<id>` not found or not visible to this account.
+> Service item `<id>` not found or not visible to this account. Check the item id in the config.
 
 **Cause.** The item ID in the config does not match an item that the signed-in account may see. The
 ID may be wrong, the item may be deleted, or the account may lack access.
@@ -638,26 +779,28 @@ in the stored sign-in owns the item or has access to it.
 
 ### A service table is missing
 
-> Target service is missing table(s): `<table names>`. Run --create-service.
+> Target service is missing table(s): `<table names>`. Run `taskdash collect --migrate --target prod --apply` to create them.
 
-> Target service has no TaskRuns table. Run --migrate --apply first.
+> Target service has no TaskRuns table. Run `taskdash collect --migrate --target prod --apply` first.
 
-> Target service has no TaskMetrics or TaskInventory table. Run --migrate --apply first.
+> Target service has no TaskMetrics or TaskInventory table. Run `taskdash collect --migrate --target prod --apply` first.
 
-> Target service has no TaskInventory table. Run --migrate --apply first.
+> Target service has no TaskInventory table. Run `taskdash collect --migrate --target prod --apply` first.
 
 **Cause.** The hosted service does not hold all the tables that TaskDash writes.
 
 **Fix.** Run `taskdash collect --migrate --apply`. It creates the missing tables and fields. The
 `--migrate` flag alone shows what it would change.
+The messages name the target of the run that printed them. For the test service, add
+`--target test` to the command.
 
 ### `--retire-host` refuses the name
 
 > --retire-host needs the exact computer name, as it shows in the Host column. Leave out wildcards such as * and %. Run it again with one name.
 
-> Cannot retire '`<name>`': it is this computer, and its next collector run would add the rows again. Stop the collector on that computer first, then run --retire-host from a computer that stays.
+> Cannot retire '`<name>`': it is this computer, and its next collector run would add the rows again. Stop the collector on that computer first, then run `taskdash collect --retire-host <name>` from a computer that stays.
 
-> Cannot retire '`<name>`': a collector under '`<name>`' ran within the last `<N>` min. Stop it first (step 1 of 'Retire a computer'), then run --retire-host again.
+> Cannot retire '`<name>`': a collector under '`<name>`' ran within the last `<N>` min. Stop it first (step 1 of 'Retire a computer'), then run `taskdash collect --retire-host <name>` again.
 
 **Cause.** The first message means the name is empty or holds `*`, `%` or `?`. The second means the
 name is the computer that runs the command. Its next collector run would publish its rows again. The
@@ -670,7 +813,7 @@ computer that stays. For the third, wait two collector intervals after the last 
 computer" in the configuration guide.
 
 If the output says `Nothing to retire`, the service holds no inventory rows under that name. Check
-the spelling. The name must match the **Host** column, including the case.
+the spelling. The name must match the **Host** column; the case does not matter.
 
 ### The service schema is out of date
 
@@ -695,7 +838,7 @@ successful run writes the saved `CollectorRuns` row.
 
 > `<table>`: add_to_definition failed creating the table: `<reply>`
 
-> `<table>`: created but not found on re-query -- re-run --migrate --apply.
+> `<table>`: created but not found on re-query -- run `taskdash collect --migrate --target prod --apply` again.
 
 > `<table>`: add_to_definition failed adding field(s) `<fields>`: `<reply>`
 
@@ -725,8 +868,8 @@ rows. Then run `taskdash collect --migrate --apply` again.
 **Cause.** A newer TaskDash migrated this service. The older program you ran does not know the
 newer schema, so it refuses to change it.
 
-**Fix.** Install the newer wheel, as step 1 of [INSTALL.md](INSTALL.md) describes. Do not lower the
-version stamp by hand.
+**Fix.** Install the newer wheel into the existing environment, as step 6 of [UPGRADE.md](UPGRADE.md)
+describes. Do not make a new environment, and do not lower the version stamp by hand.
 
 ### The collector warns about a newer schema
 
@@ -741,7 +884,7 @@ that only the newer release writes stay empty. To fill them, install the newer w
 
 ### The collector warns about the MetricChange table
 
-> WARNING: the service has no MetricChange table, so the dashboard's Metric Change keeps reading all of TaskMetrics. Run `taskdash collect --migrate --apply`, then `taskdash dashboard` to switch it.
+> WARNING: the service has no MetricChange table, so the dashboard's Metric Change keeps reading all of TaskMetrics. Run `taskdash collect --migrate --target prod --apply`, then `taskdash dashboard --target prod --apply` to switch it.
 
 > WARNING: MetricChange write failed (`<error type>: <text>`); Metric Change may be out of date until the next run.
 
@@ -762,7 +905,7 @@ describes.
 
 ### The version stamp could not be saved
 
-> Could not stamp the version on service `<id>`. Re-run --migrate --apply.
+> Could not stamp the version on service `<id>`. Run `taskdash collect --migrate --target prod --apply` again.
 
 **Cause.** The migration finished, but ArcGIS did not save the TaskDash version in the item.
 
@@ -850,25 +993,46 @@ the command again.
 
 ### A view already exists
 
-> arcgis.`<view_item_id or test_view_item_id>` is already `<id>`; the view exists. Remove the key only if you mean to create another view.
+> arcgis.`<view_item_id or test_view_item_id>` is already `<id>`; the view exists. To replace it, run `taskdash collect --create-view --replace --apply`. To make another view, remove the key first.
 
 **Cause.** You ran `taskdash collect --create-view`, and the config already holds a view ID.
 
-**Fix.** Do not create another view unless you need one. If you do, clear the key in the config and
-run the command again.
+**Fix.** To replace the view, run `taskdash collect --create-view --replace --apply`. See
+"Recreate the view" in [Rebuild or move the ArcGIS items](#rebuild-or-move-the-arcgis-items). To
+make a second view, clear the key in the config and run the command again.
+
+### The view cannot be replaced
+
+> arcgis.`<view_item_id or test_view_item_id>` is empty, so there is no view to replace. Run `taskdash collect --create-view --apply` to make the first view.
+
+> Could not rename the old view `<id>` to '`<title>`'. Rename it in ArcGIS Online, then run the command again.
+
+**Cause.** You ran `taskdash collect --create-view --replace`. The first message means the config
+names no view. The second means ArcGIS refused to change the title of the old view. The account may
+not own it.
+
+**Fix.** For the first message, run `taskdash collect --create-view --apply`. For the second,
+rename the old view in ArcGIS Online, or sign in as its owner, and run the command again.
 
 ### A view with that name exists, and it may be half built
 
-> A feature service named '`<name>`' already exists (`<id>`). It may be half-configured by an earlier failed run, with no fields hidden. Delete it in ArcGIS Online and re-run; do not set arcgis.`<view_item_id or test_view_item_id>` to it.
+> A feature service named '`<name>`' already exists (`<id>`). It may be the view you are replacing, or a view that an earlier failed run left with no fields hidden. Delete it in ArcGIS Online and re-run, unless it is the view you use now. Then rename its title (add _old) and re-run; delete it only after the dashboard reads the new view. Do not set arcgis.`<view_item_id or test_view_item_id>` to it.
 
-**Cause.** An earlier `--create-view` or `setup` run may have stopped after it made the view and
-before it hid the fields. That view could show data that the privacy switches hide.
+> No free service name from '`<name>`_v2' to '`<name>`_v19'. Delete the unused views with those names in ArcGIS Online, then run the command again.
 
-**Fix.** Delete that view in ArcGIS Online. Run the command again. Do not put its ID in the config.
+**Cause.** A view with the new view's name exists. It is either the view you use now, which you
+are rebuilding, or a view that an earlier `--create-view` or `setup` run left half built. A half-built
+view could show data that the privacy switches hide.
+
+**Fix.** If the ID is your current view, run `taskdash collect --create-view --replace --apply`. It
+renames the old view, so the dashboard keeps working until the new view is ready. See "Recreate the
+view" in [Rebuild or move the ArcGIS items](#rebuild-or-move-the-arcgis-items). If the view is half built, delete it in
+ArcGIS Online and run the command again. Do not put its ID in the config. The second message means
+that `--replace` found every service name from `_v2` to `_v19` in use. Delete the views you do not need.
 
 ### The new view has no tables
 
-> The new view `<id>` has no table(s) `<names>`. Run --migrate --apply on the service first, delete the view, and retry.
+> The new view `<id>` has no table(s) `<names>`. Run `taskdash collect --migrate --target prod --apply` on the service first, delete the view, and retry.
 
 **Cause.** The service lacks tables, so the view built from it lacks them too. TaskDash reads the
 new view several times over about two minutes before it stops.
@@ -955,6 +1119,24 @@ the same events.
 2. Run `taskdash collect --apply --full-history` once. It ignores the saved position and reads the
    event-log window, up to `history.first_run_max_events` events.
 
+### A run is stuck holding the lock
+
+> A TaskDash run has held the run lock `<folder>\Logs\taskdash.lock` since `<time>`, more than 2 hours. It is stuck, and every hourly run fails until it ends. In PowerShell as administrator, run: Stop-Process -Id `<pid>`. The next hourly run then starts normally.
+
+**Cause.** An earlier run hangs and still holds the lock file `taskdash.lock` in the log folder. Only one
+run may write at a time, so every later run finds the lock taken. A run that finds it held for less
+than 2 hours exits with code 0. After 2 hours it fails with this message, because no normal run
+takes that long. Windows frees the lock when the process that holds it ends.
+
+**Fix.**
+
+1. In PowerShell as administrator, run the `Stop-Process` command from the message. If the message
+   names no process id, run `Stop-ScheduledTask -TaskName "TaskDash Collector"`.
+2. Do not delete `taskdash.lock`. The file is harmless, and Windows frees the lock with the process.
+3. Start the collector task, or wait for the next hour. The run then starts normally.
+4. To find why the run hung, open the newest log in the `Logs` folder from before the hang and read
+   its last lines. See "PowerShell did not finish".
+
 ### PowerShell did not finish
 
 > PowerShell did not finish within `<n>` s. Raise powershell_timeout_seconds in the config, or check that the computer is not overloaded.
@@ -1011,21 +1193,32 @@ send the rows of a log file that has not changed.
 
 ### The alert e-mail failed
 
-> Alert e-mail failed: `<reason>`. The data was published, but nobody was told about the problem. Check smtp.host, smtp.port, smtp.from and smtp.user in the config and the stored SMTP password, then run `taskdash test-alert --apply` to prove the mail path. The next run tries again.
+> Alert e-mail failed: `<reason>`. The data was published, but nobody was told about the problem. `<the fix for the cause>` The next run tries again.
 
 **Cause.** An alert was due, and TaskDash could not send it. The mail server refused or did not
-answer, the stored SMTP password is wrong or missing, or alerting is on but there are no usable mail
-settings. The run still publishes everything first. It then saves `Alert e-mail failed: <reason>` in
+answer, the stored SMTP password is wrong or missing, `alerting.to` is empty, or alerting is on but
+there are no usable mail settings. The error text names the cause and gives the fix for it. The run
+still publishes everything first. It then saves `Alert e-mail failed: <reason>` in
 `error_text` of the `CollectorRuns` row, sends the failure ping to the health check, and exits with
 code 1. The row shows `alert_sent` as 0 and an exit status of failed.
 
 **Fix.** Do these steps:
 
-1. Run `taskdash test-alert`. It prints the recipients and the server, and it sends nothing.
+1. Run `taskdash test-alert`. It prints the recipients and the server, and it sends nothing. It also
+   names the Windows account whose keyring it read.
 2. Run `taskdash test-alert --apply`. It sends one test message and prints the reason if it fails.
-3. Fix the `smtp` settings or the stored password named in the reason. The mail password steps are
+   It proves your own account only. The hourly task uses the keyring of the task account, which can
+   still hold an old password.
+3. Run `taskdash preflight --as-task --apply` and read its `smtp` line. That line shows whether the
+   task account has a stored password and can reach the server.
+4. Fix the `smtp` settings or the stored password named in the reason. The mail password steps are
    in [CONFIGURE.md](CONFIGURE.md). To store a new password, see [ROTATE.md](ROTATE.md).
-4. Wait for the next hourly run. TaskDash keeps the alert state until a send works, so it sends the
+5. If the reason is `SMTPNotSupportedError` and names STARTTLS, the server offers no encryption on
+   that port. For an internal relay on port 25 that needs no sign-in, set `smtp.starttls` to `false`.
+   Otherwise use port 587 with `smtp.starttls`, or port 465 with `smtp.ssl`.
+6. If the reason says `alerting.to` is empty, add at least one address to `alerting.to`, or set
+   `alerting.enabled` to `false`. `taskdash preflight` finds this before an alert is due.
+7. Wait for the next hourly run. TaskDash keeps the alert state until a send works, so it sends the
    same alert again. Nothing is lost.
 
 ### The test alert has no recipient
@@ -1048,7 +1241,7 @@ steps are in [CONFIGURE.md](CONFIGURE.md). Run the command again.
 
 ### The legacy mail file warning
 
-> WARNING: alerting.mail_config_path is deprecated and TLS is not verified for it, so the mail server's certificate is never checked. Move to the smtp block (smtp.host, smtp.from, smtp.user; store the password with 'python -m keyring set taskdash-smtp <smtp.user>'), then clear alerting.mail_config_path.
+> WARNING: alerting.mail_config_path is deprecated and TLS is not verified for it, so the mail server's certificate is never checked. Move to the smtp block (smtp.host, smtp.from, smtp.user; store the password with '`<path of the Python that runs TaskDash>` -m keyring set taskdash-smtp <smtp.user>'), then clear alerting.mail_config_path.
 
 > WARNING: the legacy mail file holds a login but turns TLS off, so the password crosses the network in plain text. Move to the smtp block with smtp.starttls set to true.
 
@@ -1061,23 +1254,204 @@ The second warning appears when the file also holds a login and turns TLS off.
 `alerting.mail_config_path`. The steps are in [CONFIGURE.md](CONFIGURE.md). Run `taskdash preflight`
 and `taskdash test-alert --apply` to prove the new path. Alerts keep working until you move.
 
+## Warnings in the log
+
+A warning does not stop the run. `collect` writes it to its log as `INFO - WARNING: <text>` and
+prints it in the window. The sections above describe the warnings that have a section of their own.
+This section lists the others, grouped by what they concern. Find a warning by its first words.
+
+### Config file warnings
+
+- `WARNING: unknown config key '<key>' in <path> -- ignored (check for a typo).` The config has a
+  key that TaskDash does not read. A key inside a section shows as `'<section>.<key>'`. Correct the
+  spelling, or delete the key.
+- `WARNING: arcgis.password is unused with arcgis.profile; delete it from the config.` The config
+  holds a plaintext password and a stored profile. TaskDash signs in with the profile only. Delete
+  `arcgis.password`.
+- `WARNING: host_name_override is '<name>' but this machine is '<computer>'. Collected data describes '<computer>' and will be published as '<name>'. Correct after a rename; wrong if you meant to run this on '<name>'.`
+  The override names a computer other than the one that runs. A dry run continues, but
+  `collect --apply` stops. See "A collection from the wrong host is refused" and "Rename the
+  computer" in CONFIGURE.md. Set `host_name_override` to `""` or to the current computer name. If
+  you copied the config to another computer, clear it there.
+- `WARNING: <entry> has an unknown key. Use only task, start, end and reason (a '_' key is a note).`
+  A maintenance window uses a key that TaskDash does not know. The warning says whether TaskDash
+  ignores the whole entry or only the key. A misspelled `start` or `end` makes it ignore the entry.
+  Correct the spelling.
+- `WARNING: <entry> has no non-empty "task" (a regex), so it matches nothing. Add it, or remove the entry.`
+  A maintenance window has no `task` pattern, so it mutes nothing. Add the pattern, or remove the
+  entry.
+- `WARNING: alerting.maintenance_windows entry has an unparseable start/end (<entry>); ignored. To mute until you remove the entry, set "end": null.`
+  TaskDash cannot read a time in the entry, so it ignores the entry. Write times as ISO 8601 text.
+- `WARNING: alerting.maintenance_windows task pattern <pattern> is not a valid regex; ignored.` Fix
+  the regular expression in the `task` value of that entry.
+- `WARNING: <count> task(s) are muted by an open-ended alerting.maintenance_windows entry and send no alerts. Remove the entry when the mute is no longer needed.`
+  An entry with `"end": null` mutes tasks until you remove it. TaskDash repeats this warning on every
+  run as a reminder.
+- `WARNING: workflow_descriptions.json: <field> <problem>; TaskDash ignores it.` A field of
+  `workflow_descriptions.json` has the wrong shape. The warning names the task when one task is
+  affected. Correct the field. The other fields still apply.
+- `WARNING: could not read descriptions from <source>: <error>` TaskDash read no descriptions on
+  this run. Check that the file exists, is UTF-8 text and holds valid JSON.
+- `WARNING: workflow_descriptions.json: "tasks" must be an object with one key per task, not a <type>; TaskDash uses no descriptions for this run.`
+  Make `tasks` a JSON object whose keys are task names.
+- `WARNING: workflow_descriptions.json: the file must be an object with a "tasks" object, not a <type>; TaskDash uses no descriptions for this run.`
+  The file holds a list or a single value. Put the task entries inside `{"tasks": {...}}`.
+- `WARNING: workflow_descriptions.json: no "tasks" object. <hint>Put the task entries inside {"tasks": {...}}; TaskDash uses no descriptions for this run.`
+  The file has keys at the top but no `tasks` object. The hint names a key that is close to `tasks`.
+  Move the task entries into a `tasks` object, or correct the spelling of that key.
+- `WARNING: workflow_descriptions.json: key '<key>' is not known; TaskDash ignores it.` The top of
+  the file has a key other than `tasks`. Correct the spelling, or start the key with `_` to keep it
+  as a note.
+- `WARNING: workflow_descriptions.json key '<key>' matches no monitored task. Did you mean '<name>'? After a task rename, change the key to the new name. Until then the description, grace time and accepted notes of that key do not apply.`
+  A key names neither a task nor the file name of a task's script. Change the key to the task's
+  current name.
+- `WARNING: alerting.maintenance_windows[<n>].<start or end> has no offset, so TaskDash reads it as UTC, which can be hours off your local time. Add the offset, such as -05:00, or Z for UTC.`
+  Add the offset to the time, so the window starts and ends at the local time you mean.
+- `WARNING: metrics.tasks key <key> matches no collected task; keys must be full task paths like '\Folder\Task' (see task_full_name in the Tasks table).`
+  Correct the key to a full task path, or delete it.
+- `WARNING: metrics.log_directory_overrides key <key> matches no collected task; keys must be full task paths like '\Folder\Task' (see task_full_name in the Tasks table). The case does not matter.`
+  Correct the key to a full task path, or delete it.
+
+### Alert e-mail warnings
+
+These warnings explain why an alert could not be sent. The steps in
+[The alert e-mail failed](#the-alert-e-mail-failed) fix the cause.
+
+- `WARNING: smtp block needs host and from.` Add `smtp.host` and `smtp.from`.
+- `WARNING: no smtp block and no alerting.mail_config_path in the config. Set one of them to enable e-mail.`
+  Add an `smtp` object, or turn alerting off.
+- `WARNING: mail config not found at <path>.` and `WARNING: could not read mail config (<error>).`
+  and `WARNING: mail config has no smtp server/from address.` The legacy mail file at
+  `alerting.mail_config_path` is missing, unreadable or incomplete. Move to the `smtp` object, as
+  [The legacy mail file warning](#the-legacy-mail-file-warning) describes.
+- `WARNING: smtp.user is set but the connection is unencrypted (smtp.starttls and smtp.ssl are both off); refusing to send the password. Enable smtp.starttls or smtp.ssl, or set smtp.allow_plaintext_auth to true to accept the risk.`
+  TaskDash does not send a password over a plain connection. Turn on encryption.
+- `WARNING: could not read the SMTP password from keyring (<error type>).` The Windows account that
+  runs the task cannot read its keyring. Run `taskdash preflight --as-task --apply` to see why.
+- `WARNING: no SMTP password in keyring for service '<service>', user '<user>'. Store one as the account the scheduled task runs under: python -m keyring set`
+  The task account has no stored mail password. Store it as that account. [ROTATE.md](ROTATE.md)
+  has the steps.
+- `WARNING: could not send alert e-mail: <reason>` The mail server did not accept the message. The
+  text after the colon names the cause and its fix.
+- `WARNING: could not persist alert state (<error>); may re-alert next run.` and
+  `WARNING: could not persist alert state (<error>).` and
+  `WARNING: could not persist the held digest (<error>).` TaskDash could not write its alert state
+  file. It may send the same alert again. Check that the account that runs the task can write to the
+  `Logs` folder.
+- `WARNING: healthcheck ping to <address> failed: <reason>` The outside monitor did not answer the
+  ping. TaskDash hides the secret part of the address. Check `alerting.healthcheck_url` and the
+  network path to the monitor.
+
+### ArcGIS and service warnings
+
+- `WARNING: <label> failed (attempt <n>/<max>): <error>. Retrying in <seconds>s.` An ArcGIS call
+  failed and TaskDash tries it again. Act only if the run ends with
+  [An ArcGIS call failed after several tries](#an-arcgis-call-failed-after-several-tries).
+- `WARNING: could not reach AGOL before publishing (<error type>: <error>); still collecting and evaluating alerts before exiting.`
+  and `WARNING: refusing to write to AGOL (<error type>); still collecting and evaluating alerts before exiting.`
+  and `WARNING: publish() failed (<error type>: <error>); still evaluating alerts from the collected data before exiting.`
+  The run could not publish, so it still collects and checks alerts. It then ends with the error.
+  Look up the error text in this guide.
+- `WARNING: table(s) not found on the service: <names> -- run --migrate --apply to create them.` The
+  service lacks tables that this TaskDash version uses. Run `taskdash collect --migrate --apply`.
+- `WARNING: schema type mismatch -- <field>. --migrate never retypes; fix manually if this causes a write to fail or truncate.`
+  A field on the service has another type than TaskDash expects. TaskDash never changes a field
+  type. Change the field in ArcGIS Online if a write fails.
+- `WARNING: the view has no table(s) <names>; a view cannot gain a table here. Recreate the view with taskdash collect --create-view --replace --apply: see 'Rebuild or move the ArcGIS items' in docs/TROUBLESHOOTING.md for the steps.`
+  See [The new view has no tables](#the-new-view-has-no-tables).
+- `WARNING: the dashboard rebuild stopped: <message>` followed by `Run taskdash dashboard --target <target> --apply once the cause is fixed.`
+  `taskdash collect --create-view --replace --apply` made the new view and set it in the config, but the
+  dashboard rebuild failed. Fix the cause that the message names, then run the command it gives.
+- `WARNING: re-sending the view capabilities (<capabilities>) also failed (<error type>: <error>). Run taskdash collect --migrate --target <target> --apply again, then taskdash collect --check-anonymous.`
+  A view update failed, and the attempt to restore the view's read-only capabilities failed too.
+  Run the two commands that the warning names. [A view update failed](#a-view-update-failed) has
+  the details.
+- `WARNING: the editable service <id> is shared ('<level>'). Set its sharing to Owner in ArcGIS Online and share only the read-only view.`
+  See [The service is shared with everyone](#the-service-is-shared-with-everyone).
+- `WARNING: arcgis.<key> <id> was not found or is not visible to this account, so its sharing was not checked. Fix the id, or share the item with this account.`
+  The config names an item that the signed-in account cannot see. Correct the ID in the config.
+- `WARNING: <count> unsent CollectorRuns row(s) dropped; only the newest <max> are kept in <path>.`
+  and `WARNING: could not save CollectorRuns rows to <path>: <error>`
+  TaskDash keeps the run rows that it could not send, and sends them on a later run. The first
+  warning means that so many rows waited that the oldest are lost. The second means that TaskDash
+  could not write the file. Fix the publish problem that keeps the rows from going out.
+- `WARNING: could not write CollectorRuns row (get_tables failed): <error>` and
+  `WARNING: could not purge old CollectorRuns rows: <error>` TaskDash could not read or clean the
+  service tables. It tries again on the next run.
+- `WARNING: could not read the other computers' collector runs for the daily check (<error type>: <error>). The e-mail leaves them out.`
+  The daily check could not read `CollectorRuns` to list the computers that stopped. The e-mail still
+  went out without that list. Fix the connection problem that the error names. The next daily check reads again.
+- `WARNING: TaskChanges write/purge failed (<error type>: <error>); this pass's state transitions are lost, not deferred.`
+  TaskDash could not save the task change history for this run. The history has a gap for that run.
+- `WARNING: no task log resolved on this machine, so no metric key can be judged retired. Run --refresh-metrics on the task host.`
+  Run `taskdash collect --refresh-metrics` on the computer that holds the task logs.
+
+### Run history and event log warnings
+
+- `WARNING: <error text> Continuing without run history; the run will exit 1 at the end.` TaskDash
+  could not read the Task Scheduler Operational log. It leaves out the run history for this run and
+  exits with code 1. The error text starts one of the entries in
+  [Collect and publish](#collect-and-publish), such as
+  [The Task Scheduler log cannot be read](#the-task-scheduler-log-cannot-be-read).
+- `WARNING: the Operational log's newest record id (<id>) is below the stored watermark (<mark>) -- the log was cleared or the host rebuilt. Using <id>.`
+  Someone cleared the Operational log, or the computer was rebuilt. TaskDash resumes from the
+  highest stored record that is not newer than the log. No action is needed.
+- `WARNING: ignored <file> (<error type>); skipping the event-log gap check.` and
+  `WARNING: ignored <file> (<error type>); sending every metric row.` and
+  `WARNING: ignored <file> (<error type>); reading the full budget.` A state file in the `Logs`
+  folder was damaged, so TaskDash ignored it and rebuilds it. The files are `event_read_mark.json`,
+  `metrics_state.json` and `first_run_budget.json`, in the order of the three warnings.
+- `WARNING: reading <n> events, not the <configured> of <setting>, because the last read timed out. Raise powershell_timeout_seconds, then delete <file> to read the full budget again.`
+  A slow log read made TaskDash lower its event budget. Raise `powershell_timeout_seconds`, then
+  delete the file that the warning names.
+- `WARNING: hit the <n>-event budget. Older events are read first, so the rest of the backlog is picked up by the next run(s); raise history.max_events_per_run if this repeats.`
+  The log holds more events than one run reads. The next runs catch up.
+- `WARNING: hit the <n>-event budget on a time-window read, so only the newest <n> events were kept and older runs in the window are missing. Raise <setting> to backfill further.`
+  The first read of a new install cannot fit its window. Older runs stay out of the history unless
+  you raise the setting that the warning names.
+- `WARNING: could not read the stored run durations (<error type>: <error>); the log miner uses its minimum manual-run window this pass.`
+  TaskDash could not read old run lengths from the service. It uses a short window for this run.
+- `WARNING: the lock has been held since <time> -- more than <hours>h, longer than any normal run. Treating it as stuck and exiting nonzero so Task Scheduler flags this.`
+  An earlier run holds the run lock for much longer than a run takes. In Task Manager, look for a
+  stuck `taskdash` process that you started, and end it. Then run the task again.
+- `WARNING: the fixture holds raw command lines and account names. Keep it private: never commit, share or upload it.`
+  You ran `collect --capture-fixture`. Keep the file private, as the warning says.
+
+### Task and log reading warnings
+
+- `WARNING: <count> scheduled task problem(s); the readable tasks are still collected:` The line
+  names the tasks that TaskDash could not read. See
+  [A task could not be read](#a-task-could-not-be-read).
+- `WARNING: log file <name> in <folder> matches <count> tasks (<names>), so no task reads it. Name each task's log after its script, or set metrics.log_directory_overrides to a folder of its own for each task.`
+  Two or more tasks could own one log file, so TaskDash gives it to none. Follow the warning.
+- `WARNING: <path> vanished during scanning; skipping this file.` and
+  `WARNING: <path> vanished during scanning; skipping <task>.` A task deleted its log while
+  TaskDash read it. No action is needed unless it repeats.
+- `WARNING: could not remove the temporary file <path> (<error>). Delete it by hand.` TaskDash could
+  not delete a short-lived file in its install folder. Delete the file.
+
 ## Setup
 
 These messages come from `taskdash setup`. Setup checks each name before it writes anything, so
 the first five messages leave ArcGIS Online unchanged. For the steps that follow a failure after
 setup began to write, see step 6 of [INSTALL.md](INSTALL.md).
 
+If this is a second computer for a dashboard that exists, do not run setup. The refusals about an
+existing install, folder, item or group then end with a pointer to "Add another computer" in
+[INSTALL.md](INSTALL.md). That section adds the computer to the same service.
+
 ### The config already holds an install
 
-> The config already sets `<keys>`, so an install exists. Setup is for a new install. To keep this install, maintain it with 'taskdash collect --migrate --apply' and 'taskdash dashboard --target prod' (folder install: python taskdash_publish.py --migrate --apply and python taskdash_dashboard.py). To start again, delete the ArcGIS items and empty those keys: see 'The config already holds an install' in docs/TROUBLESHOOTING.md.
+> The config already sets `<keys>`, so an install exists. Setup is for a new install. To keep this install, maintain it with `taskdash collect --migrate --apply`. If the dashboard is the problem: Rebuild it with: `taskdash dashboard --target prod --apply`. See 'Rebuild or move the ArcGIS items' in docs/TROUBLESHOOTING.md. To start again, delete the ArcGIS items and empty those keys.
 
 **Cause.** One or more of `arcgis.item_id`, `arcgis.view_item_id` and `arcgis.dashboard_id` is
 not empty. Setup does not change an install that already exists.
 
 **Fix.** To keep the install, maintain it with `taskdash collect --migrate --apply` and
-`taskdash dashboard --target prod`. To start again, do these steps:
+`taskdash dashboard --target prod --apply`. To start again, do these steps:
 
-1. Delete the ArcGIS items, as Undo step 2 of [INSTALL.md](INSTALL.md) describes.
+1. Delete the ArcGIS items with `taskdash remove`, then `taskdash remove --apply`, as Undo step 1 of
+   [INSTALL.md](INSTALL.md) describes.
 2. Empty the three keys in the config.
 3. Run `taskdash setup --apply` again.
 
@@ -1128,14 +1502,14 @@ items, or run the demo from that account.
 
 ### The group could not be created
 
-> ArcGIS did not create the group '`<title>`'. Check that the account may create groups, then re-run; delete anything listed above first.
+> ArcGIS did not create the group '`<title>`'. Check that the account may create groups. Then run `taskdash remove`, then `taskdash remove --apply` to delete what is listed above, and run setup again.
 
 **Cause.** ArcGIS returned no group. The account may lack the privilege to create groups.
 
 **Fix.**
 
-1. In ArcGIS Online, delete the items that setup listed above this message. Use the order of Undo
-   step 2 in [INSTALL.md](INSTALL.md).
+1. Run `taskdash remove`, then `taskdash remove --apply`. They delete the items that setup listed
+   above this message, in the order of Undo step 1 in [INSTALL.md](INSTALL.md).
 2. Copy the newest `TaskDash.config.json.bak_setup_*` file over `TaskDash.config.json`.
 3. Ask your ArcGIS administrator to let the account create groups.
 4. Run `taskdash setup --apply` again.
@@ -1204,7 +1578,7 @@ also have run the command with a `--config` path from another folder.
 **Fix.**
 
 1. If you moved the config, pass `--config` with the path of the config that sits beside the manifest.
-2. Otherwise, delete the items by hand, as Undo step 2 of [INSTALL.md](INSTALL.md) describes.
+2. Otherwise, delete the items by hand, as Undo step 1 of [INSTALL.md](INSTALL.md) describes.
 
 ### The setup manifest cannot be read
 
@@ -1213,7 +1587,27 @@ also have run the command with a `--config` path from another folder.
 **Cause.** The file is not valid JSON, or it lacks the `items` list that setup writes.
 
 **Fix.** Restore `taskdash_setup_manifest.json` from a backup. If you have none, delete the items by
-hand, as Undo step 2 of [INSTALL.md](INSTALL.md) describes. Do not edit the file to add items.
+hand, as Undo step 1 of [INSTALL.md](INSTALL.md) describes. Do not edit the file to add items.
+
+### Remove refuses a shared service
+
+> Cannot remove: `<names>` published to this service in the last `<N>` days. Deleting it would erase their history and make their next runs fail.
+
+**Cause.** The `CollectorRuns` table holds a recent row from a computer other than this one. Those
+computers still use the service, view, group and dashboard that `remove` would delete. The check
+skips the earlier names of this computer that `host_previous_names` lists, so a rename does not
+block it.
+
+**Fix.**
+
+1. On each named computer, stop and remove the collector task, as step 1 of "Retire a computer" in
+   [CONFIGURE.md](CONFIGURE.md) describes.
+2. Run `taskdash remove` again after each computer has been silent for the number of days shown.
+   The check uses `scheduler.heartbeat_ignore_after_days`. The default is 7.
+
+> Cannot check whether other computers publish to the service, so nothing was deleted. Run the command again later. ArcGIS said: `<error type>`.
+
+This message means ArcGIS did not answer the check. Nothing was deleted. Run the command again later.
 
 ### Remove skipped an item
 
@@ -1231,7 +1625,8 @@ When `--apply` skips an item, the command prints `Skipped:` and the reason, and 
   the reason shown for the view, then run the command again.
 - `it has a view that is not in the manifest: <id>`. ArcGIS deletes a hosted layer's views with it.
   A view made later, for example with `collect --create-view`, would go too. Delete that view by
-  hand first, or keep the service.
+  hand first, or keep the service. After `collect --create-view --replace`, the old view stays until
+  you delete it, so this reason names it.
 - `its views cannot be listed`. TaskDash could not check for other views, so it kept the service.
   Run the command again later.
 - `delete protection is on; turn it off in the group's settings`. Open the group in ArcGIS Online,
@@ -1247,7 +1642,7 @@ When `--apply` skips an item, the command prints `Skipped:` and the reason, and 
 After you fix the reason, run `taskdash remove --apply` again. It reports the deleted items as
 `Already gone`.
 
-## Sign in
+## The signin command
 
 These messages come from `taskdash signin`. It never prints the password. Without `--apply` it saves
 nothing, so a failure leaves the stored sign-in as it was. A `[!!]` line gives exit code 1. The two
@@ -1349,6 +1744,28 @@ Three log lines explain this. All start with `WARNING`.
 - `stored the sign-in, but could not delete taskdash_handoff.bin`. The sign-in works. Delete the file
   by hand. It holds the passwords sealed, not in plain text.
 
+### A hand-off file is waiting
+
+> WARNING: the sign-in hand-off file taskdash_handoff.bin for `<account>` has waited `<age>`. The next collector run as that account stores it and deletes it.
+
+`taskdash status` prints this warning. `taskdash preflight` prints it on the `hand-off` line, with `[w]`.
+
+**Cause.** `taskdash signin --for-task-account --apply` wrote the file, and no run of the task account
+has stored it yet. The collector has not run since. Or the file is for another account than the one
+that the collector task runs as. In that case, the preflight line names both accounts.
+
+**Fix.**
+
+1. In PowerShell as administrator, run `Start-ScheduledTask -TaskName "TaskDash Collector"`. The run
+   logs `Stored the sign-in` and deletes the file.
+2. If the file names another account, run `taskdash signin --for-task-account --task-user
+   DOMAIN\name --apply` again with the account of the collector task. It replaces the file. The
+   one-window installer replaces a file for another account too.
+3. If the file stays after a run, see "The hand-off file stays after a run" and "The hand-off
+   sign-in was kept".
+
+The file `taskdash_handoff.json` beside it names the account in plain text. It holds no secret.
+
 ## Preflight
 
 ### Preflight ends with exit code 1
@@ -1360,7 +1777,9 @@ code is:
 - 0 when the count of problems is 0.
 - 1 when the count of problems is 1 or more.
 
-A warning line also starts with `[!!]`, but a warning alone does not change the exit code.
+A warning line starts with `[w]`, and a warning alone does not change the exit code. A line
+`[--] <check>: needs: <other check>` means that the other check failed, so this one could not run.
+Fix the other check. A missing sign-in is one problem, on the `credentials` line.
 
 With `--enable-event-log`, the exit code is 1 in these cases:
 
@@ -1390,8 +1809,12 @@ reads the dashboard item that `arcgis.dashboard_id` names. It never changes the 
   open the dashboard, select **Share**, and choose your viewers group or organization.
 - "do not read the view": the dashboard still reads the service, or an old view. Run
   `taskdash dashboard --target prod --apply` to rebuild it from the view in `arcgis.view_item_id`.
+- "shared with nobody": only the owner can open the dashboard. Share it with your viewers group.
+- "shared more widely than its view": the dashboard is open to more people than the view. The extra
+  people open the dashboard and see no data. Share the view with the same people, or narrow the dashboard.
+- "shared with a group that the view is not shared with": share the view with that group too.
 
-The check skips the data-source test when the config names no view.
+The check skips the data-source test, and the view comparison, when the config names no view.
 
 ### The delete protection line warns
 
@@ -1445,9 +1868,19 @@ FullLanguage is the expected answer.
 
 ### The install folder line fails
 
-The line starts with `[!!] install folder:` and names the folder. Users, Authenticated Users or
-Everyone can write to it. The collector task runs as an administrator and loads code and config from
-this folder. Anyone who can write there can make it run their code as an administrator.
+The line starts with `[!!] install folder:` and names the folder. The collector task runs as an
+administrator and loads code and config from this folder. Anyone who can write there can make it
+run their code as an administrator. Three results make the line fail:
+
+- Users, Authenticated Users or Everyone can write to the folder.
+- The line says `lets <account> write, and they are not administrators`. That account is not in
+  the local Administrators group. The task account is never named here, because it needs Modify.
+- The line says the folder `is owned by <account>`, which is not SYSTEM, Administrators or a direct
+  member of the Administrators group.
+
+If the Administrators group has group members, which is the usual domain setup, an account that is
+not a direct member gets a warning instead. The line then starts with `WARNING:` and names the
+groups. Confirm that the account belongs to the Administrators group through one of them.
 
 Preflight reads the permissions with `icacls` and changes nothing. If you run the command on the line
 from an elevated prompt, it removes inherited permissions and gives full control to SYSTEM and the
@@ -1457,9 +1890,12 @@ Administrators group only:
 icacls "C:\TaskDash" /inheritance:r /grant:r "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F" /remove:g "*S-1-5-32-545" "*S-1-5-11" "*S-1-1-0"
 ```
 
-If your own account is not an administrator, add it with another `/grant:r` entry, as in step 1 of
-[INSTALL.md](INSTALL.md). Then run `icacls` on the folder. It must not list `Users`,
-`Authenticated Users` or `Everyone` with `(F)`, `(M)` or `(W)`.
+Do not give a daily account that is not an administrator write access. Write access to this folder
+is control of the task account. To edit a file here, use an administrator window. An administrator's
+daily account gets Read & Execute only, as in step 1 of [INSTALL.md](INSTALL.md). If the line names
+such an account, run the `icacls` command that the line prints. It grants `RX`. Then run `icacls` on
+the folder. It must not list `Users`, `Authenticated Users` or `Everyone` with `(F)`, `(M)` or `(W)`,
+and the only other account with `(M)` must be the task account.
 
 The check matches the names of the three groups in English and in the language of this computer,
 and it matches their SIDs. If it cannot find SYSTEM or Administrators in the list, it cannot trust
@@ -1468,19 +1904,22 @@ Run `icacls` on the folder yourself, as the line says, and look for the local na
 If `icacls` fails, the line starts with `WARNING: could not read the permissions`. Run `icacls`
 yourself, as the line says.
 
-A line that starts with `WARNING: <folder> is owned by` names the owner of the folder. The owner can
+A line that says the folder `is owned by` an account names the owner of the folder. The owner can
 always change the folder's permissions, even after you lock them. So an owner who is not an
 administrator could put code in the folder that the task then runs as an administrator. The check
-accepts SYSTEM, Administrators, TrustedInstaller and direct members of the Administrators group. If
-the owner is an administrator through a group, for example a domain admins group, the folder is
-safe. Otherwise, run this from an elevated prompt:
+accepts SYSTEM, Administrators, TrustedInstaller and direct members of the Administrators group. It
+fails any other owner. When the Administrators group has group members, it only warns, because the
+owner may be an administrator through one of them. Confirm that, or run this from an elevated
+prompt:
 
 ```powershell
 icacls "C:\TaskDash" /setowner *S-1-5-32-544
 ```
 
 If the line starts with `WARNING: could not read the owner`, run `(Get-Acl 'C:\TaskDash').Owner` in
-PowerShell. The answer must be Administrators or an administrator account.
+PowerShell. The answer must be Administrators or an administrator account. If it starts with
+`WARNING: could not list the Administrators group`, run `net localgroup Administrators`. The
+check cannot tell who the administrators are without that list.
 
 ### The as-task check does not run
 
@@ -1552,8 +1991,8 @@ window as the task account with `runas`, and run `taskdash preflight` there to s
 
 ### A line shows [--] on a new install
 
-A `[--]` line for `service`, `sharing`, `collector logon type` or `collector account` means that the
-service id or the collector task is not set up yet. It is not a problem. Preflight exits 0 for it.
+A `[--]` line for `service`, `sharing`, `collector logon type`, `collector account` or
+`collector install` means that the service id or the collector task is not set up yet. It is not a problem. Preflight exits 0 for it.
 Run `taskdash setup --apply` to create the service. Run `install_task.ps1` to register the task.
 Then run `taskdash preflight` again. Each line must become `[ok]`.
 
@@ -1584,16 +2023,38 @@ If someone deleted the dashboard, empty `arcgis.dashboard_id` first. Then run
 `taskdash dashboard --target prod --apply` and put the new ID in the config. Share the new
 dashboard with the viewers group, and turn on its delete protection by hand.
 
-**Recreate the view.** Do this when the view is gone or damaged. The service keeps the data. Do it
-also when you want a view that holds the `MetricChange` table. A view never gains a table that you
-add to the service later.
+**Recreate the view.** Do this when the view is damaged. The service keeps the data. Do it also
+when you want a view that holds the `MetricChange` table. A view never gains a table that you add
+to the service later. One command replaces the view and keeps the old one until you delete it.
 
-1. Empty `arcgis.view_item_id` in the config.
-2. Run `taskdash collect --create-view --apply`. It prints the new item ID.
-3. Put that ID in `arcgis.view_item_id`.
-4. In ArcGIS Online, share the new view with the viewers group, and turn on its delete protection.
-5. Run `taskdash dashboard --target prod --apply`, so the dashboard reads the new view.
-6. Run `taskdash preflight`.
+1. Run `taskdash collect --migrate --apply`, then run the collector once. The service must hold
+   the `MetricChange` table before you make the view.
+2. Run `taskdash collect --create-view --replace`. It prints the plan and changes nothing.
+3. Run `taskdash collect --create-view --replace --apply`. It does these things in order:
+   - It adds `_old` to the title of the old view, which keeps the old view working.
+   - It creates the new view in the same folder, owner only, with the same hidden fields. The new
+     view ends in `_v2` (or `_v3` and so on), because the old view keeps its service name.
+   - It copies the sharing of the old view to the new view.
+   - It checks that anonymous users cannot read the tables. If this check stops the run, the config
+     still names the old view.
+   - It copies the delete protection of the old view to the new view.
+   - It sets `arcgis.view_item_id` in the config, after a backup, and updates the setup manifest.
+   - It rebuilds the dashboard, as `taskdash dashboard --target prod --apply` does. The rebuild
+     replaces hand edits in the Dashboards editor and saves the old definition first.
+4. Run `taskdash preflight`, then `taskdash status`. Open the dashboard and check that Metric Change
+   shows data.
+5. In ArcGIS Online, open the old view. Turn off delete protection, then delete it. TaskDash never
+   deletes it for you. The command prints its item ID.
+
+If the run stops after it created the new view, delete that new view in ArcGIS Online, then run the
+command again. The command does not rename the old view a second time. If the view command works
+but the dashboard rebuild fails, the config already names the new view. Run
+`taskdash dashboard --target prod --apply` when the cause is fixed.
+
+An install made before 1.2 has no setup manifest. The command then leaves the manifest alone.
+`taskdash remove` knows only the items that `taskdash setup` made. It skips the service while the
+old view exists, because the manifest does not list that view. Delete the old view before you run
+`remove --apply`, as "Remove skipped an item" describes.
 
 **Move the items to another account.** The collector account must own the service, or be an
 administrator.
@@ -1625,9 +2086,9 @@ remove the key.
 
 ### The heartbeat ignore time is not above 0
 
-> scheduler.heartbeat_ignore_after_days must be a number above 0, got `<value>`. Set it to the days of silence after which the heartbeat leaves a computer out, or remove the key for 7.
+> scheduler.heartbeat_ignore_after_days must be a number above 0, got `<value>`. Set it to the days of silence after which the dashboard calls a computer silent, or remove the key for 7.
 
-**Cause.** The dashboard heartbeat leaves out a computer with no collector run for this many days.
+**Cause.** The dashboard calls a computer silent when it has no collector run for this many days.
 The value is 0 or less, or it is not a number.
 
 **Fix.** Set `scheduler.heartbeat_ignore_after_days` to a number of days, such as `7`. Or remove the
@@ -1635,7 +2096,7 @@ key. Then rebuild the dashboard.
 
 ### The service has no tables
 
-> The `<target>` service has no `<table names>` table(s). Create them first: python taskdash_publish.py --migrate --target `<target>` --apply
+> The `<target>` service has no `<table names>` table(s). Create them first: `taskdash collect --migrate --target <target> --apply`
 
 **Cause.** The item that the dashboard reads lacks tables. That item is the view, or the service if
 the config sets no view.
@@ -1651,6 +2112,15 @@ again. If the message repeats for a view, see "The new view has no tables".
 is not a dashboard, or the account cannot see it.
 
 **Fix.** Open the dashboard in ArcGIS Online. Copy its ID into `arcgis.dashboard_id`.
+
+### The dashboard id is empty but one exists
+
+> arcgis.dashboard_id is empty, but a dashboard titled '`<title>`' already exists (`<ids>`). A new one would be an unshared second copy. Put that id in arcgis.dashboard_id in the config, then run this again; this script never creates a second prod dashboard.
+
+**Cause.** With `--target prod`, the config has no dashboard id, yet you own a dashboard with the
+prod title. A new dashboard would sit in your root folder, shared with nobody.
+
+**Fix.** Copy the ID in the message into `arcgis.dashboard_id`. Then run the command again.
 
 ### The test title matches the production dashboard
 
@@ -1673,7 +2143,7 @@ update.
 
 ### The backup could not be read
 
-> Could not read dashboard `<id>` for a backup; not overwriting it.
+> Could not read dashboard `<id>` for a backup; not overwriting it. Open it in ArcGIS Online to check that it opens, then run the command again.
 
 **Cause.** Before `--apply` replaces a dashboard, TaskDash saves its live definition. The read
 returned nothing, so TaskDash left the dashboard unchanged.
@@ -1682,9 +2152,10 @@ returned nothing, so TaskDash left the dashboard unchanged.
 
 ### The dashboard could not be published
 
-> Dashboard publish failed: `<reply>`
+> Dashboard publish failed: `<reply>`. Check that the account may create items and may edit the dashboard, then run the command again.
 
 **Cause.** ArcGIS rejected the request to create or update the dashboard. `<reply>` is its answer.
+For an error reply, it shows the code and the message, such as `error 400: <message>`.
 
 **Fix.** Read the reply. Check that the account may create items and may edit the dashboard. Then
 run the command again.
@@ -1700,7 +2171,7 @@ sign-in.
 
 ### The dashboard has no service to read
 
-> No arcgis.`<item_id or test_item_id>` in the config: the `<target>` dashboard needs its service.
+> No arcgis.`<item_id or test_item_id>` in the config: the `<target>` dashboard needs its service. Set the key, or run `taskdash setup` for a new install.
 
 **Cause.** The config key for the service is empty. `--target test` reads `arcgis.test_item_id`.
 `--target prod` reads `arcgis.item_id`. Without `--target`, the command uses `test` only when
@@ -1726,7 +2197,7 @@ replace the production dashboard unless you name it.
 No widget templates: dashboard_templates.json is missing. Reinstall the TaskDash wheel to restore it, or pass --source-dashboard <id> of any dashboard whose widget structures to borrow.
 ```
 
-> dashboard_templates.json is missing required template widget(s): `<names>`
+> dashboard_templates.json is missing required template widget(s): `<names>`. Reinstall the TaskDash wheel to restore the file.
 
 **Cause.** TaskDash builds the dashboard from `dashboard_templates.json`. The wheel installs this
 file under `share\taskdash` in the Python environment. The file is missing, or it lacks a widget
@@ -1737,8 +2208,9 @@ that the build needs.
 ### The definition check refuses the dashboard
 
 The `dashboard` command and `setup` check the definition before they post it. Each check below
-protects viewers from a widget that Dashboards would show wrongly. The command stops and posts
-nothing. If setup stops here, it has already created the items that it lists. Step 6 of
+protects viewers from a widget that Dashboards would show wrongly. Each message ends with the line
+`See TROUBLESHOOTING.md, section The definition check refuses the dashboard.` The command stops and
+posts nothing. If setup stops here, it has already created the items that it lists. Step 6 of
 [INSTALL.md](INSTALL.md) explains how to recover. The first message is a check on the definition
 as a whole. The table lists the others.
 
@@ -1771,14 +2243,14 @@ maintainer.
 | Refusing to publish: '`<widget>`' shows `<fields>`, which its Arcade data source does not return. Add them to the script's fields. | A table shows a column that its script does not return. |
 | Refusing to publish: '`<widget>`' column `<name>` is a raw layer field but is neither a groupByField nor a statistic alias of this grouped dataset -- Dashboards can only return group-by fields and aggregated statistics from a grouped query. | A grouped table shows a raw column. |
 | '`<widget>`' computes `<names>` but shows no column for them. Dashboards renders an undisplayed statistic as an extra unlabelled column with an error marker on every row. | A statistic has no column. |
-| '`<widget>`' column `<name>` has no number format; an unrounded average renders with 10+ decimals (defect 4.10). | An average column has no number format. |
+| '`<widget>`' column `<name>` has no number format; an unrounded average renders with 10+ decimals. | An average column has no number format. |
 | Refusing to publish: `<source>` -> `<target>` targets a widget that does not exist in this view. | A click action points to a missing widget. |
 | Refusing to publish: `<source>` -> `<target>` names dataset `<name>`, which '`<widget>`' does not have. | A click action points to a missing dataset. |
 | Refusing to publish: `<source>` -> `<target>` is not a 5.x whereClause target; a legacy flat action filters nothing and shows no error. | A click action uses an old format. |
-| Refusing to publish: `<source>` -> `<target>` crosses from `<table>` to `<table>` without a fieldMap; keyed on OBJECTID it matches nothing (ce0221b). | A click action joins two tables without a key. |
+| Refusing to publish: `<source>` -> `<target>` crosses from `<table>` to `<table>` without a fieldMap; keyed on OBJECTID it matches nothing. | A click action joins two tables without a key. |
 | Refusing to publish: `<source>` -> `<target>` maps `<number>` fields. Dashboards applies only the first (probed 2026-09-28); join on one key field instead. | A click action maps more than one field. |
 | Refusing to publish: `<source>` -> `<target>` maps `<name>`, which the Arcade data source of '`<widget>`' does not return. | A click action maps a field that the script does not return. |
-| Refusing to publish: '`<widget>`' tells the reader to select a row, but selecting does nothing (defect 4.1). | A caption asks for a click that has no action. |
+| Refusing to publish: '`<widget>`' tells the reader to select a row, but selecting does nothing. | A caption asks for a click that has no action. |
 | Refusing to publish: '`<widget>`' requires a selection from `<names>`; one row click can never satisfy all of them. Keep requiresSelection true on the row source only. | A widget needs several selections at once. |
 | Refusing to publish: '`<widget>`' caps its query at `<number>` rows without saying so in its title (no silent caps). | A query limits its rows without telling the reader. |
 | Refusing to publish: '`<widget>`' has no help text. Add it to HELP. | A widget has no help text. |
@@ -1836,9 +2308,15 @@ demo then creates its own `DEMO_` items.
 **Fix.**
 
 1. In ArcGIS Online, delete the `DEMO_` items, the `DEMO_TaskDash viewers` group and the
-   `TaskDash_Demo` folder. Use the order of Undo step 2 in [INSTALL.md](INSTALL.md).
+   `TaskDash_Demo` folder. Use the order of Undo step 1 in [INSTALL.md](INSTALL.md).
 2. Delete the file that the message names. It is `TaskDash.config.json` in the `demo` folder.
 3. Run `taskdash demo --apply` again.
+
+The demo config can also fail to read.
+
+> The demo config `<path>` cannot be read: `<error name>`. Delete any DEMO_ items it names, then delete the file and run the command again.
+
+Handle it as the steps above do: delete the `DEMO_` items that the file names, then the file.
 
 ### The demo collect run failed
 
@@ -1852,7 +2330,7 @@ error in this guide, fix the cause, and run the same `taskdash demo` command aga
 
 ### Demo ends with exit code 0
 
-Exit code 0 is not an error. The demo gives 0 when the check or the publish finished.
+Exit code 0 is not an error. The demo gives 0 when the check, the publish or the removal finished.
 
 ## Status
 
@@ -1870,22 +2348,38 @@ The exit code shows which kind of problem it found:
 
 ### The newest run failed
 
-> The newest run failed. Read its log in the log folder; see TROUBLESHOOTING.md.
+> The newest run failed. Run `taskdash status --offline` for the last line of its log, then read the log in the log folder.
 
-**Cause.** The `Service` line shows `exit_status failed`. The exit code is `1`.
+> The newest scheduled run failed: its log holds an ERROR line. Open the log and search for the first ERROR line.
+
+**Cause.** The first message means the `Service` line shows `exit_status failed`. The second message
+comes from `--offline`: the log of the newest scheduled run holds an `ERROR` line. The exit code is `1`.
 
 **Fix.** Run `taskdash status --offline` to see the last line of the newest log. Open that log and
-search for the first `ERROR` line. The `error_text` column of the **CollectorRuns** table holds the same text.
+find the line that contains `TaskDash exiting:`. The `error_text` column of the **CollectorRuns** table holds the same text.
 
 ### The newest success is too old
 
 > The newest success is older than `<minutes>` min (2 x scheduler.collector_interval_minutes). Check that the collector task still runs.
 
+> The newest scheduled run is `<age>` old, more than `<minutes>` min (2 x scheduler.collector_interval_minutes). Check that the collector task still runs.
+
 **Cause.** The newest successful run is older than twice the collector interval, 120 minutes by
-default. The collector task did not run, or every run since then failed. The exit code is `2`.
+default. The second message comes from `--offline`, and it measures the age of the newest scheduled
+run's log file. The collector task did not run, or every run since then failed. The exit code is `2`.
 
 **Fix.** In Task Scheduler, check that the collector task is enabled and ran. If you changed the
 schedule, set `scheduler.collector_interval_minutes` to the new interval in minutes.
+
+### Status finds no scheduled run log
+
+> Local: no scheduled run log (taskdash_`<time>`.log) in `<folder>` yet. Run `taskdash collect --apply` once, or wait for the hourly task.
+
+**Cause.** The log folder holds no log of a scheduled run. A dry run, a test run or a `--migrate` run
+writes `taskdash_manual_<time>.log`, and `status` skips those logs. The exit code is `2`.
+
+**Fix.** Run `taskdash collect --apply` once, or wait for the hourly task. If the config sets
+`logging.log_dir`, check that the command reads the right config.
 
 ### Status finds no run for the host
 
@@ -1900,7 +2394,7 @@ name. The exit code is `2`.
 
 ### Status cannot read the service
 
-> Cannot read the service: `<reason>`. Check the sign-in and the network, then run again.
+> Cannot read the service: `<reason>`. Check the sign-in and the network, then run again, or run `taskdash status --offline` to read only the local log.
 
 **Cause.** The sign-in or the network failed, or the config could not be read. The exit code is `3`.
 
@@ -1928,7 +2422,7 @@ sign-in.
 
 ### The service has no CollectorRuns table
 
-> The service has no CollectorRuns table. Run `taskdash collect --migrate --apply` to create it.
+> The service has no CollectorRuns table. Run `taskdash collect --migrate --target prod --apply` to create it.
 
 **Cause.** The service does not have the table that records collector runs.
 

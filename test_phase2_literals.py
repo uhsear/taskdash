@@ -102,6 +102,22 @@ def test_dashboard_tags_default_and_override():
     assert _post({"arcgis": {"dashboard_tags": "x,y"}})["tags"] == "x,y"
 
 
+def _post_update(config):
+    con = _FakeCon()
+    gis = SimpleNamespace(_portal=SimpleNamespace(resturl="https://x.test/"), _con=con, url="https://x.test",
+                          users=SimpleNamespace(me=SimpleNamespace(username="u")))
+    dash.post_dashboard(gis, {}, "t", SimpleNamespace(owner="o", id="dash1"), config)
+    return con.params
+
+
+def test_dashboard_update_keeps_the_owners_snippet_and_tags_unless_tags_are_configured():
+    created = _post(None)
+    assert created["snippet"] and created["tags"] == "taskdash,monitoring"
+    updated = _post_update(None)
+    assert "snippet" not in updated and "tags" not in updated and updated["title"] == "t"
+    assert _post_update({"arcgis": {"dashboard_tags": "x,y"}})["tags"] == "x,y"
+
+
 def test_validator_passes_a_clean_definition_with_or_without_a_host_name():
     definition = _definition()
     dash.validate_definition(definition)
@@ -141,3 +157,12 @@ def test_wrapper_keeps_the_pro_interpreter_as_default_and_honours_the_override()
     default = text.index('set "PY=')
     override = text.index("if defined TASKDASH_PYTHON")
     assert default < override < text.index('"%PY%" taskdash_publish.py')
+
+
+def test_the_demo_dashboard_summary_says_the_data_is_invented():
+    con = _FakeCon()
+    gis = SimpleNamespace(_portal=SimpleNamespace(resturl="https://x.test/"), _con=con, url="https://x.test",
+                          users=SimpleNamespace(me=SimpleNamespace(username="u")))
+    dash.post_dashboard(gis, {}, "t", None, None, demo=True)
+    assert con.params["snippet"].startswith("DEMO - invented data.")
+    assert _post(None)["snippet"] == "Scheduled task health and workflow metrics."

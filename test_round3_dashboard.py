@@ -47,9 +47,11 @@ def test_success_rate_tile_reads_the_lowest_per_task_rate_truncated_not_rounded(
     widgets = _by_name(build())
     tile = widgets["7-Day Success Rate"]
     assert tile["title"] == "Lowest 7-day success"  # owner decision, phase 0: the rule is under the value
-    dataset = tile["datasets"][0]
+    assert tile["datasets"][0]["dataSource"]["type"] == "arcadeDataSource"  # silent computers are left out
+    fallback = _by_name(build(heartbeat_arcade_refresh=False))["7-Day Success Rate"]
+    dataset = fallback["datasets"][0]
     assert dataset["statisticDefinitions"][0]["onStatisticField"] == "lowest_success_rate_7d"
-    assert "MIN_lowest_success_rate_7d" in tile["expression"]  # MIN: a silent host keeps an old stamp
+    assert "MIN_lowest_success_rate_7d" in fallback["expression"]  # MIN: the tile errs toward the alarm
     # Floor to 1 decimal, not Round: a rounded 98.0% used to read "OK" while the unrounded 97.97
     # was "Low" (indicators-success-rate-rounding-contradiction).
     assert "pct = Floor(pct * 10) / 10;" in tile["expression"]
@@ -169,7 +171,7 @@ def test_status_and_schedule_selectors_also_target_config_notes(build):
     for name in ("Health", "Schedule"):
         targeted = {t["targetId"].split("#")[0] for e in selectors[name]["events"]
                    for a in e["actions"] for t in a["targets"]}
-        assert widgets["Config Notes"]["id"] in targeted, name
+        assert widgets["Setting Notes"]["id"] in targeted, name
 
 
 # ------------------------------------------------------------------ decision 10: heartbeat / tiles

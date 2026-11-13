@@ -26,7 +26,7 @@ class InventoryTable:
 
     def query(self, *, where="1=1", out_fields="*", result_offset=0, **kw):
         match = re.fullmatch(r"host_name = '(.*)'", where)
-        rows = [r for r in self.rows if match and r["host_name"] == match.group(1).replace("''", "'")]
+        rows = [r for r in self.rows if match and r["host_name"].upper() == match.group(1).replace("''", "'")]
         names = out_fields.split(",")
         return SimpleNamespace(features=[SimpleNamespace(attributes={k: r.get(k) for k in names})
                                          for r in rows[result_offset:]])
@@ -112,7 +112,7 @@ class RunsTable:
 
     def query(self, *, where, **kw):
         host = re.fullmatch(r"host_name = '(.*)'", where).group(1)
-        started = self.started.get(host)
+        started = next((v for k, v in self.started.items() if k.upper() == host), None)
         features = [] if started is None else [SimpleNamespace(attributes={"started_utc": started})]
         return SimpleNamespace(features=features)
 

@@ -4,7 +4,7 @@ Driver: taskdash_dashboard.py (run by hand after a schema or layout change)
 Source: dashboard_templates.json (proven Dashboards 5.0.0 widget structures) + the hosted table service
 Target: the TaskDash dashboard item (prod: arcgis.dashboard_id) or TaskDash_TEST (test service)
 
-Widgets are cloned from proven structures and retargeted at the five-table schema. Nothing
+Widgets are cloned from proven structures and retargeted at the six-table schema. Nothing
 carries a hardcoded host filter -- an earlier dashboard full of them froze after a server move.
 Every Dashboards JSON shape that has not been render-tested sits behind FEATURE_FLAGS, so a
 shape that renders wrong is switched off in one place after the render test.
@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import functools
 import html
 import json
 import re
@@ -37,6 +38,11 @@ from taskdash_common import (
     TABLE_RUNS,
     TABLE_TASK_CHANGES,
     TASKDASH_VERSION,
+    CONFIG_ARG_HELP,
+    DEFAULT_CONFIG_FILE,
+    command_text,
+    config_default,
+    config_range_problem,
     connect_agol,
     data_dir,
     emit,
@@ -44,12 +50,13 @@ from taskdash_common import (
     load_config,
     normalize_text,
     runtime_dir,
+    see_troubleshooting,
 )
 
 OUTPUT_JSON = "dashboard_taskdash.json"
 PROD_DASHBOARD_TITLE = "TaskDash"
 TEST_DASHBOARD_TITLE = "TaskDash_TEST"
-DEFAULT_PORTAL_URL = "https://www.arcgis.com"
+DEFAULT_PORTAL_URL = config_default("arcgis.url")
 OFFLINE_ITEM_ID = "0" * 32
 
 LAYER_INVENTORY = 0
@@ -80,7 +87,7 @@ FEATURE_FLAGS: Dict[str, bool] = {
     "column_number_format": True,     # 4.10: per-column number format key on grouped tables
     "status_symbols": True,           # F9: plain-text glyph beside every status word
     "mobile_element_mappings": True,  # F6: elementMappings desktop id -> mobile id
-    "config_notes_filter": True,      # Config Notes list: config_warnings is_not_empty
+    "config_notes_filter": True,      # Setting notes list: config_warnings is_not_empty
 }
 
 HEARTBEAT_REFRESH_MINUTES = 5
@@ -360,9 +367,9 @@ def _trend_chart_config(x_field: str, y_field: str, y_title: str) -> Dict[str, A
                         "year": {"month": "short", "year": "numeric"},
                         "month": {"month": "short", "day": "numeric"},
                         "day": {"month": "short", "day": "numeric"},
-                        "hour": {"hour": "2-digit", "minute": "2-digit", "hour12": False},
-                        "minute": {"hour": "2-digit", "minute": "2-digit", "hour12": False},
-                        "second": {"hour": "2-digit", "minute": "2-digit", "second": "2-digit", "hour12": False}}},
+                        "hour": {"hour": "2-digit", "minute": "2-digit", "hour12": True},
+                        "minute": {"hour": "2-digit", "minute": "2-digit", "hour12": True},
+                        "second": {"hour": "2-digit", "minute": "2-digit", "second": "2-digit", "hour12": True}}},
                 "lineSymbol": {"type": "esriSLS", "style": "esriSLSSolid", "width": 1},
                 "labels": {"type": "chartText", "visible": True, "content": axis_text},
                 "grid": {"type": "esriSLS", "style": "esriSLSSolid", "color": [140, 140, 140, 80], "width": 1},
@@ -755,7 +762,7 @@ DETAIL_VARS = (
     'var workDir = esc(DefaultValue($datapoint["command_target_working_directory"], ""));\n'
     'var logPath = esc(DefaultValue($datapoint["latest_log_path"], ""));\n'
     # settings_detail is collected and stored but shown nowhere (critic-02): an acknowledged
-    # risky setting (Config Notes filters it out once acknowledged) was otherwise invisible.
+    # risky setting (Setting notes filters it out once acknowledged) was otherwise invisible.
     'var settingsDetail = esc(DefaultValue($datapoint["settings_detail"], ""));\n'
 )
 
@@ -775,6 +782,9 @@ def detail_list_expression(hidden: Sequence[str] = ()) -> str:
     detail_vars = DETAIL_VARS
     for field in hidden:
         detail_vars = detail_vars.replace(f'DefaultValue($datapoint["{field}"], "")', '""')
+    # A hidden working folder reads "" too, so "not set" would be false: show "--" like Script does.
+    if "command_target_working_directory" in hidden:
+        detail_vars = detail_vars.replace('var workDir = esc("");', 'var workDir = "--";')
     return FMT_HELPERS + task_status_arcade() + detail_vars + (
         # "" when lt is not a LOGON_TYPE_WORDS key, so userText can tell a real word from the raw
         # token echoed back at it (task_detail-runs-as-wording: unmapped types read "Group [Group]").
@@ -786,7 +796,7 @@ def detail_list_expression(hidden: Sequence[str] = ()) -> str:
         '  attributes: {\n'
         '    statusText: statusText,\n'
         '    whyText: IIf(kind == "", "", "Why: " + esc(DefaultValue($datapoint["attention_reason"], ""))),\n'
-        '    descText: esc(DefaultValue($datapoint["description"], "No description recorded.")),\n'
+        '    descText: esc(DefaultValue($datapoint["description"], "No description yet. Ask the TaskDash owner to add one.")),\n'
         # The bucket word repeated the detail's own opening word on every task ("Daily | Daily
         # every day at..."); show the detail alone once it exists (task_detail-06).
         '    scheduleText: IIf(detail == "", DefaultValue($datapoint["schedule_bucket"], "--"), detail),\n'
@@ -1049,9 +1059,9 @@ METRIC_LIST_EXPRESSION = FMT_HELPERS + (
 # text quotes these, so they live in one place.
 HEARTBEAT_LATE_MINUTES = 90
 HEARTBEAT_DOWN_MINUTES = 180
-DEFAULT_COLLECTOR_INTERVAL_MINUTES = 60
-# scheduler.heartbeat_ignore_after_days default: a computer silent this long is left out of the heartbeat.
-DEFAULT_HEARTBEAT_IGNORE_DAYS = 7
+DEFAULT_COLLECTOR_INTERVAL_MINUTES = config_default("scheduler.collector_interval_minutes")
+# scheduler.heartbeat_ignore_after_days default: a computer with no collector run for this long is silent.
+DEFAULT_HEARTBEAT_IGNORE_DAYS = config_default("scheduler.heartbeat_ignore_after_days")
 
 
 def heartbeat_thresholds(interval_minutes: float = DEFAULT_COLLECTOR_INTERVAL_MINUTES) -> Tuple[float, float]:
@@ -1059,8 +1069,21 @@ def heartbeat_thresholds(interval_minutes: float = DEFAULT_COLLECTOR_INTERVAL_MI
     return 1.5 * interval_minutes, 3 * interval_minutes
 
 
+# The oldest computer's name sits above the age, so a Late or Down tile says which computer to
+# examine. A silent computer (no Collector runs row inside the ignore window) still counts in the
+# age; the bottom line says how many there are, so a computer that cannot publish stays visible
+# until it is retired.
+_HEARTBEAT_DETAIL_ARCADE = (
+    'var host = Text(DefaultValue($datapoint["oldest_host"], ""));\n'
+    'var silent = Number(DefaultValue($datapoint["silent_count"], 0));\n'
+    'var silentText = When(silent == 0, "", silent == 1, ", 1 computer silent",'
+    ' ", " + Text(silent) + " computers silent");\n')
+
+
 def heartbeat_expression(field: str, late: float = HEARTBEAT_LATE_MINUTES,
-                         down: float = HEARTBEAT_DOWN_MINUTES) -> str:
+                         down: float = HEARTBEAT_DOWN_MINUTES, detail: bool = False) -> str:
+    """The tile's Arcade. detail adds the oldest computer's name and the silent-computer count,
+    which only the Arcade data source returns; the layer-statistic fallback has neither field."""
     minutes_until = f"{late if down >= 120 else 120:g}"
     late, down = f"{late:g}", f"{down:g}"  # "90", not "90.0": the hourly text stays byte-identical
     return (
@@ -1093,12 +1116,14 @@ def heartbeat_expression(field: str, late: float = HEARTBEAT_LATE_MINUTES,
         'if (minutesSince < 1) {\n'
         '  ageText = "just now";\n'
         '}\n'
-        'return {\n'
+        + (_HEARTBEAT_DETAIL_ARCADE if detail else '')
+        + 'return {\n'
         '  textColor: color,\n'
         '  middleText: ageText,\n'
         '  middleTextMaxSize: "large",\n'
-        '  bottomText: state,\n'
-        '  bottomTextMaxSize: "medium"\n'
+        + ('  topText: host,\n  topTextMaxSize: "small",\n  bottomText: state + silentText,\n'
+           if detail else '  bottomText: state,\n')
+        + '  bottomTextMaxSize: "medium"\n'
         '};\n'
     )
 
@@ -1107,45 +1132,92 @@ def heartbeat_expression(field: str, late: float = HEARTBEAT_LATE_MINUTES,
 # host. MAX hid a dead host behind a live one.
 HEARTBEAT_EXPRESSION = heartbeat_expression("MIN_collected_at_utc")
 HEARTBEAT_SOURCE_FIELD = "min_collected_at"
+HEARTBEAT_HOST_FIELD = "oldest_host"
+HEARTBEAT_SILENT_FIELD = "silent_count"
+SUCCESS_SOURCE_FIELD = "lowest_success_rate_7d"
 
 
-def heartbeat_source_script(portal_url: str, item_id: str, layer_id: int,
-                            runs_layer_id: int = DEFAULT_LAYER_IDS[TABLE_COLLECTOR_RUNS],
-                            ignore_after_days: float = DEFAULT_HEARTBEAT_IGNORE_DAYS) -> str:
-    """Arcade data source returning one feature: the oldest collected_at_utc, in epoch millis.
-
-    Exists only for refreshInterval: Now() in the tile's formatting Arcade is re-evaluated only
-    when its data refreshes, and a plain layer dataset never refreshes on its own.
-
-    A computer with no CollectorRuns row in the last ignore_after_days days is retired or renamed,
-    so its stale inventory rows are left out; otherwise it would read Down for ever. Failed runs
-    write a CollectorRuns row too, so a collector that runs but cannot publish still reads Down,
-    but only until the cutoff: after ignore_after_days days without any row it drops out of the tile.
-
-    The server filters CollectorRuns by the cutoff, so the script reads only the recent rows, not
-    the whole table. The cutoff is whole minutes (at least 1) because DateAdd takes an integer.
-    """
+def _live_computers_script(portal_url: str, item_id: str,
+                           runs_layer_id: int, ignore_after_days: float) -> str:
+    """Arcade lines that fill `live`: the computers with a CollectorRuns row in the last
+    ignore_after_days days. The server filters by the cutoff, so the script reads only the recent
+    rows, not the whole table. The cutoff is whole minutes (at least 1) because DateAdd takes an
+    integer."""
     cutoff_minutes = max(1, round(ignore_after_days * 1440))
     return (
-        f'var fs = FeatureSetByPortalItem(Portal({_s(portal_url)}), {_s(item_id)}, {layer_id},'
-        ' ["host_name", "collected_at_utc"], false);\n'
         f'var runs = FeatureSetByPortalItem(Portal({_s(portal_url)}), {_s(item_id)}, {runs_layer_id},'
         ' ["host_name", "started_utc"], false);\n'
         f'var cutoff = DateAdd(Now(), -{cutoff_minutes}, "minutes");\n'
         'var live = {};\n'
         'for (var r in Filter(runs, "started_utc > @cutoff")) {\n'
         '  live[Lower(Text(r["host_name"]))] = true;\n'
-        '}\n'
-        'var ms = null;\n'
+        '}\n')
+
+
+def _single_feature_script(fields: str, attributes: str) -> str:
+    return ('return FeatureSet(Text({\n'
+            f'  fields: [{fields}],\n'
+            '  geometryType: "",\n'
+            f'  features: [{{attributes: {{{attributes}}}}}]\n'
+            '}));\n')
+
+
+def heartbeat_source_script(portal_url: str, item_id: str, layer_id: int,
+                            runs_layer_id: int = DEFAULT_LAYER_IDS[TABLE_COLLECTOR_RUNS],
+                            ignore_after_days: float = DEFAULT_HEARTBEAT_IGNORE_DAYS) -> str:
+    """Arcade data source returning one feature: the oldest collected_at_utc in epoch millis, the
+    computer it belongs to, and how many computers are silent.
+
+    Exists for refreshInterval: Now() in the tile's formatting Arcade is re-evaluated only when
+    its data refreshes, and a plain layer dataset never refreshes on its own.
+
+    Every computer in the inventory counts until `taskdash publish --retire-host` removes it, so a
+    computer that cannot publish keeps the tile at Late or Down. A computer with no CollectorRuns
+    row in the last ignore_after_days days is silent: a retired or renamed computer, or one whose
+    runs cannot reach the service (a failed run keeps its row in a pending file on that computer).
+    The tile shows how many are silent. It reads both tables on every refresh, so a retired
+    computer drops out at the next load with no dashboard rebuild.
+    """
+    return (
+        f'var fs = FeatureSetByPortalItem(Portal({_s(portal_url)}), {_s(item_id)}, {layer_id},'
+        ' ["host_name", "collected_at_utc"], false);\n'
+        + _live_computers_script(portal_url, item_id, runs_layer_id, ignore_after_days)
+        + 'var ms = null;\n'
+        'var oldest = null;\n'
+        'var silent = {};\n'
         'for (var f in Filter(fs, "collected_at_utc IS NOT NULL")) {\n'
+        '  var key = Lower(Text(f["host_name"]));\n'
         '  var t = Number(f["collected_at_utc"]);\n'
-        '  if (HasKey(live, Lower(Text(f["host_name"]))) && (IsEmpty(ms) || t < ms)) { ms = t; }\n'
+        '  if (!HasKey(live, key)) { silent[key] = true; }\n'
+        '  if (IsEmpty(ms) || t < ms) { ms = t; oldest = Text(f["host_name"]); }\n'
         '}\n'
-        'return FeatureSet(Text({\n'
-        f'  fields: [{{name: {_s(HEARTBEAT_SOURCE_FIELD)}, alias: "Oldest host data", type: "esriFieldTypeDouble"}}],\n'
-        '  geometryType: "",\n'
-        f'  features: [{{attributes: {{{HEARTBEAT_SOURCE_FIELD}: ms}}}}]\n'
-        '}));\n'
+        + _single_feature_script(
+            f'{{name: {_s(HEARTBEAT_SOURCE_FIELD)}, alias: "Oldest computer data", type: "esriFieldTypeDouble"}},'
+            f' {{name: {_s(HEARTBEAT_HOST_FIELD)}, alias: "Oldest computer", type: "esriFieldTypeString"}},'
+            f' {{name: {_s(HEARTBEAT_SILENT_FIELD)}, alias: "Silent computers", type: "esriFieldTypeInteger"}}',
+            f'{HEARTBEAT_SOURCE_FIELD}: ms, {HEARTBEAT_HOST_FIELD}: oldest, '
+            f'{HEARTBEAT_SILENT_FIELD}: Count(Keys(silent))')
+    )
+
+
+def success_rate_source_script(portal_url: str, item_id: str, layer_id: int,
+                               runs_layer_id: int = DEFAULT_LAYER_IDS[TABLE_COLLECTOR_RUNS],
+                               ignore_after_days: float = DEFAULT_HEARTBEAT_IGNORE_DAYS) -> str:
+    """Arcade data source returning one feature: the lowest lowest_success_rate_7d stamp among the
+    computers that are not silent (see heartbeat_source_script). A silent computer's stamp is a
+    week old or more, so it describes no run in the 7-day window; the heartbeat reports it."""
+    return (
+        f'var fs = FeatureSetByPortalItem(Portal({_s(portal_url)}), {_s(item_id)}, {layer_id},'
+        f' ["host_name", {_s(SUCCESS_SOURCE_FIELD)}], false);\n'
+        + _live_computers_script(portal_url, item_id, runs_layer_id, ignore_after_days)
+        + 'var low = null;\n'
+        f'for (var f in Filter(fs, "{SUCCESS_SOURCE_FIELD} IS NOT NULL")) {{\n'
+        f'  var v = Number(f[{_s(SUCCESS_SOURCE_FIELD)}]);\n'
+        '  if (HasKey(live, Lower(Text(f["host_name"]))) && (IsEmpty(low) || v < low)) { low = v; }\n'
+        '}\n'
+        + _single_feature_script(
+            f'{{name: {_s(SUCCESS_SOURCE_FIELD)}, alias: "Lowest task success (7d)", type: "esriFieldTypeDouble"}}',
+            f'{SUCCESS_SOURCE_FIELD}: low')
     )
 
 
@@ -1179,7 +1251,8 @@ METRIC_CHANGE_FLAGS = ("Not in last run", "Far below usual", "Far over usual")
 # so it holds whatever profiles load_config applied.
 METRIC_CHANGE_LOWER_IS_BETTER = taskdash_metrics.METRIC_CHANGE_LOWER_IS_BETTER
 METRIC_CHANGE_FIELDS = (
-    ("task_name", "esriFieldTypeString", "Task"), ("display_name", "esriFieldTypeString", "Metric"),
+    ("task_name", "esriFieldTypeString", "Task"), ("task_full_name", "esriFieldTypeString", "Task and folder"),
+    ("display_name", "esriFieldTypeString", "Metric"),
     ("metric_key", "esriFieldTypeString", "Metric key"), ("latest_value", "esriFieldTypeDouble", "Latest"),
     ("usual_value", "esriFieldTypeDouble", "Usual"), ("change_pct", "esriFieldTypeDouble", "Change (%)"),
     ("last_seen", "esriFieldTypeDate", "Last seen"), ("flag", "esriFieldTypeString", "Flag"),
@@ -1210,21 +1283,47 @@ def metric_change_source_script(portal_url: str, item_id: str, layer_id: int) ->
         ' "host_name ASC, task_full_name ASC, metric_key ASC, observed_at_utc DESC");\n'
         # One pass: the first row of each series is its latest; the next rows are its history.
         # A finished series is pushed as a new dictionary, so no dictionary is changed in place.
-        'var series = []; var sk = ""; var head = null; var prev = [];\n'
+        'var series = []; var sk = ""; var head = null; var prev = []; var prevAt = []; var allAt = [];\n'
         'for (var f in rows) {\n'
         '  var k = f["host_name"] + "|" + f["task_full_name"] + "|" + f["metric_key"];\n'
         '  if (k != sk) {\n'
-        '    if (!IsEmpty(head)) { Push(series, {head: head, prev: prev}); }\n'
-        '    sk = k; prev = [];\n'
+        '    if (!IsEmpty(head)) { Push(series, {head: head, prev: prev, at: prevAt, times: allAt}); }\n'
+        '    sk = k; prev = []; prevAt = []; allAt = [Number(f["observed_at_utc"])];\n'
         '    head = {host_name: f["host_name"], task_full_name: f["task_full_name"], task_name: f["task_name"],'
         ' display_name: f["display_name"], metric_key: f["metric_key"], metric_value: f["metric_value"],'
         ' seen: Number(f["observed_at_utc"]), series_key: k};\n'
-        f'  }} else if (Count(prev) < {METRIC_CHANGE_HISTORY}) {{\n'
-        '    Push(prev, f["metric_value"]);\n'
+        '  } else {\n'
+        '    Push(allAt, Number(f["observed_at_utc"]));\n'
+        f'    if (Count(prev) < {METRIC_CHANGE_HISTORY}) {{ Push(prev, f["metric_value"]);'
+        ' Push(prevAt, Number(f["observed_at_utc"])); }\n'
         '  }\n'
         '}\n'
-        'if (!IsEmpty(head)) { Push(series, {head: head, prev: prev}); }\n'
-    ) + _metric_change_rules_script('Count(series[j]["prev"])', 'Count(p)',
+        'if (!IsEmpty(head)) { Push(series, {head: head, prev: prev, at: prevAt, times: allAt}); }\n'
+        # The shared window, as taskdash_metrics.compute_metric_change defines it: it ends at the series'
+        # own newest value and starts at the newest start among the task's series that hold a full
+        # history before then. A series is counted by the earlier values inside that window, so a metric
+        # logged only on busy runs does not look as often logged as one logged on every run (TD-037),
+        # and a metric that stopped keeps its count. inWin is a separate dictionary: no series is changed in place.
+        'var inWin = {};\n'
+        'for (var x in series) {\n'
+        '  var xh = series[x]["head"]; var xt = xh["host_name"] + "|" + xh["task_full_name"];\n'
+        '  var xa = series[x]["at"]; var xs = xh["seen"]; var ws = null;\n'
+        '  for (var r in series) {\n'
+        '    var rh = series[r]["head"]; var ra = series[r]["times"]; var older = 0; var cutoff = null;\n'
+        '    for (var q in ra) {\n'
+        f'      if (ra[q] < xs && older < {METRIC_CHANGE_HISTORY}) {{ older = older + 1; cutoff = ra[q]; }}\n'
+        '    }\n'
+        f'    if (older == {METRIC_CHANGE_HISTORY} && rh["host_name"] + "|" + rh["task_full_name"] == xt'
+        ' && (IsEmpty(ws) || ws < cutoff)) { ws = cutoff; }\n'
+        '  }\n'
+        '  var cnt = 0;\n'
+        '  for (var y in xa) {\n'
+        '    if (IsEmpty(ws) || xa[y] >= ws) { cnt = cnt + 1; }\n'
+        '  }\n'
+        '  inWin[xh["series_key"]] = cnt;\n'
+        '}\n'
+    ) + _metric_change_rules_script('inWin[series[j]["head"]["series_key"]]',
+                                    'inWin[series[i]["head"]["series_key"]]',
                                     'var p = series[i]["prev"]; ', median)
 
 
@@ -1284,6 +1383,8 @@ def _metric_change_rules_script(history_j: str, history_i: str, prep: str, stats
         '  var gapHours = (newest[tki] - seen) / 3600000;\n'
         # Missing only counts for a series logged in most runs: a line printed only when there is
         # work (a sync that found no edits, a failure count) is absent on a quiet night by design.
+        # history_i counts the series' earlier values inside the task's shared window, so a series
+        # logged on every second run has half the count of the task's most-logged series.
         f'  if (gapHours > {METRIC_CHANGE_MISSING_HOURS} && {history_i} + 1 >= {METRIC_CHANGE_USUALLY_LOGGED} * most[tki]) {{'
         f' flag = {not_in_run}; }}\n'
         # A drop counts only below every earlier value: a count that is often this low (AP updates
@@ -1298,7 +1399,8 @@ def _metric_change_rules_script(history_j: str, history_i: str, prep: str, stats
         # 0 flagged, 1 has a usual value, 2 does not: a monthly task can never reach
         # METRIC_CHANGE_MIN_HISTORY earlier values, so its "--" rows sorted first under the old
         # two-tier rank and filled the top of the table (metrics_tab-06).
-        '  Push(feats, {attributes: {task_name: h["task_name"], display_name: h["display_name"],'
+        '  Push(feats, {attributes: {task_name: h["task_name"], task_full_name: h["task_full_name"],'
+        ' display_name: h["display_name"],'
         ' metric_key: h["metric_key"], latest_value: latest, usual_value: usual, change_pct: change,'
         ' last_seen: seen, flag: flag,'
         ' flag_rank: IIf(flag != "", 0, IIf(IsEmpty(usual), 2, 1)), host_name: h["host_name"],'
@@ -1331,12 +1433,15 @@ def metric_change_expression() -> str:
         '  chShown = IIf(chRound == 0, "0%", IIf(chRound > 0, "+", "") + Text(chRound, "#,##0") + "%");\n'
         '}\n'
         'return {cells: {\n'
-        '  task_name: {displayText: DefaultValue($datapoint["task_name"], ""), textAlign: "left"},\n'
+        # The folder path tells apart two tasks of one name on one computer.
+        '  task_name: {displayText: DefaultValue($datapoint["task_full_name"], DefaultValue($datapoint["task_name"], "")),'
+        ' textAlign: "left"},\n'
         '  display_name: {displayText: DefaultValue($datapoint["display_name"], ""), textAlign: "left"},\n'
         '  latest_value: {displayText: fmtMetric(key, lat), textAlign: "right"},\n'
         '  usual_value: {displayText: fmtMetric(key, usu), textAlign: "right"},\n'
         '  change_pct: {displayText: chShown, textAlign: "right"},\n'
         '  last_seen: {displayText: fmtDateShort($datapoint["last_seen"]), textAlign: "left"},\n'
+        '  host_name: {displayText: DefaultValue($datapoint["host_name"], ""), textAlign: "left"},\n'
         f'  flag: {{displayText: IIf(flag == "", "", {_s(sym_prefix("Warning"))} + flag),'
         f' textColor: {_s(fg("Warning"))}, backgroundColor: IIf(flag == "", "", {_s(bg("Warning"))}), textAlign: "left"}}\n'
         '}};\n'
@@ -1408,21 +1513,32 @@ _HEARTBEAT_STATES = heartbeat_states_text(HEARTBEAT_LATE_MINUTES, HEARTBEAT_DOWN
 # Shared by both heartbeat tiles (Overview and Collector & Changes tabs) so their "What to do"
 # cannot drift apart again (indicators-heartbeat-two-todo-texts): both read the same data.
 _HEARTBEAT_TODO = ("If the tile shows Late or Down, find the newest Collector runs row of each "
-                   "host (Collector & Changes tab). Read its Error column. "
-                   "If a host has no new row, examine the Task Dash task and its log on that host.")
+                   "computer (Collector & Changes tab). Read its Error column. "
+                   "If a computer has no new row, examine the Task Dash task and its log on that computer. "
+                   f"If a computer is gone for good, retire it with {command_text('collect', '--retire-host')}.")
+# Both heartbeat tiles show this, so the two "Shows" texts agree.
+_HEARTBEAT_COMPUTERS = ("With more than one computer, the tile shows the computer that saved data longest ago, "
+                        "and names it. A silent computer still counts until you retire it, "
+                        "and the tile says how many are silent.")
 # Both heartbeat tiles AND Metric change refresh live (indicators-heartbeat-only-tile-claim-false /
 # collector_tab-heartbeat-help-drops-reload): shared so the two "Why it matters" texts cannot say
 # different things about which widgets update on their own.
+# The Collector Runs help sentence that alerting settings change. Alerting off replaces all of it;
+# realert_hours replaces the 24; an unset realert_hours (no repeats) drops the repeat clause.
+EMAIL_SENT_TEXT = ("E-mail sent is Yes when the run sent an e-mail. That happens when a problem started, "
+                   "changed or cleared, or when a problem is still open after 24 hours. It is also Yes "
+                   "for the 7 AM daily check, sent every day.")
+NO_ALERTING_TEXT = "Alerting is off, so TaskDash sends no e-mail and this column is always No."
 _HEARTBEAT_LIVE = ("Only the heartbeat tiles and Metric change update while the page is open. "
                    "Reload the page to update the rest.")
 # name -> (Shows, Why it matters, What to do or None). Plain English (ASD-STE100): 20 words or
 # fewer per sentence, one term per concept. Help names widgets by their shown titles and the
 # selectors by "the Filters panel" -- the layout has no "above" and no tile numbers (X10).
 HELP: Dict[str, Tuple[str, str, Optional[str]]] = {
-    "Host": ("The hosts (servers) that run the scheduled tasks.",
-             "One host can stop while the other hosts work. This filter shows the tasks of one host.",
-             'Pick a host to filter the tables, lists and charts. The tiles always show all hosts.'),
-    "Task": ("The names of the tasks on the picked host.",
+    "Host": ("The computers that run the scheduled tasks.",
+             "One computer can stop while the other computers work. This filter shows the tasks of one computer.",
+             'Pick a computer to filter the tables, lists and charts. The tiles always show all computers.'),
+    "Task": ("The names of the tasks on the picked computer.",
              "Most questions are about one task. This filter shows only the history and metrics of that task.",
              # Health and Schedule now narrow this list too (interactions-r3regress-status-schedule-no-task-cascade),
              # and Collector runs has no task field, so it is named as the one exception.
@@ -1450,7 +1566,7 @@ HELP: Dict[str, Tuple[str, str, Optional[str]]] = {
                "Then select a row in Metric change to see its trend."),
     "Collector Heartbeat": (
         f"The time since the collector (the Task Dash task) last saved data. {_HEARTBEAT_STATES} "
-        "With more than one host, this is the host that saved data longest ago.",
+        + _HEARTBEAT_COMPUTERS,
         # Metric change also refreshes on its own (indicators-heartbeat-only-tile-claim-false):
         # the old text said "Only this tile updates", though Metric change reads a live Arcade
         # source too. Both heartbeat tiles keep the reload sentence (collector_tab-heartbeat-help-drops-reload).
@@ -1486,7 +1602,7 @@ HELP: Dict[str, Tuple[str, str, Optional[str]]] = {
         # the one wrong word, not a rewrite into fewer, longer sentences.
         "The number of tasks with a different problem, for example a stuck or blocked run. "
         "It also counts tasks that Task Scheduler reports as missed, for example while the "
-        "server was off. It also counts tasks with no next run time, or a Windows warning. "
+        "computer was off. It also counts tasks with no next run time, or a Windows warning. "
         "An example warning is a run stopped by a user or a task with no valid trigger.",
         "These tasks need a check, but no run failed.",
         "Read the Why column of the Task health table. It gives the problem."),
@@ -1496,7 +1612,8 @@ HELP: Dict[str, Tuple[str, str, Optional[str]]] = {
                            # already the Failed (last run) tile's job (indicators-lowest-rate-flags-single-failure).
                            "Only tasks with 2 or more failures in 7 days count. "
                            f"OK is {SUCCESS_OK_PCT}% or more. Low is {SUCCESS_LOW_PCT}% to {SUCCESS_OK_PCT}%. "
-                           f"Poor is less than {SUCCESS_LOW_PCT}%.",
+                           f"Poor is less than {SUCCESS_LOW_PCT}%. "
+                           "The tile leaves out a silent computer, which the Collector heartbeat reports.",
                            "One failure does not count here, but the Most failures in 7 days chart still shows it. "
                            "With no such task the tile shows 100%.",
                            # Names the chart AND the table column, so the task that sets the rate
@@ -1508,7 +1625,7 @@ HELP: Dict[str, Tuple[str, str, Optional[str]]] = {
     # monitoring (wording-r3regress-taskdash-two-spellings): this tile is about that task's count.
     "Tasks Tracked": ("The number of scheduled tasks that the collector (the Task Dash task) monitors.",
                       "A sudden decrease shows that a task was deleted or excluded from monitoring. "
-                      "If a host stops sending data, its tasks stay in this count. "
+                      "If a computer stops sending data, its tasks stay in this count. "
                       "The Collector heartbeat shows that problem.",
                       "If the number decreases and you did not remove a task, find the Task "
                       "removed rows in Recent changes. It is on the Collector & Changes tab."),
@@ -1521,7 +1638,10 @@ HELP: Dict[str, Tuple[str, str, Optional[str]]] = {
                     "A setting note is a risk, not a failure. "
                     'A "log error" count shows the error lines in the newest log. '
                     "For a log file kept across runs, it counts the error lines of the last 7 days. "
-                    "It does not change the status or the tiles.",
+                    "It does not change the status or the tiles. "
+                    "The status comes from Task Scheduler. The failure counts come from the run history, "
+                    "which starts when TaskDash first reads the event log. "
+                    "On the first day a failed task can show 0 failures.",
                     "This is the full work list. Tasks with a problem are at the top.",
                     "Select a row to show that task in Task detail, Failed runs and Duration trend."),
     "Task Detail": ("All data for the selected task: schedule, last and next run, log, and script path.",
@@ -1531,7 +1651,9 @@ HELP: Dict[str, Tuple[str, str, Optional[str]]] = {
     # The count is in the subtitle: the desktop list holds 25, the phone list 10. The Why text is
     # shared with the phone view, which has no Task health table, so it names no widget
     # (interactions-mobile-text-points-at-desktop-controls).
-    "Recent Failures": ("The newest failed runs of all tasks in the saved history (up to 90 days).",
+    "Recent Failures": ("The newest failed runs of all tasks in the saved history (up to 90 days). "
+                        "The history starts when TaskDash first reads the event log. "
+                        "On the first day this list can be empty, even for a task that Windows reports as failed.",
                         "This list shows if a task fails once or every night.",
                         "Pick a task in the Filters panel to show only its failures. "
                         "The Schedule and Status filters do not change this list. "
@@ -1565,7 +1687,7 @@ HELP: Dict[str, Tuple[str, str, Optional[str]]] = {
                       f'of {METRIC_CHANGE_MIN_USUAL} or more. The count must also be higher than each '
                       f'of the last {METRIC_CHANGE_HISTORY} earlier values. '
                       f'"{METRIC_CHANGE_FLAGS[0]}": a metric that the task logs in at least '
-                      f'{int(METRIC_CHANGE_USUALLY_LOGGED * 100)}% of its runs. '
+                      f'{int(METRIC_CHANGE_USUALLY_LOGGED * 100)}% of the task\'s recent runs. '
                       "It is missing from its newest log. Flagged rows are at the top. Select a row to see its trend."),
     "Metric Summary": ("For each task and metric: the lowest, average and highest value, and the number of times logged.",
                        "A lowest value of 0 for a record count can show a run that loaded nothing. "
@@ -1596,26 +1718,26 @@ HELP: Dict[str, Tuple[str, str, Optional[str]]] = {
                             "It gives the exact value and the log that it came from.",
                             None),
     "Heartbeat": (f"The time since the collector (the Task Dash task) last saved data. {_HEARTBEAT_STATES} "
-                  "With more than one host, this is the host that saved data longest ago.",
+                  + _HEARTBEAT_COMPUTERS,
                   f"If this time is long, all other data on this dashboard is old. {_HEARTBEAT_LIVE}",
                   _HEARTBEAT_TODO),
     "Collector Runs": (
-        "The 48 newest runs of the Task Dash task: the result, the duration and the rows sent. "
-        "Task rows sent and Metric rows sent count every row sent, new or unchanged. "
+        "The 48 newest runs of the Task Dash task on all computers: the result, the duration and the rows sent. "
+        "To read one computer, pick it in the Host filter. "
+        "Task rows sent counts every row sent, new or unchanged. "
+        "Metric rows sent counts the rows from log files that changed since the last run. "
         # Neither column was defined before, though they sit next to the two that were
         # (collector_tab-columns-not-defined).
         "Events read counts every Task Scheduler event read since the last run, also for unlisted tasks. "
         "Runs saved counts task runs added or updated. "
         # Named for what it means, not what it was called: "Alert sent" read as a problem
         # (collector_tab-alert-sent-undefined / wording-alert-sent-means-daily-email).
-        "Email sent is Yes when the run sent an email. That happens when a problem started, "
-        "changed or cleared, or when a problem is still open after 24 hours. It is also Yes "
-        "for the 7 AM daily check, sent every day.",
-        "A run can send an email but not save the data. This table shows that, also when the heartbeat is OK.",
+        f"{EMAIL_SENT_TEXT}",
+        "A run can send an e-mail but not save the data. This table shows that, also when the heartbeat is OK.",
         # "<time>" parsed as an HTML tag and vanished (wording-collector-help-log-name-eaten);
         # help_html() now escapes every HELP string, and the text itself names no angle brackets.
         "For a Failed row, read the Error column. It shows the first 300 characters. "
-        "The full error is in the Task Dash log on that host, at the Started time. "
+        "The full error is in the Task Dash log on that computer, at the Started time. "
         "The file name is taskdash_YYYYMMDD_HHMMSS.log, in its log folder. "
         # A run that cannot reach ArcGIS Online saves its row on the host, and the next run that
         # can writes it (taskdash_publish._write_collector_run_row). Only a killed run leaves no row
@@ -1630,30 +1752,37 @@ HELP: Dict[str, Tuple[str, str, Optional[str]]] = {
     # (operations-acknowledged-note-reads-as-fixed / wording-ack-reads-as-setting-fixed).
     "Recent Changes": ("The 50 newest changes to the tasks: added, removed, started failing, recovered, and more. "
                        "The time shown is when the collector found the change, up to 1 hour after it happened. "
+                       "After an outage it can be later, and a change that began and ended in the outage has no row. "
                        "A \"Setting note removed\" row with settings unchanged means the problem went "
                        "away (for example a missing file was restored). It can also mean the note was "
-                       "acknowledged, or TaskDash no longer raises it. It does not mean the setting was fixed.",
+                       "acknowledged, or TaskDash no longer raises it. It does not mean the setting was fixed. "
+                       "The tasks that exist when TaskDash is installed are the baseline. "
+                       "They are not listed as added, and the list stays empty until a task changes.",
                        "A changed task is a common cause of new failures. This list also keeps the recoveries.",
                        # Wording pinned by test_dashboard_phase4.test_help_never_points_at_a_control_the_view_lacks
                        # and test_round2_review.test_recent_changes_help_points_at_the_filters_panel.
                        "Pick a task in the Filters panel, or type its name in the search box of this list. "
                        "A removed task can be found only with the search box."),
-    "Config Notes": ("Each task with a setting note: a task setting that can cause a problem, for example a skipped run.",
+    "Setting Notes": ("Each task with a setting note: a task setting that can cause a problem, for example a skipped run.",
                      "A setting note is a risk in the task setup, not a failure. "
                      "A setting that is off on purpose is not listed.",
                      # "the setting name" matched more than one note (collector_tab-ack-setting-
                      # name-hides-other-notes): MultipleInstancesPolicy is in three of them, so
                      # acknowledging it by that name hid all three, not just one.
                      "Read each note. If the setting is wrong, change it in Windows Task Scheduler. "
-                     "If it is on purpose, add a word that appears only in that note, for example "
-                     "StartWhenAvailable or ExecutionTimeLimit. "
-                     "Then ask the dashboard owner to mark that note as accepted for that task."),
+                     "If it is on purpose, ask the dashboard owner to accept it. The owner adds a word "
+                     "that appears only in that note, for example StartWhenAvailable. "
+                     "The word goes under acknowledge_config_warnings in the task descriptions file."),
     "Attention Tasks": ("The tasks that need attention now, or are disabled.",
                         "It names each task that the tiles count.",
                         None),
     # Does not repeat the panel text: that gives the facts, this says why the version is there.
     "About TaskDash": ("The version of TaskDash that built this dashboard.",
                        "A problem report is easier to match to a release when it names the version.",
+                       None),
+    "About Overview": ("A short note on what this dashboard is and what the tiles count.",
+                       "A reader who opens only the Overview tab still learns what the tiles mean. "
+                       "The full text is in About TaskDash on the Collector & Changes tab.",
                        None),
 }
 
@@ -1686,7 +1815,7 @@ EMPTY_STATES = {
     # though the old text's "or filters" implied they did (interactions-schedule-status-skip-failed-runs).
     # The empty state replaces the list's subtitle and search box, so the scope line moves here
     # (audit 28: Dashboards drops them when there is no data).
-    "Recent Failures": ("No failed runs for the selected host or task in the saved history (up to 90 days). "
+    "Recent Failures": ("No failed runs for the selected computer or task in the saved history (up to 90 days). "
                         "Schedule and Status do not filter this list."),
     # A filter can hide the selected task; Task Detail then has no row (audit 31).
     "Task Detail": "No detail to show. The filters may hide the selected task. Clear a filter or select another row.",
@@ -1703,8 +1832,9 @@ EMPTY_STATES = {
     "Latest Metric Observations": "No metric values to show.",
     "Metric Observations": "This task has no logged metric values.",
     "Collector Runs": "No collector runs to show.",
-    "Recent Changes": "No task changes to show.",
-    "Config Notes": "No setting notes to show.",
+    "Recent Changes": ("No task changes to show. The tasks that exist when TaskDash is installed are the "
+                       "baseline, so only later changes appear here."),
+    "Setting Notes": "No setting notes to show.",
     # Matches the widened title/filter below: the tile above counts only needs_attention, so a
     # lone disabled task used to leave an unexplained row under an empty-looking tile
     # (interactions-mobile-attention-title-vs-disabled).
@@ -1733,11 +1863,11 @@ MOBILE_WHY = {
 # The help text above is written for the reference install's setup. These are its site-specific literals; a
 # config that names other values has them swapped in at build time, so the default text is
 # unchanged (test_phase0_dashboard proves it byte for byte).
-DEFAULT_RETENTION_DAYS = 90  # retention.runs_days default, as in taskdash_publish
+DEFAULT_RETENTION_DAYS = config_default("retention.runs_days")
 NO_DAILY_EMAIL_TEXT = "There is no daily e-mail."
 # install_task.ps1's -TaskName default, so a new install needs no config key to find its own task.
-DEFAULT_COLLECTOR_TASK_NAME = "TaskDash Collector"
-DEFAULT_GRACE_MINUTES = 15  # taskdash_collect.DEFAULT_OVERDUE_GRACE_MINUTES (not imported, see Overdue help)
+DEFAULT_COLLECTOR_TASK_NAME = config_default("scheduler.collector_task_name")
+DEFAULT_GRACE_MINUTES = int(config_default("scheduler.overdue_grace_minutes"))  # whole minutes, as the Overdue help prints them
 
 
 def help_terms(config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -1745,27 +1875,36 @@ def help_terms(config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
 
     scheduler.collector_interval_minutes (default 60) sets Late at 1.5 and Down at 3 intervals;
     alerting.heartbeat_hour is the daily e-mail hour (unset = no daily e-mail, daily is None);
+    alerting.enabled, alerting.to and alerting.realert_hours set the E-mail sent help;
     scheduler.overdue_grace_minutes the grace; retention.runs_days the saved-history days;
     scheduler.collector_task_name the Windows task that runs the collector.
     """
     config = config or {}
     scheduler, alerting = config.get("scheduler") or {}, config.get("alerting") or {}
     interval = scheduler.get("collector_interval_minutes", DEFAULT_COLLECTOR_INTERVAL_MINUTES)
-    if not isinstance(interval, (int, float)) or isinstance(interval, bool) or interval <= 0:
-        raise SystemExit(f"scheduler.collector_interval_minutes must be a number above 0, got {interval!r}. "
-                         "Set it to the minutes between collector runs, or remove the key for 60.")
+    problem = config_range_problem("scheduler.collector_interval_minutes", interval)
+    if problem:
+        raise SystemExit(f"{problem}. Set it to the minutes between collector runs, or remove the key for 60.\n"
+                         + see_troubleshooting("The collector interval is not above 0"))
     late, down = heartbeat_thresholds(interval)
     ignore_days = scheduler.get("heartbeat_ignore_after_days", DEFAULT_HEARTBEAT_IGNORE_DAYS)
-    if (not isinstance(ignore_days, (int, float)) or isinstance(ignore_days, bool)
-            or not 0 < ignore_days < float("inf")):
-        raise SystemExit(f"scheduler.heartbeat_ignore_after_days must be a number above 0, got {ignore_days!r}. "
-                         "Set it to the days of silence after which the heartbeat leaves a computer out, "
-                         "or remove the key for 7.")
+    problem = config_range_problem("scheduler.heartbeat_ignore_after_days", ignore_days)
+    if problem:
+        raise SystemExit(f"{problem}. Set it to the days of silence after which the dashboard calls a "
+                         "computer silent, or remove the key for 7.\n"
+                         + see_troubleshooting("The heartbeat ignore time is not above 0"))
     hour = alerting.get("heartbeat_hour")
+    recipients = alerting.get("to") or []
+    recipients = [recipients] if isinstance(recipients, str) else recipients
+    # Mirrors maybe_send_alert: nothing is sent unless alerting is enabled and has an address.
+    sends_email = bool(alerting.get("enabled")) and any(str(r).strip() for r in recipients)
+    realert = alerting.get("realert_hours", config_default("alerting.realert_hours"))
+    realert = float(realert) if isinstance(realert, (int, float)) and not isinstance(realert, bool) else None
     daily = None if hour is None else f"{int(hour) % 12 or 12} {'AM' if int(hour) % 24 < 12 else 'PM'}"
     days = (config.get("retention") or {}).get("runs_days", DEFAULT_RETENTION_DAYS)
     metric_days = (config.get("retention") or {}).get("metrics_days", DEFAULT_RETENTION_DAYS)
     return {"late": late, "down": down, "ignore_days": ignore_days, "daily": daily,
+            "sends_email": sends_email, "realert": realert,
             "days": int(days), "metric_days": int(metric_days),
             "grace": scheduler.get("overdue_grace_minutes", DEFAULT_GRACE_MINUTES),
             "collector": scheduler.get("collector_task_name") or DEFAULT_COLLECTOR_TASK_NAME}
@@ -1785,9 +1924,16 @@ def localize_help(text: str, terms: Optional[Dict[str, Any]]) -> str:
         return text
     collector = terms["collector"]
     interval = terms["late"] / 1.5
-    delay = "1 hour" if interval == 60 else f"{interval:g} min"
+    delay = "1 hour" if interval == 60 else f"{interval / 1440:g} days" if interval >= 1440 else f"{interval:g} min"
     daily = terms["daily"]
     text = localize_retention(text, terms)
+    if not terms["sends_email"]:
+        text = text.replace(EMAIL_SENT_TEXT, NO_ALERTING_TEXT)
+    elif terms["realert"] is None:
+        text = text.replace(", or when a problem is still open after 24 hours", "")
+    elif terms["realert"] != 24:
+        hours = terms["realert"]
+        text = text.replace("after 24 hours", f"after {hours:g} {'hour' if hours == 1 else 'hours'}")
     if daily is None:
         text = text.replace("It is also Yes for the 7 AM daily check, sent every day.", NO_DAILY_EMAIL_TEXT)
     return (text.replace(_HEARTBEAT_STATES, heartbeat_states_text(terms["late"], terms["down"]))
@@ -1900,29 +2046,44 @@ def heartbeat_widget(item_id: str, layer_id: int, portal_url: str,
                        stat_type="min", expression=heartbeat_expression("MIN_collected_at_utc", late, down))
     if not FEATURE_FLAGS["heartbeat_arcade_refresh"]:
         return widget
-    source_id = add_arcade_source(arcade_items, "TaskDash heartbeat (oldest host data)",
+    source_id = add_arcade_source(arcade_items, "TaskDash heartbeat (oldest computer data)",
                                   heartbeat_source_script(portal_url, item_id, layer_id,
                                                           runs_layer_id, ignore_after_days),
                                   HEARTBEAT_REFRESH_MINUTES)
     # The S-TRAF (5.1.0) shape for an indicator on an Arcade data source: valueType "feature",
     # one feature, no statistics, and valueField naming the feature's field (S-TRAF sets it on
     # every feature-mode indicator).
-    widget["datasets"] = [arcade_dataset(source_id, [HEARTBEAT_SOURCE_FIELD], max_features=1)]
+    widget["datasets"] = [arcade_dataset(
+        source_id, [HEARTBEAT_SOURCE_FIELD, HEARTBEAT_HOST_FIELD, HEARTBEAT_SILENT_FIELD], max_features=1)]
     widget["valueType"] = "feature"
     widget["valueField"] = HEARTBEAT_SOURCE_FIELD
-    widget["expression"] = heartbeat_expression(HEARTBEAT_SOURCE_FIELD, late, down)
+    widget["expression"] = heartbeat_expression(HEARTBEAT_SOURCE_FIELD, late, down, detail=True)
     return widget
 
 
-def success_rate_widget(item_id: str, layer_id: int) -> Dict[str, Any]:
+def success_rate_widget(item_id: str, layer_id: int, portal_url: str,
+                        arcade_items: List[Dict[str, Any]],
+                        runs_layer_id: int = DEFAULT_LAYER_IDS[TABLE_COLLECTOR_RUNS],
+                        ignore_after_days: float = DEFAULT_HEARTBEAT_IGNORE_DAYS) -> Dict[str, Any]:
     # Every host stamps the fleet-wide lowest-per-task value (taskdash_publish.stamp_success_rate).
-    # MIN, not MAX: a host that stopped collecting keeps an old stamp, and the tile must err toward
-    # the alarm, not toward the healthiest stamp. A widget-side
-    # per-task ratio is not possible: an indicator surfaces one statistic to $datapoint, and
-    # $reference was never render-proven.
-    return indicator(item_id, "7-Day Success Rate", layer_id, stat_field="lowest_success_rate_7d",
-                     stat_type="min",
-                     expression=success_rate_expression('var pct = $datapoint["MIN_lowest_success_rate_7d"];\n'))
+    # MIN, not MAX: the tile must err toward the alarm, not toward the healthiest stamp. A silent
+    # computer keeps its last stamp for ever, so the Arcade source leaves it out (the heartbeat
+    # reports it). A widget-side per-task ratio is not possible: an indicator surfaces one statistic
+    # to $datapoint, and $reference was never render-proven.
+    widget = indicator(item_id, "7-Day Success Rate", layer_id, stat_field="lowest_success_rate_7d",
+                       stat_type="min",
+                       expression=success_rate_expression('var pct = $datapoint["MIN_lowest_success_rate_7d"];\n'))
+    if not FEATURE_FLAGS["heartbeat_arcade_refresh"]:
+        return widget
+    source_id = add_arcade_source(arcade_items, "TaskDash lowest success rate (active computers)",
+                                  success_rate_source_script(portal_url, item_id, layer_id,
+                                                             runs_layer_id, ignore_after_days),
+                                  HEARTBEAT_REFRESH_MINUTES)
+    widget["datasets"] = [arcade_dataset(source_id, [SUCCESS_SOURCE_FIELD], max_features=1)]
+    widget["valueType"] = "feature"
+    widget["valueField"] = SUCCESS_SOURCE_FIELD
+    widget["expression"] = success_rate_expression(f'var pct = $datapoint[{_s(SUCCESS_SOURCE_FIELD)}];\n')
+    return widget
 
 
 # Shown titles in sentence case, like every other title; the names stay the stable keys.
@@ -1968,7 +2129,7 @@ def indicator_tiles(item_id: str, layers: Dict[str, int], portal_url: str,
         count_tile("Failed (last run)", [rule("attention_kind", "FAILED")], "Error", PALETTE["Error"][0]),
         count_tile("Overdue", [rule("attention_kind", "OVERDUE")], "Warning", "Overdue"),
         count_tile("Other Warnings", [rule("needs_attention", 1), unset_or_other], "Warning", "Warning"),
-        success_rate_widget(item_id, inv),
+        success_rate_widget(item_id, inv, portal_url, arcade_items, layers[TABLE_COLLECTOR_RUNS], ignore_after_days),
         indicator(item_id, "Tasks Tracked", inv, expression=tasks_tracked_expression),
         count_tile("Disabled", [rule("enabled", 0)], "Disabled", PALETTE["Disabled"][0]),
     )}
@@ -2023,7 +2184,7 @@ def overview_widgets(item_id: str, layers: Dict[str, int], templates: Dict[str, 
         top_caption='<p><strong>Task health</strong><br>'
                     '<span style="font-size:12px;">Tasks with a problem are at the top. '
                     'Select a row to see its detail below. '
-                    "Run times show in your device's time zone. Schedules use the server's clock.</span></p>")]
+                    "Run times show in your device's time zone. Schedules use the computer's clock.</span></p>")]
     task_detail = list_widget(
         item_id, "Task Detail", inv, templates["list"], order_by=["task_name ASC"],
         expression=detail_list_expression(hidden), title="Task detail",
@@ -2031,7 +2192,8 @@ def overview_widgets(item_id: str, layers: Dict[str, int], templates: Dict[str, 
              '<strong>{expression/statusText}</strong> <span style="color:#595959">{host_name}</span></p>'
              '<p><strong>{expression/whyText}</strong></p>'
              '<p>{expression/descText}</p>'
-             '<p><strong>Schedule:</strong> {expression/scheduleText}<br>'
+             '<p><strong>Folder:</strong> {task_path}<br>'
+             '<strong>Schedule:</strong> {expression/scheduleText}<br>'
              '<strong>Last run:</strong> {expression/lastText}<br>'
              '<strong>Next run:</strong> {expression/nextText}<br>'
              '<strong>Last 7 days:</strong> {expression/weekText}<br>'
@@ -2120,7 +2282,7 @@ def metric_change_table(item_id: str, layer_id: int, templates: Dict[str, Any], 
                                   METRIC_CHANGE_REFRESH_MINUTES)
     widget = table_widget(
         item_id, "Metric Change", layer_id,
-        columns=[column("task_name", "Task"), column("display_name", "Metric"),
+        columns=[column("task_name", "Task"), column("host_name", "Host"), column("display_name", "Metric"),
                  column("latest_value", "Latest", align="right"),
                  column("usual_value", "Usual", align="right"),
                  column("change_pct", "Change", align="right"),
@@ -2141,15 +2303,15 @@ def metric_summary_table(item_id: str, layer_id: int, templates: Dict[str, Any])
     # latest run: Metric Change answers "did the last run drop?" (audit D1).
     return table_widget(
         item_id, "Metric Summary", layer_id,
-        columns=[column("task_name", "Task"), column("display_name", "Metric"),
-                 column("MIN_metric_value", "Lowest", align="right", decimals=0),
-                 column("AVG_metric_value", "Average", align="right", decimals=0),
-                 column("MAX_metric_value", "Highest", align="right", decimals=0),
+        columns=[column("task_full_name", "Task"), column("host_name", "Host"), column("display_name", "Metric"),
+                 column("MIN_metric_value", "Lowest", align="right", decimals=2),
+                 column("AVG_metric_value", "Average", align="right", decimals=2),
+                 column("MAX_metric_value", "Highest", align="right", decimals=2),
                  column("COUNT_metric_value", "Times logged", align="right")],
-        template=templates["table"], group_by=["task_name", "display_name"],
+        template=templates["table"], group_by=["task_full_name", "host_name", "display_name"],
         stats=[stat_def("metric_value", "min"), stat_def("metric_value", "avg"),
                stat_def("metric_value", "max"), stat_def("metric_value", "count")],
-        order_by=["task_name ASC", "display_name ASC"],
+        order_by=["task_full_name ASC", "host_name ASC", "display_name ASC"],
         top_caption='<p><strong>Metric range</strong><br><span style="font-size:12px;">'
                     'The lowest, average and highest value of each metric in the saved history '
                     '(up to 90 days).</span></p>')
@@ -2233,12 +2395,12 @@ def collector_widgets(item_id: str, layers: Dict[str, int], templates: Dict[str,
                  column("runs_written", "Runs saved", align="right"),
                  # "saved" read as "new": every row is re-sent and counted here, changed or not
                  # (collector_tab-02/wording-08). "Runs saved" keeps its old name; TaskRuns rows
-                 # really are new or updated each pass, unlike the two whole-table re-sends below.
+                 # really are new or updated each pass, unlike the whole-table re-send of Task rows below.
                  column("inventory_written", "Task rows sent", align="right"),
                  column("metrics_written", "Metric rows sent", align="right"),
                  # "Alert sent" read as a problem alert; it is also Yes on the healthy 7 AM daily
                  # check e-mail (collector_tab-alert-sent-undefined / wording-alert-sent-means-daily-email).
-                 column("alert_sent", "Email sent"), column("host_name", "Host"),
+                 column("alert_sent", "E-mail sent"), column("host_name", "Host"),
                  column("error_text", "Error")],
         template=templates["table"], order_by=["started_utc DESC"], max_features=48,
         expression=collector_runs_expression(),
@@ -2257,7 +2419,7 @@ def collector_widgets(item_id: str, layers: Dict[str, int], templates: Dict[str,
     changes["title"] = "Recent changes - newest 50"
     notes_where = [rule("config_warnings", None, operator="is_not_empty")] if FEATURE_FLAGS["config_notes_filter"] else None
     notes = list_widget(
-        item_id, "Config Notes", layers[TABLE_INVENTORY], templates["list"],
+        item_id, "Setting Notes", layers[TABLE_INVENTORY], templates["list"],
         order_by=["task_name ASC"], expression=config_notes_expression(), where=notes_where,
         title=badge('ConfigWarning', 'Setting notes'),
         text='<p><strong>{task_name}</strong> <span style="color:#595959">{host_name}</span></p>'
@@ -2268,32 +2430,57 @@ def collector_widgets(item_id: str, layers: Dict[str, int], templates: Dict[str,
 
 ABOUT_NAME = "About TaskDash"
 ABOUT_TEXT_STYLE = "color:#4c4c4c;font-size:12px;"
+# The demo's dashboard shows invented failures, so a screenshot of it must say so on its face.
+DEMO_NOTE = "<strong>DEMO - invented data.</strong> Nothing here comes from a real computer."
 
 
-def about_widget(terms: Dict[str, Any]) -> Dict[str, Any]:
+def about_widget(terms: Dict[str, Any], demo: bool = False) -> Dict[str, Any]:
     """Rich-text panel: the version, what TaskDash does, and how fresh the data is.
 
     Keys are those of the saved 5.1.0 rich-text widgets. The title is a heading in the text:
     no saved rich-text widget has a `title` key. No host, path, address or item id: the
     dashboard may be shown outside the team. The interval comes from the same config key as
-    the heartbeat thresholds (Late is 1.5 intervals).
+    the heartbeat thresholds (Late is 1.5 intervals). demo adds the line that marks invented data.
     """
     interval = f"{round(terms['late'] / 1.5, 2):g}"
     lines = (
         f"<strong>TaskDash {TASKDASH_VERSION}</strong>",
+        *([DEMO_NOTE] if demo else []),
         "TaskDash checks whether each scheduled Windows task ran and did its job.",
         "It reads Task Scheduler events, the task settings, and the log of each script.",
-        f"The collector runs every {interval} min. The Collector heartbeat shows its last run.",
+        ("The demo data was published once. The Collector heartbeat shows that run." if demo else
+         f"The collector runs every {interval} min. The Collector heartbeat shows its last run."),
         # The definition's timeZone is "system": Dashboards shows each time in the viewer's zone.
-        "Run times show in your device's time zone. Schedules use the server's clock.",
+        "Run times show in your device's time zone. Schedules use the computer's clock.",
         "Overview: task health. Workflow Metrics: logged values. "
         "Collector &amp; Changes: collector runs, recent changes and setting notes.",
     )
+    return _about_panel(ABOUT_NAME, lines, heading=ABOUT_NAME)
+
+
+def _about_panel(name: str, lines: Iterable[str], heading: str = "") -> Dict[str, Any]:
     body = "".join(f'<p><span style="{ABOUT_TEXT_STYLE}">{line}</span></p>' for line in lines)
-    return {"id": new_id(), "dashboardItemType": "widget", "name": ABOUT_NAME,
+    title = f'<h4><span style="color:#4c4c4c;"><strong>{heading}</strong></span></h4>' if heading else ""
+    return {"id": new_id(), "dashboardItemType": "widget", "name": name,
             "noDataState": {}, "noFilterState": {}, "focusModeEnabled": False, "datasets": [],
             "type": "richTextWidget", "valueType": "none", "showFeatureMenu": False,
-            "text": f'<h4><span style="color:#4c4c4c;"><strong>{ABOUT_NAME}</strong></span></h4>{body}'}
+            "text": f"{title}{body}"}
+
+
+# A short About on the first tab: a reader who never opens Collector & Changes still sees what the
+# dashboard is, what the tiles count and where the full text is (TD-145). Not on the phone view.
+OVERVIEW_ABOUT_NAME = "About Overview"
+
+
+def overview_about_widget(demo: bool = False) -> Dict[str, Any]:
+    lines = (
+        f"<strong>TaskDash {TASKDASH_VERSION}</strong> checks whether each scheduled Windows task ran and did its job.",
+        *([DEMO_NOTE] if demo else []),
+        "The tiles count all tasks and ignore every filter. Tasks with a problem are at the top of Task health.",
+        "The Collector heartbeat shows how old the data is. "
+        "The Collector &amp; Changes tab has the full About text.",
+    )
+    return _about_panel(OVERVIEW_ABOUT_NAME, lines)
 
 
 # --------------------------------------------------------------------------- selectors + events
@@ -2302,12 +2489,12 @@ SELECTOR_FIELDS = (("Host", TABLE_INVENTORY, "host_name"), ("Task", TABLE_INVENT
                    ("Health", TABLE_INVENTORY, "health_status"),
                    ("Schedule", TABLE_INVENTORY, "schedule_bucket"), ("Metric", TABLE_METRICS, "display_name"))
 INVENTORY_TARGETS = ("Task Health", "Task Detail", "Top Failing Tasks")
-# Health and Schedule read TaskInventory, same as Config Notes, but did not narrow it: with
+# Health and Schedule read TaskInventory, same as Setting notes, but did not narrow it: with
 # Schedule = Every 15 min, Setting notes still listed every task's note (interactions-filter-coverage-gaps).
-HEALTH_SCHEDULE_TARGETS = INVENTORY_TARGETS + ("Config Notes",)
+HEALTH_SCHEDULE_TARGETS = INVENTORY_TARGETS + ("Setting Notes",)
 TASK_TARGETS = INVENTORY_TARGETS + (
     "Metric Change", "Recent Failures", "Duration Trend", "Metric Summary", "Metric Trend", "Latest Metric Observations",
-    "Metric Observations", "Recent Changes", "Config Notes")
+    "Metric Observations", "Recent Changes", "Setting Notes")
 HOST_TARGETS = TASK_TARGETS + ("Collector Runs",)  # CollectorRuns has no task field
 # Needs a Task in scope before it has data -- from a Task Health row click OR the Task selector,
 # not only a row click (critic-06 found the old "empty until a task is picked" comment implied
@@ -2320,7 +2507,7 @@ def selector_labels(name: str) -> Dict[str, Any]:
     Its name stays "Health": the name is the key the wiring and the help text use.
     The label also names the tabs where the pick does something: the sidebar is shared by all
     tabs, and a pick with no visible effect reads as broken. Scopes follow wire_events: Status
-    and Schedule reach HEALTH_SCHEDULE_TARGETS (Overview + Config Notes), Metric only the
+    and Schedule reach HEALTH_SCHEDULE_TARGETS (Overview + Setting notes), Metric only the
     Workflow Metrics tab. Host and Task reach every tab."""
     if name == "Health":
         return {"label": "Status (Overview and Setting notes)",
@@ -2343,7 +2530,7 @@ def selectors(item_id: str, layers: Dict[str, int]) -> Dict[str, Dict[str, Any]]
 
 def target(widget: Dict[str, Any], requires: bool = False, join: Optional[str] = None) -> Dict[str, Any]:
     """One 5.x filter target. A cross-table target MUST carry fieldMap: keyed on OBJECTID it
-    matches nothing in the other table (rendered "No data" in ce0221b)."""
+    matches nothing in the other table (it rendered "No data")."""
     out: Dict[str, Any] = {"targetId": f"{widget['id']}#main", "by": "whereClause", "requiresSelection": requires}
     if join:
         out["fieldMap"] = [{"sourceName": join, "targetName": join}]
@@ -2464,7 +2651,8 @@ def desktop_layout(w: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
                   "col", 0.25, 1)
     overview = stack([
         tiles,
-        stack(items(w, [("Task Health", 0.55), ("Task Detail", 0.45)], vertical=True), "row", 0.5, 1),
+        stack(items(w, [("Task Health", 0.50), ("Task Detail", 0.35), (OVERVIEW_ABOUT_NAME, 0.15)],
+                    vertical=True), "row", 0.5, 1),
         stack(items(w, [("Recent Failures", 0.40), ("Top Failing Tasks", 0.30), ("Duration Trend", 0.30)],
                     vertical=True), "row", 0.25, 1)], "col", 1, 1)
     # Tabs 2 and 3 use the INVERSE orientations of tab 1, and that is not a mistake: built with
@@ -2486,7 +2674,7 @@ def desktop_layout(w: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
         (items(w, [("Heartbeat", 0.15), ("Collector Runs", 0.85)]), 0.45),
         ([item_el(w["Recent Changes"]["id"], 0.6),
           # Setting notes keeps the top; the About panel takes the empty space below its cards.
-          stack(items(w, [("Config Notes", 0.75), (ABOUT_NAME, 0.25)], vertical=True), "row", 0.4, 1)], 0.55)],
+          stack(items(w, [("Setting Notes", 0.75), (ABOUT_NAME, 0.25)], vertical=True), "row", 0.4, 1)], 0.55)],
         "col"), "row", 1, 1)
     return {"type": "dockingLayout", "rootElement": {
         "type": "tabsLayoutElement", "id": new_id(), "width": 1, "height": 1,
@@ -2547,8 +2735,24 @@ def mobile_view(item_id: str, layers: Dict[str, int], templates: Dict[str, Any],
     return {"type": "mobile", "layout": layout, "widgets": widgets}, mapping
 
 
+def _points_to_definition_docs(func):
+    """Add the docs pointer to every refusal of a definition check that has none of its own.
+    About thirty checks refuse with one shared section, so they get it here, not one by one."""
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        try:
+            return func(*args, **kwargs)
+        except SystemExit as exc:
+            if not isinstance(exc.code, str) or "TROUBLESHOOTING.md" in exc.code:
+                raise
+            raise SystemExit(f"{exc.code}\n" + see_troubleshooting("The definition check refuses the dashboard")) from None
+    return wrapper
+
+
+@_points_to_definition_docs
 def build(item_id: str, templates: Dict[str, Any], layer_ids: Optional[Dict[str, int]] = None,
-          *, portal_url: str = DEFAULT_PORTAL_URL, config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+          *, portal_url: str = DEFAULT_PORTAL_URL, config: Optional[Dict[str, Any]] = None,
+          demo: bool = False) -> Dict[str, Any]:
     layers = {**DEFAULT_LAYER_IDS, **(layer_ids or {})}
     terms = help_terms(config)
     arcade_items: List[Dict[str, Any]] = []
@@ -2560,7 +2764,7 @@ def build(item_id: str, templates: Dict[str, Any], layer_ids: Optional[Dict[str,
     widgets = {**tiles, **overview_widgets(item_id, layers, templates, hidden),
                **metrics_widgets(item_id, layers, templates, portal_url, arcade_items, hidden),
                **collector_widgets(item_id, layers, templates, tiles["Collector Heartbeat"]),
-               ABOUT_NAME: about_widget(terms)}
+               ABOUT_NAME: about_widget(terms, demo), OVERVIEW_ABOUT_NAME: overview_about_widget(demo)}
     sels = selectors(item_id, layers)
     wire_events(widgets, sels)
     mobile, mapping = mobile_view(item_id, layers, templates, widgets)
@@ -2719,7 +2923,7 @@ def check_table_columns(definition: Dict[str, Any], id_to_table: Dict[int, str])
             for setting in widget["columnSettings"]:
                 if setting["fieldName"].startswith("AVG_") and COLUMN_FORMAT_KEY not in setting:
                     raise SystemExit(f"'{widget['name']}' column {setting['fieldName']} has no number "
-                                     "format; an unrounded average renders with 10+ decimals (defect 4.10).")
+                                     "format; an unrounded average renders with 10+ decimals.")
     emit("Table columns validated against their layers.")
 
 
@@ -2739,7 +2943,7 @@ def _check_target(src: Dict[str, Any], t: Dict[str, Any], by_id: Dict[str, Dict[
     src_table, dest_table = widget_table(src, id_to_table), widget_table(dest, id_to_table)
     if src_table != dest_table and not t.get("fieldMap"):
         raise SystemExit(f"Refusing to publish: {where} crosses from {src_table} to {dest_table} "
-                         "without a fieldMap; keyed on OBJECTID it matches nothing (ce0221b).")
+                         "without a fieldMap; keyed on OBJECTID it matches nothing.")
     if len(t.get("fieldMap", [])) > 1:
         raise SystemExit(f"Refusing to publish: {where} maps {len(t['fieldMap'])} fields. Dashboards applies "
                          "only the first (probed 2026-09-28); join on one key field instead.")
@@ -2769,7 +2973,7 @@ def check_events(definition: Dict[str, Any], id_to_table: Dict[int, str]) -> Non
             caption = src.get("topCaption", "")
             if "Select" in caption and not src.get("events"):
                 raise SystemExit(f"Refusing to publish: '{src['name']}' tells the reader to select "
-                                 "a row, but selecting does nothing (defect 4.1).")
+                                 "a row, but selecting does nothing.")
     emit("Every event target resolves to a widget and a schema field.")
 
 
@@ -2790,7 +2994,7 @@ def check_required_sources(definition: Dict[str, Any]) -> None:
             if len(sources) > 1 and any(s["type"] != "categorySelectorWidget" for s in sources):
                 raise SystemExit(
                     f"Refusing to publish: '{by_id[widget_id]['name']}' requires a selection from "
-                    f"{sorted(s['name'] for s in sources)}; one row click can never satisfy all of "
+                    f"{', '.join(sorted(s['name'] for s in sources))}; one row click can never satisfy all of "
                     "them. Keep requiresSelection true on the row source only.")
     emit("No widget waits on a row selection plus another required source.")
 
@@ -2834,7 +3038,7 @@ def data_item_id(agol: Dict[str, Any], target: str) -> str:
     view_id = normalize_text(agol.get(publish.view_key(target)))
     if not view_id:
         emit(f"WARNING: arcgis.{publish.view_key(target)} is not set, so the dashboard reads the editable "
-             "service. Create a read-only view with taskdash_publish.py --create-view and set "
+             f"service. Create a read-only view with {command_text('collect', '--create-view', '--apply')} and set "
              f"arcgis.{publish.view_key(target)}.")
     return view_id or normalize_text(agol.get(publish.service_key(target)))
 
@@ -2845,7 +3049,7 @@ def check_data_item(definition: Dict[str, Any], expected_id: str) -> None:
     ids = {d["dataSource"].get("itemId") for w in all_items(definition) for d in layer_datasets(w)}
     stray = sorted(ids - {expected_id})
     if stray:
-        raise SystemExit(f"Refusing to publish: widget data sources name item(s) {stray}, "
+        raise SystemExit(f"Refusing to publish: widget data sources name item(s) {', '.join(stray)}, "
                          f"not the configured {expected_id}.")
     for source in definition.get("arcadeDataSourceItems", []):
         if f'"{expected_id}"' not in source.get("script", ""):
@@ -2867,6 +3071,7 @@ def check_hidden_fields(definition: Dict[str, Any], config: Optional[Dict[str, A
                                  f"view hides. Turn the privacy switch off or remove the widget's read.")
 
 
+@_points_to_definition_docs
 def validate_definition(definition: Dict[str, Any], layer_ids: Optional[Dict[str, int]] = None,
                         config: Optional[Dict[str, Any]] = None,
                         data_item: str = "") -> None:
@@ -2915,7 +3120,8 @@ def load_templates(gis: Any, source_dashboard_id: str) -> Dict[str, Any]:
         if item is None:
             raise SystemExit(
                 f"Widget templates unavailable: {TEMPLATE_FILE} is missing and source dashboard "
-                f"{source_dashboard_id} no longer exists. Reinstall the TaskDash wheel to restore {TEMPLATE_FILE}."
+                f"{source_dashboard_id} no longer exists. Reinstall the TaskDash wheel to restore {TEMPLATE_FILE}.\n"
+                + see_troubleshooting("The widget templates are missing")
             )
         data = item.get_data()
         local.write_text(json.dumps(data, indent=1), encoding="utf-8")
@@ -2923,13 +3129,16 @@ def load_templates(gis: Any, source_dashboard_id: str) -> Dict[str, Any]:
     else:
         raise SystemExit(
             f"No widget templates: {TEMPLATE_FILE} is missing. Reinstall the TaskDash wheel to restore it, or pass "
-            f"--source-dashboard <id> of any dashboard whose widget structures to borrow."
+            f"--source-dashboard <id> of any dashboard whose widget structures to borrow.\n"
+            + see_troubleshooting("The widget templates are missing")
         )
 
     widgets = {w["name"]: w for w in data["desktopView"]["widgets"]}
     missing = {"Task Inventory", "Recent Runs", "Schedule Mix"} - set(widgets)
     if missing:
-        raise SystemExit(f"{TEMPLATE_FILE} is missing required template widget(s): {sorted(missing)}")
+        raise SystemExit(f"{TEMPLATE_FILE} is missing required template widget(s): {', '.join(sorted(missing))}. "
+                         "Reinstall the TaskDash wheel to restore the file.\n"
+                         + see_troubleshooting("The widget templates are missing"))
     return {
         "table": widgets["Task Inventory"],
         "list": widgets["Recent Runs"],
@@ -2942,12 +3151,14 @@ def resolve_layer_ids(gis: Any, service_item_id: str, target: str) -> Dict[str, 
     is in the result only when the item has it, and then Metric Change reads it."""
     item = gis.content.get(service_item_id)
     if item is None:
-        raise SystemExit(f"Service item {service_item_id} not found or not visible to this account.")
+        raise SystemExit(f"Service item {service_item_id} not found or not visible to this account. Check "
+                         f"the item id in the config.\n" + see_troubleshooting("The service or view item cannot be found"))
     tables = get_tables(item)
     missing = sorted(set(DEFAULT_LAYER_IDS) - set(tables))
     if missing:
-        raise SystemExit(f"The {target} service has no {missing} table(s). Create them first: "
-                         f"python taskdash_publish.py --migrate --target {target} --apply")
+        raise SystemExit(f"The {target} service has no {', '.join(missing)} table(s). Create them first: "
+                         f"{command_text('collect', '--migrate', '--target', target, '--apply')}\n"
+                         + see_troubleshooting("The service has no tables"))
     wanted = [*DEFAULT_LAYER_IDS, *([TABLE_METRIC_CHANGE] if TABLE_METRIC_CHANGE in tables else [])]
     return {name: int(tables[name].properties.id) for name in wanted}
 
@@ -2959,11 +3170,24 @@ def resolve_dashboard(gis: Any, target: str, agol: Dict[str, Any], title_overrid
     prod_id = normalize_text(agol.get("dashboard_id"))
     if target == "prod":
         if not prod_id:
-            return None, title_override or PROD_DASHBOARD_TITLE
+            title = title_override or PROD_DASHBOARD_TITLE
+            # The title search only refuses; it never picks the item (audit dashboard-05). An empty id
+            # with a dashboard already there would add a second, unshared copy in the root folder.
+            owner = gis.users.me.username
+            found = [i for i in gis.content.search(f'title:"{title}" AND owner:{owner}', item_type="Dashboard")
+                     if i.title == title]
+            if found:
+                raise SystemExit(f"arcgis.dashboard_id is empty, but a dashboard titled {title!r} already exists "
+                                 f"({', '.join(i.id for i in found)}). A new one would be an unshared second copy. "
+                                 "Put that id in arcgis.dashboard_id in the config, then run this again; "
+                                 "this script never creates a second prod dashboard.\n"
+                                 + see_troubleshooting("The dashboard id is empty but one exists"))
+            return None, title
         item = gis.content.get(prod_id)
         if item is None or item.type != "Dashboard":
             raise SystemExit(f"arcgis.dashboard_id {prod_id} is not a Dashboard visible to this account. "
-                             "Correct the id in the config; this script never creates a second prod dashboard.")
+                             "Correct the id in the config; this script never creates a second prod dashboard.\n"
+                             + see_troubleshooting("The dashboard item is wrong"))
         return item, title_override or item.title
     title = title_override or TEST_DASHBOARD_TITLE
     owner = gis.users.me.username
@@ -2971,10 +3195,12 @@ def resolve_dashboard(gis: Any, target: str, agol: Dict[str, Any], title_overrid
                if i.title == title]
     if prod_id and any(i.id == prod_id for i in matches):
         raise SystemExit(f"Refusing: the test title {title!r} resolves to the prod dashboard {prod_id}. "
-                         "Rename one of them or pass a different --title.")
+                         "Rename one of them or pass a different --title.\n"
+                         + see_troubleshooting("The test title matches the production dashboard"))
     if len(matches) > 1:
-        raise SystemExit(f"{len(matches)} dashboards are titled {title!r} ({[i.id for i in matches]}). "
-                         "Delete the extras so --apply cannot update the wrong one.")
+        raise SystemExit(f"{len(matches)} dashboards are titled {title!r} ({', '.join(i.id for i in matches)}). "
+                         "Delete the extras so --apply cannot update the wrong one.\n"
+                         + see_troubleshooting("More than one dashboard has the title"))
     return (matches[0] if matches else None), title
 
 
@@ -2982,7 +3208,9 @@ def backup_dashboard(item: Any, log_dir: Path) -> Path:
     """Save the live definition before --apply overwrites it (audit dashboard-04)."""
     data = item.get_data()
     if not data:
-        raise SystemExit(f"Could not read dashboard {item.id} for a backup; not overwriting it.")
+        raise SystemExit(f"Could not read dashboard {item.id} for a backup; not overwriting it. Open it in "
+                         f"ArcGIS Online to check that it opens, then run the command again.\n"
+                         + see_troubleshooting("The backup could not be read"))
     log_dir.mkdir(parents=True, exist_ok=True)
     path = log_dir / f"dashboard_backup_{item.id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
     path.write_text(json.dumps(data, indent=1), encoding="utf-8")
@@ -2990,9 +3218,19 @@ def backup_dashboard(item: Any, log_dir: Path) -> Path:
     return path
 
 
+def _reply_text(response: Any) -> str:
+    """The code and message of an ArcGIS error reply, not the whole dict. Anything else is shown as text."""
+    error = response.get("error") if isinstance(response, dict) else None
+    if not isinstance(error, dict):
+        return str(response)[:300]
+    details = "; ".join(str(d) for d in error.get("details") or [])
+    return f"error {error.get('code', '?')}: {error.get('message', 'no message')}" + (f" ({details})" if details else "")
+
+
 def post_dashboard(gis: Any, definition: Dict[str, Any], title: str, existing: Any,
-                   config: Optional[Dict[str, Any]] = None) -> str:
-    tags = normalize_text((config or {}).get("arcgis", {}).get("dashboard_tags")) or "taskdash,monitoring"
+                   config: Optional[Dict[str, Any]] = None, demo: bool = False) -> str:
+    configured_tags = normalize_text((config or {}).get("arcgis", {}).get("dashboard_tags"))
+    snippet = ("DEMO - invented data. " if demo else "") + "Scheduled task health and workflow metrics."
     # Posted straight to the REST API: gis.content.add() is broken in arcgis 2.4.3, which
     # dereferences arcgis.features.geo._is_geoenabled on every add and that no longer exists.
     # Web items carry their definition in the item's `text` property.
@@ -3001,10 +3239,14 @@ def post_dashboard(gis: Any, definition: Dict[str, Any], title: str, existing: A
         "title": title,
         "type": "Dashboard",
         "typeKeywords": "Dashboard,ArcGIS Dashboards,Data,Web Application,Ready To Use",
-        "tags": tags,
-        "snippet": "Scheduled task health and workflow metrics.",
         "text": json.dumps(definition),
     }
+    # A rebuild must not overwrite the summary and tags an owner edited on the item: the update
+    # call changes only the parameters it receives. A configured dashboard_tags still wins.
+    if existing is None:
+        params.update(tags=configured_tags or "taskdash,monitoring", snippet=snippet)
+    elif configured_tags:
+        params["tags"] = configured_tags
     rest = gis._portal.resturl
     owner = gis.users.me.username
     if existing is not None:
@@ -3013,11 +3255,14 @@ def post_dashboard(gis: Any, definition: Dict[str, Any], title: str, existing: A
         # answered "Error Code: 400" (phase 0 prod deploy). An admin may update another's item.
         response = gis._con.post(f"{rest}content/users/{existing.owner}/items/{existing.id}/update", params)
         verb, target = "Updated", existing.id
+        emit("The summary and tags of the item stay as they are.")
     else:
         response = gis._con.post(f"{rest}content/users/{owner}/addItem", params)
         verb, target = "Created", response.get("id")
     if not (response.get("success") or response.get("id")):
-        raise SystemExit(f"Dashboard publish failed: {response}")
+        raise SystemExit(f"Dashboard publish failed: {_reply_text(response)}. Check that the account may create "
+                         "items and may edit the dashboard, then run the command again.\n"
+                         + see_troubleshooting("The dashboard could not be published"))
     emit(f"{verb} dashboard '{title}' -> {target}")
     emit(f"Open: {gis.url}/apps/dashboards/{target}")
     return target
@@ -3043,7 +3288,8 @@ def write_definition(definition: Dict[str, Any], item_id: str, layer_ids: Dict[s
 def build_offline(args: argparse.Namespace) -> int:
     """Build and validate without AGOL. A config is read only when --config names one: CI has none."""
     if args.apply:
-        raise SystemExit("--offline never signs in, so it cannot --apply. Drop one of the two flags.")
+        raise SystemExit("--offline never signs in, so it cannot --apply. Drop one of the two flags.\n"
+                         + see_troubleshooting("Offline and apply cannot be combined"))
     config = load_config(Path(args.config)) if args.config else {}
     layer_ids = dict(DEFAULT_LAYER_IDS)
     definition = build(OFFLINE_ITEM_ID, load_templates(None, ""), layer_ids, config=config)
@@ -3053,17 +3299,33 @@ def build_offline(args: argparse.Namespace) -> int:
     return 0
 
 
+def _record_dashboard_id(args: argparse.Namespace, config: Dict[str, Any], dashboard_id: str) -> None:
+    """Save a new prod dashboard's id as arcgis.dashboard_id, after a backup of the config, so the
+    next run updates this item and the alert e-mail links to it. A failed write prints the manual step."""
+    from taskdash_setup import backup_config, write_config_key  # setup imports this module at load
+
+    path = Path(args.config) if args.config else runtime_dir() / DEFAULT_CONFIG_FILE
+    try:
+        backup_config(path)
+        write_config_key(path, config, "dashboard_id", dashboard_id)
+    except (OSError, ValueError) as exc:
+        emit(f"Could not write the config ({type(exc).__name__}). Put {dashboard_id} in arcgis.dashboard_id "
+             "by hand, so the next run and the alert e-mail use this dashboard.")
+        return
+    emit("The next run and the alert e-mail use this dashboard.")
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     import taskdash_publish as publish
 
-    parser = argparse.ArgumentParser(description="Build the TaskDash dashboard.", allow_abbrev=False)
+    parser = argparse.ArgumentParser(prog="taskdash dashboard", description="Build the TaskDash dashboard.",
+                                     allow_abbrev=False)
     parser.add_argument("--apply", action="store_true", help="Create or update the dashboard item.")
     parser.add_argument("--target", choices=("prod", "test"), default=None,
                         help="Which dashboard to build: prod or test. Default: test if the config has "
                              "a test service, otherwise prod (check mode only: --apply then needs --target).")
     parser.add_argument("--title", default="", help="Dashboard title. Default: the standard title for the target.")
-    parser.add_argument("--config", default="", metavar="PATH",
-                        help="Config file to read. Default: the config next to the scripts.")
+    parser.add_argument("--config", default="", metavar="PATH", help=CONFIG_ARG_HELP)
     parser.add_argument("--offline", action="store_true",
                         help="Build and check the definition with default layer ids and a placeholder "
                              "item id. Never signs in or posts; for CI.")
@@ -3087,14 +3349,17 @@ def main(argv: Optional[List[str]] = None) -> int:
         if args.apply and not has_test:
             raise SystemExit("The config has no test service, so --apply without --target would "
                              "update the production dashboard. To do that, run "
-                             "`taskdash dashboard --target prod --apply`.")
+                             f"{command_text('dashboard', '--target', 'prod', '--apply')}.\n"
+                             + see_troubleshooting("The dashboard command will not apply without a target"))
         args.target = "test" if has_test else "prod"
         emit(f"No --target given: using {args.target}"
              f"{'' if has_test else ' (the config has no test service)'}.")
     service_key = publish.service_key(args.target)
     item_id = normalize_text(agol.get(service_key))
     if not item_id:
-        raise SystemExit(f"No arcgis.{service_key} in the config: the {args.target} dashboard needs its service.")
+        raise SystemExit(f"No arcgis.{service_key} in the config: the {args.target} dashboard needs its service. "
+                         f"Set the key, or run {command_text('setup')} for a new install.\n"
+                         + see_troubleshooting("The dashboard has no service to read"))
 
     read_id = data_item_id(agol, args.target)
     gis = connect_agol(config)
@@ -3104,7 +3369,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         emit(f"Metric Change reads the small {TABLE_METRIC_CHANGE} table.")
     else:
         emit(f"The item has no {TABLE_METRIC_CHANGE} table, so Metric Change reads all of {TABLE_METRICS}. "
-             f"To read the small table, run `taskdash collect --migrate --apply`. A view made before "
+             f"To read the small table, run {command_text('collect', '--migrate', '--target', args.target, '--apply')}. A view made before "
              f"this release needs a new view; docs/UPGRADE.md has the steps.")
     definition = build(read_id, templates, layer_ids, portal_url=gis.url, config=config)
 
@@ -3124,7 +3389,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         backup_dashboard(existing, log_dir)
     target = post_dashboard(gis, definition, title, existing, config)
     if args.target == "prod" and existing is None:
-        emit(f"Put {target} in arcgis.dashboard_id so the next run and the alert e-mail use it.")
+        _record_dashboard_id(args, config, target)
     return 0
 
 

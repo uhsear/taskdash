@@ -12,6 +12,8 @@ from __future__ import annotations
 import json
 from datetime import timedelta
 
+import pytest
+
 import taskdash_collect as collect
 from test_taskdash import NOW, _task, iso
 
@@ -144,6 +146,44 @@ def test_load_descriptions_accepts_string_and_object_entries(tmp_path):
     assert descriptions["plain task"]["overdue_grace_minutes"] is None
     assert descriptions["grace task"]["description"] == "Has grace."
     assert descriptions["grace task"]["overdue_grace_minutes"] == 45.0
+
+
+def test_a_tasks_value_that_is_not_an_object_uses_no_descriptions(tmp_path, capsys):
+    path = tmp_path / "workflow_descriptions.json"
+    path.write_text(json.dumps({"tasks": [{"name": "Job"}]}), encoding="utf-8")
+    assert collect.load_descriptions(path) == {}
+    assert '"tasks" must be an object' in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("grace", [True, "soon", float("nan"), float("inf"), -5, 10 ** 12])
+def test_a_bad_grace_is_ignored_with_a_warning_and_the_rest_of_the_file_applies(tmp_path, capsys, grace):
+    path = tmp_path / "workflow_descriptions.json"
+    path.write_text(json.dumps({"tasks": {
+        "Bad": {"description": "Keeps this.", "overdue_grace_minutes": grace},
+        "Good": {"overdue_grace_minutes": 30}}}), encoding="utf-8")  # json.dumps writes NaN as a bare NaN
+    descriptions = collect.load_descriptions(path)
+    assert descriptions["bad"]["description"] == "Keeps this."
+    assert descriptions["bad"]["overdue_grace_minutes"] is None
+    assert descriptions["good"]["overdue_grace_minutes"] == 30.0
+    assert "for task 'bad': overdue_grace_minutes must be a number" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("acknowledged", [True, 7, {"a": 1}, [1, 2], [["x"]]])
+def test_a_bad_acknowledgement_is_ignored_with_a_warning(tmp_path, capsys, acknowledged):
+    path = tmp_path / "workflow_descriptions.json"
+    path.write_text(json.dumps({"tasks": {
+        "Job": {"description": "Keeps this.", "acknowledge_config_warnings": acknowledged}}}), encoding="utf-8")
+    entry = collect.load_descriptions(path)["job"]
+    assert entry["description"] == "Keeps this." and entry["acknowledge_config_warnings"] == []
+    assert "acknowledge_config_warnings must be a text or a list of texts" in capsys.readouterr().out
+
+
+def test_an_entry_that_is_neither_text_nor_object_is_skipped_with_a_warning(tmp_path, capsys):
+    path = tmp_path / "workflow_descriptions.json"
+    path.write_text(json.dumps({"tasks": {"Bad": ["x"], "Num": 5, "Ok": "Fine."}}), encoding="utf-8")
+    assert list(collect.load_descriptions(path)) == ["ok"]
+    out = capsys.readouterr().out
+    assert "for task 'bad': the entry must be a text or an object" in out and "'num'" in out
 
 
 def test_per_task_grace_override_changes_overdue():

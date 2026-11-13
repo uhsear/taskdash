@@ -129,12 +129,12 @@ def _normalised(definition):
 def test_reference_defaults_leave_every_help_text_byte_identical():
     reference = {"scheduler": {"overdue_grace_minutes": 15, "collector_interval_minutes": 60,
                                "collector_task_name": "Task Dash"},
-              "alerting": {"heartbeat_hour": 7}}
+              "alerting": {"heartbeat_hour": 7, "enabled": True, "to": ["ops@example.com"]}}
     # A config with no heartbeat_hour has no daily e-mail (phase 2.5), so the plain build differs
     # from the reference only in that sentence; the reference config keeps the old text. The
     # reference install names its task "Task Dash" in its config since v1.1 (H1-9), because the
     # code default became the installer's "TaskDash Collector".
-    plain = _build({"alerting": {"heartbeat_hour": 7}, "scheduler": {"collector_task_name": "Task Dash"}})
+    plain = _build({"alerting": {"heartbeat_hour": 7, "enabled": True, "to": ["ops@example.com"]}, "scheduler": {"collector_task_name": "Task Dash"}})
     assert "TaskDash Collector task" in _help_blob(_build({"alerting": {"heartbeat_hour": 7}}))
     configured = _build(reference)
     assert _help_blob(plain) == _help_blob(configured)
@@ -147,7 +147,7 @@ def test_reference_defaults_leave_every_help_text_byte_identical():
 
 def test_other_sites_values_replace_the_literals():
     config = {"scheduler": {"overdue_grace_minutes": 10, "collector_task_name": "Fleet Watch"},
-              "alerting": {"heartbeat_hour": 13}}
+              "alerting": {"heartbeat_hour": 13, "enabled": True, "to": ["ops@example.com"]}}
     blob = _help_blob(_build(config))
     assert "for the 1 PM daily check" in blob and "7 AM" not in blob
     assert "The grace time is 10 min" in blob and "15 min unless" not in blob

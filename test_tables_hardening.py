@@ -466,7 +466,8 @@ def test_detect_task_changes_is_quiet_on_a_hosts_first_ever_sync():
     assert publish.detect_task_changes({}, new_rows, "H", "2026-09-25T12:00:00+00:00") == []
 
 
-def test_task_changes_write_failure_does_not_abort_metrics_or_later_purges(monkeypatch):
+@pytest.mark.parametrize("failure", [RuntimeError("AGOL down"), SystemExit("failed after 4 attempts")])
+def test_task_changes_write_failure_does_not_abort_metrics_or_later_purges(monkeypatch, failure):
     """The TaskChanges write is best-effort (see the comment above it in publish()) -- a failure
     there must not skip the metrics upsert or the TaskRuns/TaskMetrics purges after it."""
     tables = {publish.TABLE_INVENTORY: "inv", publish.TABLE_RUNS: "runs",
@@ -487,7 +488,7 @@ def test_task_changes_write_failure_does_not_abort_metrics_or_later_purges(monke
     def fake_upsert(table, rows, keys, **kwargs):
         calls.append(kwargs.get("label"))
         if kwargs.get("label") == publish.TABLE_TASK_CHANGES:
-            raise RuntimeError("AGOL down")
+            raise failure
         return {"added": 0, "updated": 0}
 
     monkeypatch.setattr(publish, "upsert_by_key", fake_upsert)
@@ -553,12 +554,25 @@ def test_write_collector_run_row_skips_silently_when_the_table_is_missing(monkey
     assert calls == []
 
 
-def test_write_collector_run_row_swallows_write_failures(monkeypatch):
+@pytest.mark.parametrize("failure", [RuntimeError("AGOL down"), SystemExit("failed after 4 attempts")])
+def test_write_collector_run_row_swallows_write_failures(monkeypatch, failure):
     """Best-effort: a failure here must never raise into run_publish -- it would then mask the
     real publish outcome it is only supposed to record."""
     monkeypatch.setattr(publish, "get_tables", lambda item: {publish.TABLE_COLLECTOR_RUNS: object()})
     monkeypatch.setattr(publish, "upsert_by_key",
-                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("AGOL down")))
+                        lambda *a, **k: (_ for _ in ()).throw(failure))
+    publish._write_collector_run_row(  # must not raise
+        object(), {}, {"host_name": "H", "inventory": [], "raw_events": []},
+        run_started=NOW, run_ended=NOW, exit_status="success", error_text="",
+        watermark_from=0.0, watermark_to=0.0, publish_counts={}, alert_sent=False,
+    )
+
+
+def test_write_collector_run_row_swallows_a_failed_purge_that_ends_in_system_exit(monkeypatch):
+    monkeypatch.setattr(publish, "get_tables", lambda item: {publish.TABLE_COLLECTOR_RUNS: object()})
+    monkeypatch.setattr(publish, "upsert_by_key", lambda *a, **k: {"added": 1, "updated": 0})
+    monkeypatch.setattr(publish, "purge_older_than",
+                        lambda *a, **k: (_ for _ in ()).throw(SystemExit("failed after 4 attempts")))
     publish._write_collector_run_row(  # must not raise
         object(), {}, {"host_name": "H", "inventory": [], "raw_events": []},
         run_started=NOW, run_ended=NOW, exit_status="success", error_text="",

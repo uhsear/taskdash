@@ -205,7 +205,11 @@ def test_success_rate_reads_the_precomputed_fleet_value(build):
     $reference two-dataset shape is gone."""
     default = _by_name(build())["7-Day Success Rate"]
     assert [d["name"] for d in default["datasets"]] == ["main"]
-    assert "MIN_lowest_success_rate_7d" in default["expression"] and "$reference" not in default["expression"]
+    assert default["valueField"] == dash.SUCCESS_SOURCE_FIELD
+    assert '$datapoint["lowest_success_rate_7d"]' in default["expression"]
+    assert "$reference" not in default["expression"]
+    fallback = _by_name(build(heartbeat_arcade_refresh=False))["7-Day Success Rate"]
+    assert "MIN_lowest_success_rate_7d" in fallback["expression"]
 
 
 # ------------------------------------------------------------------ selectors and selection
@@ -240,7 +244,7 @@ def test_task_health_row_selection_is_restored(build):
 
 def test_row_caps_removed_where_they_hid_rows(build):
     widgets = _by_name(build())
-    for name in ("Metric Observations", "Metric Summary", "Task Health", "Task Detail", "Config Notes",
+    for name in ("Metric Observations", "Metric Summary", "Task Health", "Task Detail", "Setting Notes",
                  "Host", "Task", "Health", "Schedule", "Metric"):
         assert "maxFeatures" not in widgets[name]["datasets"][0], name
 
@@ -278,7 +282,7 @@ FLAG_PROBES = {
                                           for c in w.get("columnSettings", [])),
     "status_symbols": lambda d: any(p[1] in json.dumps(d, ensure_ascii=False) for p in dash.PALETTE.values()),
     "mobile_element_mappings": lambda d: bool(d["elementMappings"]),
-    "config_notes_filter": lambda d: "filter" in _by_name(d)["Config Notes"]["datasets"][0],
+    "config_notes_filter": lambda d: "filter" in _by_name(d)["Setting Notes"]["datasets"][0],
 }
 
 
@@ -314,7 +318,7 @@ def test_validator_refuses_a_cross_table_target_without_fieldmap(build):
 def test_validator_refuses_a_select_caption_with_no_selection(build):
     definition = build()
     _by_name(definition)["Task Health"].pop("events")
-    with pytest.raises(SystemExit, match="defect 4.1"):
+    with pytest.raises(SystemExit, match="selecting does nothing"):
         dash.validate_definition(definition)
 
 
@@ -409,6 +413,7 @@ def _run_main(monkeypatch, tmp_path, arcgis, existing, argv):
     monkeypatch.setattr(dash, "write_definition", lambda definition, item_id, layer_ids: seen.append(item_id))
     monkeypatch.setattr(dash, "validate_definition", lambda *a, **k: None)
     monkeypatch.setattr(publish, "resolve_log_dir", lambda config: tmp_path / "Logs")
+    monkeypatch.setattr(dash, "runtime_dir", lambda: tmp_path)  # a new prod dashboard writes its id to this config
     assert dash.main(argv) == 0
     return seen[0]
 

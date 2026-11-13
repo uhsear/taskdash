@@ -46,7 +46,8 @@ def _ids(element):
 
 
 def test_version_constant_has_the_major_minor_patch_format():
-    assert re.fullmatch(r"\d+\.\d+\.\d+", taskdash_common.TASKDASH_VERSION)
+    # docs/RELEASING.md: 1.2.0 for a release, 1.2.0rc1 for a candidate.
+    assert re.fullmatch(r"\d+\.\d+\.\d+(rc\d+)?", taskdash_common.TASKDASH_VERSION)
 
 
 def test_about_panel_is_on_the_collector_tab_with_version_and_interval():
@@ -97,3 +98,14 @@ def test_collector_tab_weights_still_sum_to_one():
             check(child)
 
     check(_collector_tab(_build())["elements"][0])
+
+
+def test_a_demo_dashboard_says_its_data_is_invented_and_a_real_one_does_not():
+    tpl = json.loads((Path(dash.__file__).parent / dash.TEMPLATE_FILE).read_text(encoding="utf-8"))
+    by_name = {w["name"]: w for w in tpl["desktopView"]["widgets"]}
+    templates = {"table": by_name["Task Inventory"], "list": by_name["Recent Runs"],
+                 "serial_config": by_name["Schedule Mix"]["chartConfig"]}
+    demo = dash.build("TESTITEM", templates, demo=True)
+    assert "DEMO - invented data." in _plain(_about(demo)["text"])
+    assert "DEMO" not in _plain(_about(_build())["text"])
+    dash.validate_definition(demo, dict(dash.DEFAULT_LAYER_IDS), {})

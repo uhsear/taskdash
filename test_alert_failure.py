@@ -39,7 +39,7 @@ def world(tmp_path, monkeypatch):
     monkeypatch.setattr(publish, "connect_agol", lambda cfg: object())
     monkeypatch.setattr(publish, "ensure_service", lambda gis, cfg, target: item)
     monkeypatch.setattr(publish, "get_tables", lambda i: {})
-    monkeypatch.setattr(publish, "check_schema_drift", lambda tables: None)
+    monkeypatch.setattr(publish, "check_schema_drift", lambda tables, *a: None)
     monkeypatch.setattr(publish, "check_source_sharing", lambda *a: None)
     monkeypatch.setattr(publish, "collect_everything",
                         lambda *a, **k: {"host_name": "H", "inventory": [_failed_task()], "runs": [],
@@ -80,6 +80,16 @@ def test_a_failed_send_fails_the_run_after_everything_else_is_done(world, monkey
     assert row["error_text"].startswith("Alert e-mail failed: SMTPAuthenticationError")
     assert world["pings"] == ["/start", "/fail"]
     assert not (world["dir"] / "alert_state.json").exists(), "the next run must retry the send"
+
+
+def test_a_relay_without_starttls_gets_its_own_fix_text(world, monkeypatch):
+    _fail_send(world, monkeypatch, "SMTPNotSupportedError: STARTTLS extension not supported by server.")
+    with pytest.raises(SystemExit) as exc:
+        publish.main(world["argv"])
+
+    message = str(exc.value)
+    assert "smtp.starttls to false" in message and "port 25" in message
+    assert "Check smtp.host" not in message
 
 
 def test_alerting_on_with_no_usable_mail_settings_is_a_failed_send(world, monkeypatch):

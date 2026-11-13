@@ -1,12 +1,17 @@
 # Builds the wheel for a v* tag and attaches it to a GitHub Release. The release also carries a
 # hash-pinned requirements.lock, a CycloneDX SBOM, the one-window installer Install-TaskDash.ps1,
-# and SHA256SUMS.txt that lists the wheel and those three files.
+# a zip of the guides (taskdash-docs-<version>.zip), and SHA256SUMS.txt that lists the wheel and
+# those four files. The guides are a release file because the code repository is private: a reader of
+# the public release page has no other way to open INSTALL.md before the install. The release notes
+# are .github/release-notes.md plus the CHANGELOG.md section of the version, not --generate-notes,
+# which would copy private commit titles.
 # The repository is private, so the release is visible only to people with access to it.
 # After the private release exists, the maintainer copies the release files to the public
 # repository uhsear/taskdash-releases by hand. This workflow does not do the copy: it would need
-# a token for the other repository, and none is stored here.
-# A tag with a hyphen (v1.0.0-rc1) makes a pre-release.
-# Only the publish job can write. It runs after the full test suite and the build both pass.
+# a token for the other repository, and none is stored here. docs/RELEASING.md lists every step.
+# A tag with a hyphen (v1.0.0-rc1) makes a pre-release, and its wheel version is 1.0.0rc1 (PEP 440).
+# Only the publish job can write. It runs after the full test suite, the CI matrix of matrix.yml,
+# the build and the signing all pass.
 # Only the sign job can request an OIDC token. It signs the wheel and SHA256SUMS.txt with Sigstore.
 name: release
 
@@ -37,13 +42,25 @@ jobs:
       - name: Run the full suite
         run: python -m pytest -q -p no:cacheprovider
 
-  build:
+  # The CI matrix of matrix.yml: the suite on two images and three Pythons, and the environment legs.
+  # The publish job waits for it, so a tag that breaks another Python or locale never ships.
+  matrix:
+    uses: ./.github/workflows/matrix.yml
+    permissions:
+      contents: read
+
+  # This job installs only the pinned build tool, so nothing unlocked runs beside the wheel. It
+  # passes the wheel's hash on as a job output. The build job checks the wheel against it after
+  # that job has run its unlocked tools.
+  wheel:
     needs: test
     runs-on: windows-latest
-    # This job installs unlocked build tools, so it has no OIDC token: the sign job below does.
     env:
       # The tag reaches the scripts only through the environment, never pasted into a command.
       TAG: ${{ github.ref_name }}
+    outputs:
+      sha256: ${{ steps.hash.outputs.sha256 }}
+      installer_sha256: ${{ steps.hash.outputs.installer_sha256 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -60,21 +77,62 @@ jobs:
           python -m build --wheel
           if ($LASTEXITCODE) { throw "python -m build exited $LASTEXITCODE. Read the build output above." }
 
+      # The tag v1.2.0-rc1 names the PEP 440 version 1.2.0rc1, so a release candidate and the final
+      # release never share a version. The wheel name already holds the normalized version.
       - name: Check that the tag matches the package version
         shell: powershell
         run: |
           $version = (Get-ChildItem dist\*.whl | Select-Object -First 1).Name.Split("-")[1]
-          $base = $env:TAG.TrimStart("v").Split("-")[0]
-          if ($version -ne $base) { throw "Tag $env:TAG does not match package version $version. Change TASKDASH_VERSION or the tag." }
+          $expected = $env:TAG.TrimStart("v") -replace '-(?=(a|b|rc)\d)', ''
+          if ($version -ne $expected) { throw "Tag $env:TAG expects package version $expected, but the wheel is $version. Change TASKDASH_VERSION or the tag." }
 
-      # The lock covers the runtime dependencies and the smtp extra for Python 3.11 on Windows.
+      - name: Hash the wheel and the installer
+        id: hash
+        shell: powershell
+        run: |
+          $wheel = Get-ChildItem dist\*.whl | Select-Object -First 1
+          $hash = (Get-FileHash $wheel.FullName -Algorithm SHA256).Hash.ToLower()
+          [IO.File]::AppendAllText($env:GITHUB_OUTPUT, "sha256=$hash`n")
+          $installer = (Get-FileHash Install-TaskDash.ps1 -Algorithm SHA256).Hash.ToLower()
+          [IO.File]::AppendAllText($env:GITHUB_OUTPUT, "installer_sha256=$installer`n")
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: wheel
+          path: dist/*.whl
+          if-no-files-found: error
+
+  build:
+    needs: wheel
+    runs-on: windows-latest
+    # This job installs unlocked build tools, so it has no OIDC token: the sign job below does.
+    env:
+      WHEEL_SHA256: ${{ needs.wheel.outputs.sha256 }}
+      INSTALLER_SHA256: ${{ needs.wheel.outputs.installer_sha256 }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # 3.13 is the one supported Python: the lock and the SBOM below are built on it, and pip-compile
+      # records pywin32 because this runner is Windows.
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: wheel
+          path: dist
+
+      # The lock covers the runtime dependencies and the smtp extra for Python 3.13 on Windows.
       # pyproject.toml keeps its version ranges, because exact pins would fight ArcGIS Pro's arcgis.
       - name: Lock the dependencies with hashes
         shell: powershell
         run: |
           python -m pip install "pip-tools==7.6.2"
           python -m piptools compile --generate-hashes --strip-extras --extra smtp --output-file dist/requirements.lock pyproject.toml
-          if ($LASTEXITCODE) { throw "pip-compile exited $LASTEXITCODE. A dependency may have no Windows 3.11 wheel; read the output above." }
+          if ($LASTEXITCODE) { throw "pip-compile exited $LASTEXITCODE. A dependency may have no Windows 3.13 wheel; read the output above." }
 
       # The tool runs outside the venv, so the SBOM lists the installed wheel and its locked
       # packages, not the SBOM tool.
@@ -95,10 +153,31 @@ jobs:
       - name: Write the checksums
         shell: powershell
         run: |
+          # The tools above are not hash-locked. The wheel must still be the file the wheel job hashed.
+          $wheel = Get-ChildItem dist\*.whl | Select-Object -First 1
+          if ((Get-FileHash $wheel.FullName -Algorithm SHA256).Hash.ToLower() -ne $env:WHEEL_SHA256) {
+            throw "The wheel changed after the wheel job hashed it. Do not release it. Read the build job's tool output."
+          }
           # The quick install in docs/INSTALL.md downloads this script from the release page. Listing it
           # in SHA256SUMS.txt (which the sign job signs) lets the reader check it like the wheel.
+          # Users run this script elevated, so it gets the same check as the wheel.
+          if ((Get-FileHash Install-TaskDash.ps1 -Algorithm SHA256).Hash.ToLower() -ne $env:INSTALLER_SHA256) {
+            throw "Install-TaskDash.ps1 changed after the wheel job hashed it. Do not release it. Read the build job's tool output."
+          }
           Copy-Item Install-TaskDash.ps1 dist\
-          $lines = Get-ChildItem dist\*.whl, dist\requirements.lock, dist\*.cdx.json, dist\Install-TaskDash.ps1 | ForEach-Object {
+          # The guides link each other and ..\SECURITY.md and ..\CHANGELOG.md, so the zip keeps that layout.
+          $version = (Get-ChildItem dist\*.whl | Select-Object -First 1).Name.Split("-")[1]
+          Compress-Archive -Path docs, README.md, SECURITY.md, CHANGELOG.md -DestinationPath "dist\taskdash-docs-$version.zip"
+          # The install text is the same for every release, so the notes also carry this version's
+          # CHANGELOG.md section. UPGRADE.md and SECURITY.md send readers to the release page for it.
+          $changelog = [IO.File]::ReadAllText("$PWD\CHANGELOG.md")
+          # A candidate such as 1.2.0rc1 carries the notes of its release: CHANGELOG.md has no candidate sections.
+          $release = $version -replace '(a|b|rc)\d+$', ''
+          $section = [regex]::Match($changelog, "(?ms)^## \[$([regex]::Escape($release))\][^\r\n]*\r?\n.*?(?=^## \[|\z)")
+          if (-not $section.Success) { throw "CHANGELOG.md has no '## [$release]' section. Add it before you tag the release." }
+          $notes = [IO.File]::ReadAllText("$PWD\.github\release-notes.md").TrimEnd() + "`n`n" + $section.Value.TrimEnd() + "`n"
+          [IO.File]::WriteAllText("$PWD\dist\release-notes.md", $notes)
+          $lines = Get-ChildItem dist\*.whl, dist\requirements.lock, dist\*.cdx.json, dist\Install-TaskDash.ps1, dist\taskdash-docs-*.zip | ForEach-Object {
             "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower())  $($_.Name)"
           }
           # LF, not the CRLF Out-File writes: `sha256sum -c` on Linux reads the CR into the file name.
@@ -112,6 +191,8 @@ jobs:
             dist/requirements.lock
             dist/*.cdx.json
             dist/Install-TaskDash.ps1
+            dist/taskdash-docs-*.zip
+            dist/release-notes.md
             dist/SHA256SUMS.txt
           if-no-files-found: error
 
@@ -152,7 +233,7 @@ jobs:
           if-no-files-found: error
 
   publish:
-    needs: [test, build, sign]
+    needs: [test, matrix, build, sign]
     runs-on: windows-latest
     permissions:
       contents: write
@@ -177,6 +258,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $flags = @()
-          if ($env:TAG.Contains("-")) { $flags += "--prerelease" }
-          gh release create $env:TAG dist\taskdash-*.whl dist\requirements.lock dist\*.cdx.json dist\Install-TaskDash.ps1 dist\SHA256SUMS.txt dist\*.sigstore.json --title "TaskDash $env:TAG" --generate-notes @flags
+          if ($env:TAG -match '-|\d(a|b|rc)\d+$') { $flags += "--prerelease" }
+          gh release create $env:TAG dist\taskdash-*.whl dist\requirements.lock dist\*.cdx.json dist\Install-TaskDash.ps1 dist\taskdash-docs-*.zip dist\SHA256SUMS.txt dist\*.sigstore.json --title "TaskDash $env:TAG" --notes-file dist\release-notes.md @flags
           if ($LASTEXITCODE) { throw "gh release create exited $LASTEXITCODE." }

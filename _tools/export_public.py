@@ -11,6 +11,7 @@ After writing, the output is scanned with deny_scan (generic list, plus the priv
 and with the publisher's secret scrubber. Hits print as file paths and counts, never the matched text.
 A deny-list hit exits 1; credential-pattern files are listed for review and do not change the exit code.
 This script never runs git commit or git push; pushing the output is a separate, manual step.
+docs/RELEASING.md lists the whole release process, including the copy to the public repository.
 """
 
 from __future__ import annotations
@@ -33,7 +34,6 @@ EXCLUDED_FILES = {
     "workflow_descriptions.json",  # the root copy only; tests/fixtures keeps its own
     "dashboard_taskdash.json",
     "TaskDash.config.json",
-    "_tools/repair_estimated_durations.py",
 }
 EXCLUDED_DIRS = ("archive/", "Logs/")
 EXCLUDED_SUFFIXES = (".sd" + "e",)

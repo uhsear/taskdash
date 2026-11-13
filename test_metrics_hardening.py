@@ -315,9 +315,9 @@ def test_build_metric_rows_reports_unknown_not_zero_when_newest_log_unreadable(t
 
     original_scan = metrics.scan_log_file
 
-    def failing_scan(path, max_lines, task_settings=None):
+    def failing_scan(path, max_lines, task_settings=None, since=None):
         return {"metrics": {}, "lines_scanned": 0, "error_lines": 0,
-                "warning_lines": 0, "success_lines": 0, "read_error": True}
+                "warning_lines": 0, "read_error": True}
 
     monkeypatch.setattr(metrics, "scan_log_file", failing_scan)
     inventory_rows = [{"task_name": "Proj", "task_full_name": "\\Proj",

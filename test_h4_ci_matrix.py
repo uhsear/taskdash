@@ -69,10 +69,10 @@ def test_the_workflow_uses_no_secret_and_never_applies():
     assert "secrets." not in text and "--apply" not in text and "GH_TOKEN" not in text
 
 
-def test_the_workflow_runs_on_tags_weekly_and_on_demand(doc):
+def test_the_workflow_runs_weekly_on_demand_and_when_the_release_workflow_calls_it(doc):
     triggers = doc.get("on") or doc[True]    # PyYAML reads the bare key `on` as the boolean True
-    assert set(triggers) == {"push", "schedule", "workflow_dispatch"}
-    assert triggers["push"] == {"tags": ["v*"]}
+    assert set(triggers) == {"workflow_call", "schedule", "workflow_dispatch"}
+    assert "push" not in triggers, "release.yml calls this file on a tag; a push trigger would run it twice"
     assert len(triggers["schedule"]) == 1
 
 

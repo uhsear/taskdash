@@ -144,4 +144,4 @@ def test_missing_keyring_package_disables_alerting_instead_of_raising(monkeypatc
     mail = common.load_mail_settings({"smtp": {
         "host": "h.example.test", "from": "a@example.test", "user": "mailer"}})
     assert mail is None
-    assert any("alerting disabled" in m for m in messages)
+    assert any("cannot send alerts" in m and "exits 1" in m for m in messages)

@@ -27,7 +27,7 @@ class HostTable:
 
     def _matching(self, where):
         match = re.fullmatch(r"host_name = '(.*)'", where)
-        return [r for r in self.rows if match and r["host_name"] == match.group(1)]
+        return [r for r in self.rows if match and r["host_name"].upper() == match.group(1)]
 
     def query(self, *, where="1=1", out_fields="*", result_offset=0, return_count_only=False, **kw):
         rows = self._matching(where)
@@ -101,6 +101,24 @@ def test_a_quote_in_the_name_cannot_widen_the_filter(tables):
 def test_a_service_without_the_history_tables_still_retires(tables):
     del tables[publish.TABLE_COLLECTOR_RUNS], tables[publish.TABLE_TASK_CHANGES]
     assert publish.retire_host(tables, OLD, apply=True) == 3
+
+
+def test_check_mode_counts_and_apply_deletes_the_hosts_metric_change_rows(tables, capsys):
+    tables[publish.TABLE_METRIC_CHANGE] = HostTable(_rows(OLD, KEPT, OLD))
+    publish.retire_host(tables, OLD, apply=False)
+    out = capsys.readouterr().out
+    assert f"{publish.TABLE_METRIC_CHANGE}: 2 row(s)" in out and "2 MetricChange row(s)" in out
+    assert tables[publish.TABLE_METRIC_CHANGE].edits == []
+    publish.retire_host(tables, OLD, apply=True)
+    assert [r["host_name"] for r in tables[publish.TABLE_METRIC_CHANGE].rows] == [KEPT]
+
+
+def test_a_renamed_host_with_only_metric_change_rows_left_still_retires_them(tables):
+    tables[publish.TABLE_INVENTORY] = HostTable(_rows(KEPT))
+    tables[publish.TABLE_METRIC_CHANGE] = HostTable(_rows(OLD, KEPT))
+    assert publish.retire_host(tables, OLD, apply=True) == 0
+    assert [r["host_name"] for r in tables[publish.TABLE_METRIC_CHANGE].rows] == [KEPT]
+    assert tables[publish.TABLE_INVENTORY].edits == []
 
 
 # ------------------------------------------------------------------ refusals

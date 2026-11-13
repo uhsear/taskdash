@@ -20,8 +20,8 @@ def test_disabled_glyph_is_not_the_hollow_square():
 def test_table_cells_use_the_short_date_and_the_time_zone_is_stated():
     by = {w["name"]: w for w in _build()["desktopView"]["widgets"]}
     assert "observed_at_utc: {displayText: fmtDateShort(" in by["Metric Observations"]["expression"]
-    assert "Run times show in your device's time zone. Schedules use the server's clock." in by["Task Health"]["topCaption"]
-    assert "Run times show in your device's time zone. Schedules use the server's clock." in by[dash.ABOUT_NAME]["text"]
+    assert "Run times show in your device's time zone. Schedules use the computer's clock." in by["Task Health"]["topCaption"]
+    assert "Run times show in your device's time zone. Schedules use the computer's clock." in by[dash.ABOUT_NAME]["text"]
 
 
 def test_mobile_tiles_have_no_medium_value_size_but_desktop_keeps_it():

@@ -1,6 +1,7 @@
 """Run the preflight checks as the task account, without runas.
 
 Driver: taskdash preflight --as-task [--task-user NAME] [--apply]
+        taskdash signin --forget --for-task-account [--task-user NAME] [--apply] (the same runner)
 Source: taskdash_task.xml (the template of the real task), the config, one hidden password prompt
 Target: with --apply, one temporary task in Task Scheduler and one output file in the log folder.
         TaskDash tries to remove both on every path. A removal that fails is named with the fix, and
@@ -28,7 +29,9 @@ from typing import Any, Optional, Tuple
 from xml.sax.saxutils import escape
 
 import taskdash_collect as collect
-from taskdash_common import DEFAULT_CONFIG_FILE, data_dir, emit, load_config, normalize_text, runtime_dir, system32_exe
+from taskdash_common import (
+    DEFAULT_CONFIG_FILE, data_dir, emit, load_config, normalize_text, runtime_dir, see_troubleshooting, system32_exe,
+)
 from taskdash_dashboard import DEFAULT_COLLECTOR_TASK_NAME
 from taskdash_publish import resolve_log_dir
 
@@ -68,7 +71,8 @@ def connect_scheduler() -> Any:
         import win32com.client
     except ImportError:
         raise SystemExit("pywin32 is not installed, so TaskDash cannot talk to Task Scheduler. "
-                         "Install it in the TaskDash environment with: python -m pip install pywin32") from None
+                         "Install it in the TaskDash environment with: python -m pip install pywin32\n"
+                         + see_troubleshooting("The as-task check does not run")) from None
     service = win32com.client.Dispatch("Schedule.Service")
     service.Connect()
     return service
@@ -125,6 +129,14 @@ def preflight_command(out_file: Path, config: str, offline: bool) -> Tuple[str, 
     return system32_exe("cmd.exe"), f'/d /c "{inner}"'
 
 
+def forget_command(out_file: Path, config: str) -> Tuple[str, str]:
+    """The same cmd.exe wrapper as preflight_command, running `signin --forget --apply`. The outer
+    command's --apply is the consent; the child asks for nothing."""
+    extra = f' --config "{config}"' if config else ""
+    inner = f'"{sys.executable}" -X utf8 -m taskdash_cli signin --forget --apply{extra} > "{out_file}" 2>&1'
+    return system32_exe("cmd.exe"), f'/d /c "{inner}"'
+
+
 def restrict_file(path: Path, account: str) -> None:
     """Create the output file and limit it to the task account, you, administrators and SYSTEM."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -173,18 +185,20 @@ def remove_task(folder: Any, task: Any, name: str) -> bool:
         return False
 
 
-def _run_registered(task: Any, user: str, password: Optional[str], out_file: Path) -> int:
+def _run_registered(task: Any, user: str, password: Optional[str], out_file: Path, what: str = "Preflight") -> int:
     task.Run(None)
     result = wait_for_run(task)
     emit(read_output(out_file, password) or "(the run wrote no output)")
     if result is None:
-        emit(f"Preflight as {user} did not finish in {RUN_TIMEOUT_SECONDS} seconds, so TaskDash stopped it. "
+        emit(f"{what} as {user} did not finish in {RUN_TIMEOUT_SECONDS} seconds, so TaskDash stopped it. "
              "Run it by hand as that account to see where it waits.")
         return 1
     if result == 0:
-        emit(f"Preflight as {user} passed.")
+        emit(f"{what} as {user} passed.")
         return 0
-    emit(f"Preflight as {user} failed with 0x{result:08X}: {describe_result(result)}")
+    detail = "the command reported a problem. Its output is above." if what != "Preflight" and result == 1 \
+        else describe_result(result)
+    emit(f"{what} as {user} failed with 0x{result:08X}: {detail}")
     return 1
 
 
@@ -199,7 +213,8 @@ def remove_file(path: Path) -> bool:
         return False
 
 
-def run_check(folder: Any, name: str, xml: str, user: str, logon: str, password: Optional[str], out_file: Path) -> int:
+def run_check(folder: Any, name: str, xml: str, user: str, logon: str, password: Optional[str], out_file: Path,
+              what: str = "Preflight") -> int:
     """Register, run, print. The task and the file are removed on every path, including a crash.
     When either removal fails, the message says how to remove it by hand and the command exits 1."""
     task, code, removed = None, 1, True
@@ -208,10 +223,10 @@ def run_check(folder: Any, name: str, xml: str, user: str, logon: str, password:
         task = folder.RegisterTask(name, xml, TASK_CREATE, user, password,
                                    LOGON_PASSWORD if logon == "Password" else LOGON_INTERACTIVE)
         emit(f"Registered '{name}'. Running it once, waiting up to {RUN_TIMEOUT_SECONDS} seconds...")
-        code = _run_registered(task, user, password, out_file)
+        code = _run_registered(task, user, password, out_file, what)
     except Exception as exc:  # noqa: BLE001 - every failure ends in the cleanup below
         text = f"{type(exc).__name__}: {exc}"
-        emit(f"Preflight as {user} could not run: {(text.replace(password, '***') if password else text)[:300]}. "
+        emit(f"{what} as {user} could not run: {(text.replace(password, '***') if password else text)[:300]}. "
              + COM_HINTS.get(getattr(exc, "hresult", None), "Check the account and the log folder, then run the command again."))
     finally:
         if task is not None:
@@ -222,7 +237,8 @@ def run_check(folder: Any, name: str, xml: str, user: str, logon: str, password:
     return code if removed and file_removed else 1
 
 
-def run_as_task(args: argparse.Namespace) -> int:
+def run_as_task(args: argparse.Namespace, forget: bool = False) -> int:
+    """Run preflight (or, with forget, `signin --forget`) as the task account in a temporary task."""
     path = Path(args.config) if args.config else runtime_dir() / DEFAULT_CONFIG_FILE
     config = load_config(path)
     collector = normalize_text((config.get("scheduler") or {}).get("collector_task_name")) or DEFAULT_COLLECTOR_TASK_NAME
@@ -234,9 +250,12 @@ def run_as_task(args: argparse.Namespace) -> int:
     suffix = uuid.uuid4().hex[:8]
     name = f"{TEMP_TASK_PREFIX}{suffix}"
     out_file = resolve_log_dir(config) / f"{TEMP_FILE_PREFIX}{suffix}.txt"
-    command, arguments = preflight_command(out_file, str(path.resolve()) if args.config else "", args.offline)
+    config_arg = str(path.resolve()) if args.config else ""
+    command, arguments = (forget_command(out_file, config_arg) if forget
+                          else preflight_command(out_file, config_arg, args.offline))
     emit(f"Task name: {name}")
-    emit(f"Runs as:   {user} ({logon} logon, the same as the collector task '{collector}')")
+    source = "account named by --task-user" if normalize_text(args.task_user) else f"the same as the collector task '{collector}'"
+    emit(f"Runs as:   {user} ({logon} logon, {source})")
     emit(f"Command:   {command} {arguments}")
     emit(f"Output:    {out_file} (readable by that account, you and administrators only)")
     emit(f"It runs once, waits up to {RUN_TIMEOUT_SECONDS} seconds, prints the output, then deletes "
@@ -253,4 +272,4 @@ def run_as_task(args: argparse.Namespace) -> int:
                  f"the password of {user}.")
             return 1
     xml = render_task_xml(user, logon, command, arguments, str(runtime_dir()))
-    return run_check(folder, name, xml, user, logon, password, out_file)
+    return run_check(folder, name, xml, user, logon, password, out_file, "Forget" if forget else "Preflight")

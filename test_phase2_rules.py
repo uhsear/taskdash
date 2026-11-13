@@ -194,7 +194,7 @@ def _load_bad_profile(tmp_path, data):
 
 def test_bad_regex_stops_with_file_entry_and_fix(tmp_path):
     message = _load_bad_profile(tmp_path, {"prose_count_rules": [{"order": 5, "pattern": "(\\d+ widgets", "key": "w_count"}]})
-    assert "prose_count_rules" in message and "entry 0 (order 5)" in message and "bad regex" in message
+    assert "prose_count_rules" in message and "entry 1, order 5" in message and "bad regex" in message
 
 
 def test_prose_rule_without_a_capture_group_stops(tmp_path):
@@ -218,13 +218,13 @@ def test_duplicate_order_stops_and_names_both_files(tmp_path):
     ({"display_names": {"a_count": 5}}, "not a string"),
     ({"noise_metric_key_patterns": [{"order": "7", "pattern": "^x$"}]}, "order must be a whole number"),
     ({"canonical_metric_rules": {"order": 7}}, "must be a list"),
-    ({"canonical_metric_rules": [{"order": 7, "pattern": "^x$"}]}, "missing/non-string field(s) ['key']"),
+    ({"canonical_metric_rules": [{"order": 7, "pattern": "^x$"}]}, "missing or wrong-type field(s): key"),
     ({"cause_patterns": [{"order": 7, "cause": "storage", "pattern": "disk"}]}, "no hint text"),
-    ({"fixed_value_rules": [{"order": 7, "pattern": "^x$", "value": 0}]}, "missing/non-string field(s) ['keys']"),
-    ({"fixed_value_rules": [{"order": 7, "pattern": "^x$", "keys": [], "value": 0}]}, "['keys']"),
-    ({"fixed_value_rules": [{"order": 7, "pattern": "^x$", "keys": "a_count", "value": 0}]}, "['keys']"),
-    ({"fixed_value_rules": [{"order": 7, "pattern": "^x$", "keys": ["a_count"], "value": "0"}]}, "['value']"),
-    ({"fixed_value_rules": [{"order": 7, "pattern": "^x$", "keys": ["a_count"]}]}, "['value']"),
+    ({"fixed_value_rules": [{"order": 7, "pattern": "^x$", "value": 0}]}, "missing or wrong-type field(s): keys"),
+    ({"fixed_value_rules": [{"order": 7, "pattern": "^x$", "keys": [], "value": 0}]}, "wrong-type field(s): keys"),
+    ({"fixed_value_rules": [{"order": 7, "pattern": "^x$", "keys": "a_count", "value": 0}]}, "wrong-type field(s): keys"),
+    ({"fixed_value_rules": [{"order": 7, "pattern": "^x$", "keys": ["a_count"], "value": "0"}]}, "wrong-type field(s): value"),
+    ({"fixed_value_rules": [{"order": 7, "pattern": "^x$", "keys": ["a_count"]}]}, "wrong-type field(s): value"),
     ({"fixed_value_rules": [{"order": 7, "pattern": "(x", "keys": ["a_count"], "value": 0}]}, "bad regex"),
 ])
 def test_wrong_type_stops(tmp_path, data, needle):

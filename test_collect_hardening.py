@@ -34,8 +34,8 @@ def test_check_event_log_health_raises_when_disabled(monkeypatch):
     ])
     with pytest.raises(SystemExit) as exc:
         collect.check_event_log_health()
-    assert "wevtutil sl" in str(exc.value)
-    assert "/e:true" in str(exc.value)
+    assert "taskdash preflight --enable-event-log --apply" in str(exc.value)
+    assert "TROUBLESHOOTING.md, section The Task Scheduler log is turned off" in str(exc.value)
 
 
 def test_check_event_log_health_raises_when_missing_or_access_denied(monkeypatch):
@@ -195,6 +195,18 @@ def test_user_stop_is_not_an_error(inventory):
     assert rows[0]["is_completed"] == 1
 
 
+def test_manual_end_as_logged_on_a_task_server_is_a_stop_not_a_failure(inventory):
+    """A manual End (Stop-ScheduledTask and schtasks /End, captured 2026-11-13) logs 330, then a
+    201 with 0x41306, 102 and 111, all on the same instance."""
+    events = [_event(100, 30, instance="i-end"), _event(200, 30, instance="i-end"),
+             _event(330, 22, instance="i-end"),
+             _event(201, 22, instance="i-end", result_code=0x00041306, event_record_id=8001),
+             _event(102, 22, instance="i-end"), _event(111, 22, instance="i-end")]
+    rows = collect.build_run_rows(events, inventory, host_name="TASKHOST-1")
+    assert len(rows) == 1
+    assert (rows[0]["run_status"], rows[0]["is_error"], rows[0]["is_completed"]) == ("Stopped", 0, 1)
+
+
 def test_bare_terminated_event_never_stays_running(inventory):
     """A 111 with no companion 329/330 is still a real, unexplained termination -- it must
     not be reported as still Running (the old 100/102/201-only reader would have)."""
@@ -203,6 +215,17 @@ def test_bare_terminated_event_never_stays_running(inventory):
     assert rows[0]["run_status"] == "Terminated"
     assert rows[0]["is_error"] == 1
     assert rows[0]["is_completed"] == 1
+
+
+@pytest.mark.parametrize("code, status, is_error", [(0, "Success", 0), (2147942402, "Error", 1)])
+def test_terminated_then_completed_takes_the_actions_own_code(inventory, code, status, is_error):
+    """A task server logged 111 and later a 201 for the same instance; the 201 code decides."""
+    events = [_event(100, 30, instance="i-late"), _event(111, 29, instance="i-late"),
+             _event(201, 5, instance="i-late", result_code=code, event_record_id=7001),
+             _event(102, 5, instance="i-late")]
+    rows = collect.build_run_rows(events, inventory, host_name="TASKHOST-1")
+    assert len(rows) == 1
+    assert (rows[0]["run_status"], rows[0]["is_error"]) == (status, is_error)
 
 
 # ---------------------------------------------------------------- 1.3 multi-action tasks

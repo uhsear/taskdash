@@ -69,11 +69,11 @@ def test_without_both_org_properties_the_typed_url_is_printed(tmp_path, monkeypa
     assert code == 0 and "Set arcgis.url to https://www.arcgis.com" in out
 
 
-def test_the_refusal_names_the_commands_for_both_install_forms():
+def test_the_refusal_names_the_commands_in_the_taskdash_form():
     with pytest.raises(SystemExit) as exc:
         setup.refuse_existing_install({"arcgis": {"item_id": "x"}})
     text = str(exc.value)
-    for part in ("arcgis.item_id", "taskdash collect --migrate --apply", "taskdash dashboard --target prod",
-                 "folder install", "python taskdash_publish.py --migrate", "python taskdash_dashboard.py",
-                 "To start again", "TROUBLESHOOTING.md"):
+    for part in ("arcgis.item_id", "`taskdash collect --migrate --apply`", "`taskdash dashboard --target prod --apply`",
+                 "To start again", "TROUBLESHOOTING.md, section The config already holds an install"):
         assert part in text
+    assert "folder install" not in text and "python taskdash_" not in text

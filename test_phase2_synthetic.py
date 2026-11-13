@@ -108,7 +108,8 @@ def test_setting_risk_is_a_config_warning_not_a_health_change(host1):
 
 def test_healthy_tasks_stay_healthy(host1, host2):
     seeded = {"Report Mailer", "Data Archiver", "Weekly Cleanup", "Legacy Sync",
-              "Archive Copy", "Report Builder", "Export Packager", "Mirror Sync"}
+              "Archive Copy", "Report Builder", "Export Packager", "Mirror Sync",
+              "Session Cleaner", "Status Poller", "Cert Checker", "Disk Reporter"}
     for row in host1["inventory"] + host2["inventory"]:
         if row["task_name"] in seeded:
             continue
@@ -116,21 +117,55 @@ def test_healthy_tasks_stay_healthy(host1, host2):
         assert row["config_warnings"] == "" or row["task_name"] == "Cache Refresher", row["task_name"]
 
 
-def test_definition_change_needs_the_prior_inventory_the_fixture_carries(host1, tmp_path):
+def _changes(path, current, tmp_path):
     import json
-    prior_payload = json.loads(HOST1.read_text(encoding="utf-8"))
-    prior_payload["tasks"] = prior_payload.pop("prior_tasks")
-    prior_path = tmp_path / "prior.json"
-    prior_path.write_text(json.dumps(prior_payload), encoding="utf-8")
-    prior = _collect(prior_path)
+    prior_path = tmp_path / f"prior_{path.name}"
+    prior_path.write_text(json.dumps(gen.prior_fixture(json.loads(path.read_text(encoding="utf-8")))),
+                          encoding="utf-8")
+    old_by_key = {r["task_full_name"]: r for r in _collect(prior_path)["inventory"]}
+    return publish.detect_task_changes(old_by_key, current["inventory"], current["host_name"],
+                                       "2026-10-16T12:00:00+00:00")
 
-    old_by_key = {r["task_full_name"]: r for r in prior["inventory"]}
-    changes = publish.detect_task_changes(old_by_key, host1["inventory"], "APP-HOST-01",
-                                          "2026-10-16T12:00:00+00:00")
-    changed = [(c["task_name"], c["change_kind"]) for c in changes if c["change_kind"] == "definition_changed"]
-    assert changed == [("Config Publisher", "definition_changed")]
-    # Nothing else moved between the two captures, so the diff holds no other definition change.
-    assert not [c for c in changes if c["change_kind"] in ("task_added", "task_removed")]
+
+def test_the_prior_capture_gives_every_kind_of_change_row(host1, host2, tmp_path):
+    changes = _changes(HOST1, host1, tmp_path) + _changes(HOST2, host2, tmp_path)
+    assert sorted((c["task_name"], c["change_kind"]) for c in changes) == [
+        ("Backup Verifier", "recovered"), ("Config Publisher", "definition_changed"),
+        ("Report Mailer", "became_failing")]
+    # The privacy switches hide the command line, so the row must show a setting a viewer can read.
+    changed = next(c for c in changes if c["change_kind"] == "definition_changed")
+    assert changed["old_summary"] != changed["new_summary"]
+
+
+def test_every_documented_state_is_seeded(host1, host2):
+    rows = {**_by_name(host1), **_by_name(host2)}
+    assert (rows["Status Poller"]["attention_kind"], rows["Status Poller"]["health_status"]) == ("BLOCKED", "Warning")
+    assert "2 missed runs" in rows["Session Cleaner"]["attention_reason"]
+    assert (rows["Session Cleaner"]["attention_kind"], rows["Session Cleaner"]["health_status"]) == ("WARNING", "Warning")
+    assert rows["Cert Checker"]["health_status"] == "NotYetRun"
+    assert (rows["Disk Reporter"]["health_status"], rows["Disk Reporter"]["attention_kind"]) == ("Running", "")
+    assert rows["Backup Verifier"]["failures_last_7_days"] == 1 and rows["Backup Verifier"]["attention_kind"] == ""
+
+
+def test_the_log_cases_show_errors_and_the_metric_flags(tmp_path):
+    import taskdash_metrics
+
+    taskdash_metrics.configure_rules({"rules": {"profiles": []}})
+    overrides = gen.write_metric_logs(tmp_path, datetime.now(timezone.utc))
+    collected = _collect(HOST1, {"metrics": {"log_directory_overrides": overrides}})
+    assert _by_name(collected)["Queue Drainer"]["latest_log_error_lines"] == 2
+    assert _by_name(collected)["Queue Drainer"]["attention_kind"] == ""
+    rows = [{**m, "observed_at_utc": datetime.fromisoformat(m["observed_at_utc"]).timestamp() * 1000}
+            for m in collected["metrics"]]
+    change = {r["metric_key"]: r for r in taskdash_metrics.compute_metric_change(rows)
+              if r["task_name"] in ("Queue Drainer", "Heartbeat Check")}
+    drain = change["failed_items"]
+    # Far over usual: 50 percent or more above a usual value of 10 or more, and above every earlier value.
+    assert drain["usual_value"] >= 10 and drain["latest_value"] >= 1.5 * drain["usual_value"]
+    assert drain["latest_value"] > drain["highest_value"]
+    # Not in last run: logged in all but the newest log, so it ends well before the task's newest value.
+    deleted, newest = change["rows_deleted"], change["rows_processed"]
+    assert deleted["history_count"] >= 3 and newest["latest_at_utc"] - deleted["latest_at_utc"] >= 12 * 3600 * 1000
 
 
 def test_shared_cause_incident_names_one_cause(host2):
@@ -174,7 +209,7 @@ def test_default_rules_alone_mine_every_intended_generic_metric(tmp_path):
     collected = _collect(HOST1, {"metrics": {"log_directory_overrides": overrides}})
 
     found = {m["metric_key"] for m in collected["metrics"]}
-    intended = set(gen.generic_metric_keys()) | {"rows_processed"}
+    intended = set(gen.generic_metric_keys()) | {"rows_processed", "failed_items", "rows_deleted"}
     assert intended <= found, f"default.json missed: {sorted(intended - found)}"
     assert len(found - intended) <= 2, f"noise metrics: {sorted(found - intended)}"
 

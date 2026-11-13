@@ -11,17 +11,33 @@ This guide assumes that the install in [INSTALL.md](INSTALL.md) works. Two other
 
 ## Try the demo
 
-The demo shows a dashboard on invented data. Run the commands from the TaskDash folder.
+The demo shows TaskDash on invented data. Run the commands from the TaskDash folder. To try the
+demo before your install is finished, follow "Optional: evaluate with the demo" in
+[INSTALL.md](INSTALL.md#optional-evaluate-with-the-demo).
 
-- `& $td demo` runs offline. It writes only to the `demo` folder inside the TaskDash folder.
-- `& $td demo --apply` needs a finished `taskdash setup`. It creates separate `DEMO_` items in an
-  ArcGIS Online folder named `TaskDash_Demo`. It does not change your real items.
+- `& $td demo` runs offline. It prints the health tiles, the tasks that show a status or a note,
+  the change rows and two alert e-mail previews as text. It builds the dashboard definition but
+  publishes nothing. It writes only to the `demo` folder inside the TaskDash folder.
+- `& $td demo --apply` needs only the sign-in of INSTALL step 3: `arcgis.url` and `arcgis.profile`
+  in your config. It does not need a finished `taskdash setup`. It creates separate `DEMO_` items
+  in an ArcGIS Online folder named `TaskDash_Demo`, publishes the data, and ends with the dashboard
+  link after `Open:`. It does not change your real items.
+- `& $td demo --remove --apply` deletes the `DEMO_` items. Without `--apply`, it lists them.
+
+The invented tasks cover every status and note in this guide. The About panel of the demo dashboard
+says `DEMO - invented data`. The demo sets the heartbeat limits to 45 and 90 days, so the **Collector
+heartbeat** tile stays **OK** for 45 days after the publish. To refresh the data, run `& $td demo --apply` again.
+A demo that an earlier release made keeps its old limits. Release 1.2.0 removes a demo through its
+setup manifest, and an earlier demo has none, so `--remove` cannot delete it. In ArcGIS Online, delete
+the `DEMO_` items and the `DEMO_TaskDash viewers` group by hand. Then delete `demo/TaskDash.config.json`
+in the TaskDash folder and run `& $td demo --apply`.
 
 ## Open the dashboard
 
 Open the link that `taskdash setup --apply` printed after `Open:`. To find the dashboard again,
 open ArcGIS Online, select **Content**, then open the `TaskDash` folder. The dashboard is shared
-only with the `TaskDash viewers` group.
+only with the `TaskDash viewers` group. A viewer needs an account in your ArcGIS Online organization
+and a place in that group. See "Give people access" in [CONFIGURE.md](CONFIGURE.md#give-people-access).
 
 The dashboard has three tabs:
 
@@ -39,9 +55,34 @@ It never changes the tiles, so a filter cannot hide a problem from the tiles.
 Each widget has an information icon. It opens a short help text. The text tells you what the widget
 shows and why it matters. For most widgets, it also tells you what to do.
 
-The dashboard shows run times in the time zone of your device. It shows schedules by the server's
-clock. The heartbeat tiles and **Metric change** update while the page is open. The other widgets
-do not. To see newer data in them, reload the page.
+The dashboard shows run times in the time zone of your device. It shows schedules by the clock of
+the computer. While the page is open, the heartbeat tiles update every 5 minutes and **Metric change**
+updates every hour. The other widgets do not update. To see newer data in them, reload the page.
+
+A short **About Overview** panel on the **Overview** tab says what the tiles count. The full
+**About TaskDash** panel is on the **Collector & Changes** tab.
+
+## The first hour and the first day
+
+A new dashboard looks incomplete. Each part fills at its own time, and most gaps are not faults.
+The history of runs depends on one fact: TaskDash reads it from the Windows event log. That log
+starts when it is turned on, so earlier runs are never there. A computer whose log was already on
+has history at the first run. A computer whose log was turned on in the install has none, and the
+history grows as each task runs.
+
+| What you see | When it fills |
+|---|---|
+| Task health, **Tasks tracked**, **Disabled** and the schedule columns | At the first run, within five minutes. |
+| The collector's own row in Task health reads **Running** | Until the second hourly run. The collector is its own task, so at its first run it has no finished run to show. |
+| **Failures (7 days)**, the success-rate tiles and **Failed runs** | From the event log, as far back as the log goes, up to `history.days_back` days. They grow with each run. |
+| A task with a failed status and **0** failures | On the first day. Task Scheduler reports the failure, but the run history does not hold that run yet. |
+| **Recent changes** | Empty at first. The tasks that exist at install are the baseline, and they are never listed as added. The list stays empty until a task changes. |
+| **Duration trend** and the `Duration:` line in Task detail | After five finished runs of the task in 30 days. |
+| **Workflow Metrics** | At the first run, for a task that writes metric lines to its log. **Metric change** needs three earlier values, so a daily task needs three days. |
+
+After the second hourly run, **Collector runs** shows two rows and the collector's own row shows its
+real result. If it still reads **Running** after that, run `& $td status`. Then see "Read the result
+of a run" in [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
 
 ## Part 1: The daily check for the administrator
 
@@ -60,14 +101,17 @@ The collector runs every hour by default.
 | **Down** | More than 180 minutes | The collector missed two runs or more. |
 
 The limits are 1.5 and 3 times `scheduler.collector_interval_minutes`. If the tile shows **Down**
-with the text `no data`, the service has no saved data yet. With more than one host, the tile shows
-the host that saved data longest ago.
+with the text `no data`, the service has no saved data yet. With more than one computer, the tile shows
+the computer that saved data longest ago. It names that computer above the age.
 
-The tile leaves out a host that has made no collector run for `scheduler.heartbeat_ignore_after_days`
-days, 7 by default. So a retired or renamed computer does not show **Down** for ever. A collector that
-runs but fails to publish still counts, because every failed run also leaves a row. If every host has
-been silent that long, the tile shows **Down** with the text `no data`. To remove a computer for good,
-see "Retire a computer" in the configuration guide.
+The tile counts every computer until you retire it. A computer is silent when the service has no
+collector run for it in the last `scheduler.heartbeat_ignore_after_days` days, 7 by default. A collector
+that runs but cannot reach ArcGIS Online is silent too. Its failed runs wait on that computer, and the
+service has no row for them. The tile stays **Late** or **Down** and adds the line `1 computer silent`
+or `2 computers silent` under the state. Run `& $td status` on each computer to see an `Unsent:` line.
+To stop counting a computer that is gone for good, retire it, as "Retire a computer" in the
+configuration guide says. The tile reads the service each time it refreshes, so a retired computer
+leaves the tile at the next page load. You do not rebuild the dashboard.
 
 If the tile shows **Late** or **Down**, every other number on the dashboard is old. Go to step 6
 and find out why the collector stopped.
@@ -110,7 +154,11 @@ If **Tasks tracked (all)** falls and you did not remove a task, open the **Colle
 tab. Look for **Task removed** rows in **Recent changes - newest 50**.
 
 **Lowest 7-day success** shows **OK** at 90% or more, **Low** from 70% up to 90%, and **Poor** below
-70%. The tile ignores a task with only one failure. The **Most failures in 7 days - top 10** chart
+70%. With several computers, each one stamps the lowest rate of all computers on its rows, and the tile
+reads the lowest stamp. The tile leaves out a silent computer, as defined under the heartbeat, because its stamp is old.
+The heartbeat reports that computer instead. A computer that stopped less than
+`scheduler.heartbeat_ignore_after_days` days ago still counts, so the tile can stay low until then. To
+clear it sooner, retire that computer as "Retire a computer" in [CONFIGURE.md](CONFIGURE.md) says. The tile ignores a task with only one failure. The **Most failures in 7 days - top 10** chart
 still shows that task. With no such task, the tile shows `100.0%`. If no task ran in 7 days, the tile
 shows `--`.
 
@@ -156,6 +204,8 @@ A row with no problem can still show text in **Why**:
 - `N log errors` in amber: the newest log of the task holds error lines. The status stays **OK**
   and the tiles do not change, because Windows reported success.
 - `N setting notes`: the task has a risky setting. See step 5.
+- `Muted (alerts off)` or `In maintenance until <end>`: a maintenance window in the config holds the
+  alert e-mails of the task. See step 5.
 - `Running now` or `Disabled in Task Scheduler.`
 
 A long reason is cut at a word. The text `(+2 more)` at the end counts the other reasons. Task
@@ -169,6 +219,7 @@ detail shows all of them.
    these lines:
    - **Last run:** the time, the Windows result text and how long the run took.
    - **Last 7 days:** the runs, the failures and the skipped runs.
+   - **Folder:** the Task Scheduler folder of the task. It tells apart tasks with one name.
    - **Runs as:** the account and how it logs on.
    - **Script:** the program and its arguments.
    - **Latest log:** the age of the newest log, and its number of error and warning lines.
@@ -180,7 +231,7 @@ detail shows all of them.
 4. On the computer that runs the task, open the newest log of the task. The status comes from the
    Windows result, not from the log. The log tells you what the script did.
 
-The `privacy.hide_*` switches are on by default. Then **Runs as:** and **Script:** show `--`, and
+The `privacy.hide_*` switches are on by default. Then **Runs as:**, **Script:** and **Working folder:** show `--`, and
 the log path line is empty. See [CONFIGURE.md](CONFIGURE.md).
 
 A task can fail again and again but look **OK** in the table. The
@@ -225,7 +276,7 @@ wrong, change it in Task Scheduler. If the setting is on purpose, accept the not
      "tasks": {
        "Nightly Export": {
          "acknowledge_config_warnings": ["StartWhenAvailable"],
-         "acknowledge_reason": "Catch-up is off on purpose. A catch-up run would load the server in business hours."
+         "acknowledge_reason": "Catch-up is off on purpose. A catch-up run would load the computer in business hours."
        }
      }
    }
@@ -268,13 +319,14 @@ Local: taskdash_20261017_202547.log: <time> - INFO - TaskDash publish complete.
 Service: last collector run started 2026-10-17 20:25:47 UTC, exit_status success; last success 47 min ago (host 'COLLECTOR-1')
 ```
 
-- The **Local** line gives the newest log file in the `Logs` folder and its last line. A run that
-  ended well has the last line `TaskDash publish complete.`
+- The **Local** line gives the newest log of a scheduled run in the `Logs` folder and its last line.
+  A run that ended well has the last line `TaskDash publish complete.` A dry run writes a
+  `taskdash_manual_<time>.log` file, and `status` skips it.
 - The **Service** line gives the start time of the newest row in the **CollectorRuns** table and
   its `exit_status`. The values are `success` and `failed`. The time is in UTC.
 - The **Service** line also gives the age of the newest successful run.
-- By default, the **Service** line covers only the runs of this install's host. To read the runs of
-  another host, add `--host NAME`. To read every host, add `--host all`.
+- By default, the **Service** line covers only the runs of this install's computer. To read the runs of
+  another computer, add `--host NAME`. To read every computer, add `--host all`.
 - To print only the **Local** line, without a sign-in to ArcGIS, add `--offline`.
 
 The `Logs` folder is in `C:\TaskDash`, unless `logging.log_dir` names another folder.
@@ -285,11 +337,13 @@ The exit code of the command tells a script what to do:
 |---|---|---|
 | `0` | The newest run succeeded, and its age is less than twice the collector interval. | Nothing. |
 | `1` | The newest run failed. | Read the newest log. See [TROUBLESHOOTING.md](TROUBLESHOOTING.md). |
-| `2` | There is no run for the host, or the newest success is too old. | Check that the collector task runs. |
+| `2` | There is no run for the computer, or the newest success is too old. | Check that the collector task runs. |
 | `3` | The command could not sign in or read the service. | Read the message. See [TROUBLESHOOTING.md](TROUBLESHOOTING.md). |
 
 The collector interval is `scheduler.collector_interval_minutes`, 60 minutes by default. So the
-default limit is 120 minutes. With `--offline`, the exit code is `0` unless the config cannot be read.
+default limit is 120 minutes. With `--offline`, the code comes from the newest scheduled run's log.
+It is `1` when the log holds an `ERROR` line, and `2` when there is no such log or it is older than
+the limit.
 
 **Remove old backups and logs.** Run `& $td status --prune`. The command lists the old backup files
 and old logs that TaskDash wrote. It removes nothing. To remove the listed files, run
@@ -297,7 +351,8 @@ and old logs that TaskDash wrote. It removes nothing. To remove the listed files
 See [CONFIGURE.md](CONFIGURE.md) for the file names.
 
 **In the dashboard,** open the **Collector & Changes** tab. The **Collector runs** table lists the
-newest 48 runs of the collector task.
+newest 48 runs of the collector task. It covers every computer, not one task. To read the runs of one
+computer, pick it in the **Host** filter.
 
 | Column | Meaning |
 |---|---|
@@ -307,25 +362,28 @@ newest 48 runs of the collector task.
 | **Events read** | The Task Scheduler events read since the last run, also for tasks that are not listed. |
 | **Runs saved** | The task runs added or updated. |
 | **Task rows sent** | The task rows sent. TaskDash sends every row each time, changed or not. |
-| **Metric rows sent** | The metric rows sent, counted the same way. |
-| **Email sent** | **Yes** when the run sent an e-mail. |
+| **Metric rows sent** | The metric rows from log files that changed since the last run. |
+| **E-mail sent** | **Yes** when the run sent an e-mail. |
 | **Host** | The computer that ran the collector. |
 | **Error** | The first 300 characters of the error of a failed run. |
 
 Use the table as follows:
 
-- For a **Failed** row, read **Error**. The full error is in the log of that run, on that host. The
+- For a **Failed** row, read **Error**. The full error is in the log of that run, on that computer. The
   log name is `taskdash_YYYYMMDD_HHMMSS.log`, with the start time of the run. Then use
   [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
 - A gap in **Started** means the collector did not run in that time. For example, Task Scheduler
   stopped the run, or the computer was off. A run that Task Scheduler stopped leaves no row.
-- A run that could not reach ArcGIS Online appears here after the next run that can.
-- A run can send an e-mail and not save data. Compare **Email sent** with **Runs saved**.
+- A run that could not reach ArcGIS Online appears here after the next run that can. See "ArcGIS Online
+  was unreachable for a while" in [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
+- A run can send an e-mail and not save data. Compare **E-mail sent** with **Runs saved**.
 
-**Email sent** is **Yes** when a problem started, changed or cleared. It is also **Yes** when a
-problem is still open after `alerting.realert_hours` (24 by default). It is also **Yes** for the
-daily check at the hour in `alerting.heartbeat_hour`. TaskDash sends alert e-mails only when
-`alerting.enabled` is `true` and `alerting.to` has an address. See [CONFIGURE.md](CONFIGURE.md).
+**E-mail sent** is **Yes** when a problem started, changed or cleared. It is also **Yes** when a
+problem is still open after `alerting.realert_hours` (24 by default, `0` turns repeats off). It is
+also **Yes** for the daily check, sent by the first run at or after `alerting.heartbeat_hour`.
+TaskDash sends alert e-mails only when `alerting.enabled` is `true` and `alerting.to` has an
+address. If an alert is due and TaskDash cannot send it, the run fails and its row shows **Failed**.
+See [CONFIGURE.md](CONFIGURE.md).
 
 ## Part 2: Reliability over time for the manager
 
@@ -363,8 +421,10 @@ copied records. A task can end without an error and still process much less data
 
 - **Metric change** compares the latest value with the usual value for each task and metric. The
   usual value is the median of up to 30 earlier values. A metric needs three earlier values to have
-  one. Flagged rows are at the top.
+  one. The **Task** column shows the Task Scheduler folder of the task, and the **Host** column
+  shows the computer. Together they tell apart tasks with one name. Flagged rows are at the top.
 - **Metric range** gives the lowest, average and highest value, and how many times it was logged.
+  It shows each task, by folder, on each computer in its own row.
 - **Metric trend** draws the line of one metric over time. To draw it, select a row in
   **Metric change**. A count that falls slowly over weeks passes each daily check, but the line
   shows it.
@@ -377,7 +437,7 @@ copied records. A task can end without an error and still process much less data
 |---|---|
 | **Far below usual** | The latest value is 50% or more below a usual value of 10 or more. It is also lower than each of the last 30 earlier values. |
 | **Far over usual** | A problem count is 50% or more over a usual value of 10 or more. It is also higher than each of the last 30 earlier values. |
-| **Not in last run** | A metric that the task logs in at least 80% of its runs is missing from its newest log. |
+| **Not in last run** | A metric that the task logs in at least 80% of its recent runs is missing from its newest log. A metric that the task logs only on some runs, such as the busy ones, has no flag. |
 
 A problem count is a count of failures, unmatched or blank items, or stale registrations. Gaps or
 chains over a limit are problem counts too. A drop in a problem count is good news, so it gets no flag.
@@ -389,6 +449,11 @@ The metrics keep 90 days of values by default. See `retention.metrics_days`.
 **Recent changes - newest 50**, on the **Collector & Changes** tab, records each change to a task.
 It records a task that was added, removed or changed. It records a task that started failing,
 became overdue or recovered. It also records a setting note that appeared or went away.
+
+The time of a row is when the collector saw the change, not when it happened. The collector compares
+the task now with the task at its last publish. After an outage, a change that began and ended while
+the collector could not publish leaves no row, and a change that ended in that time shows the time of
+the first run that published. The failed run itself stays in **Failed runs**.
 
 A **Task changed** row shows what changed. The `privacy.hide_command_lines`,
 `privacy.hide_accounts` and `privacy.hide_paths` switches hide those parts of the row. The switches

@@ -64,9 +64,9 @@ def test_absent_key_shows_the_code_default_not_the_example_placeholder(tmp_path,
 
 def test_every_known_key_has_a_default_except_the_secret_named_ones():
     known = set(common.config_diff({})["absent"])
-    assert known - set(pf.CONFIG_DEFAULTS) == {"arcgis.password", "arcgis.password_env",
-                                               "arcgis.allow_plaintext_password"}
-    assert set(pf.CONFIG_DEFAULTS) <= known
+    assert known - set(common.CONFIG_DEFAULTS) == {"arcgis.password", "arcgis.password_env",
+                                                   "arcgis.allow_plaintext_password"}
+    assert set(common.CONFIG_DEFAULTS) <= known
 
 
 def test_each_default_matches_the_default_column_of_configure_md():
@@ -74,8 +74,8 @@ def test_each_default_matches_the_default_column_of_configure_md():
     guide = (Path(__file__).parent / "docs" / "CONFIGURE.md").read_text(encoding="utf-8")
     cells = {m.group(1): m.group(2).replace("`", "")
              for m in re.finditer(r"^\| `([\w.]+)` \| [^|]+ \| ([^|]+) \|", guide, re.M)}
-    for key, default in pf.CONFIG_DEFAULTS.items():
-        assert cells[key] == str(default), key
+    for key, default in common.CONFIG_DEFAULTS.items():
+        assert cells[key] == pf.default_wording(default), key
 
 
 def test_renamed_key_is_reported_with_the_new_name(tmp_path, capsys, monkeypatch):

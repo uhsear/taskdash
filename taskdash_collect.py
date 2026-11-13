@@ -8,6 +8,8 @@ this half can be tested off-host.
 from __future__ import annotations
 
 import ctypes
+import difflib
+import math
 import ntpath
 import os
 import re
@@ -18,6 +20,9 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 from taskdash_common import (
+    PowerShellTimeout,
+    config_default,
+    command_text,
     emit,
     normalize_text,
     parse_iso_datetime,
@@ -42,13 +47,14 @@ OPERATIONAL_LOG_NAME = "Microsoft-Windows-TaskScheduler/Operational"
 # 330 stopped by user request, 332 user not logged on.
 HISTORY_EVENT_IDS = (100, 101, 102, 103, 111, 153, 200, 201, 202, 203, 322, 329, 330, 332)
 
-DEFAULT_OVERDUE_GRACE_MINUTES = 15.0
+DEFAULT_OVERDUE_GRACE_MINUTES = config_default("scheduler.overdue_grace_minutes")
 
 # Substring, not regex -- the Windows path fragment that marks "this task runs ArcGIS Pro's
-# python". With a Single Use licence that interpreter is licensed only in the Interactive logon
-# session. Configurable via scheduler.interactive_required_pattern; false or "" there turns the
-# check off for a Named User or Concurrent Use install (taskdash_publish.interactive_pattern).
-DEFAULT_INTERACTIVE_REQUIRED_PATTERN = "\\ArcGIS\\Pro\\bin\\Python"
+# python". With a Single Use or a Named User licence that interpreter is licensed only in the
+# Interactive logon session. Configurable via scheduler.interactive_required_pattern; false there
+# turns the check off for an install whose licence also works in a background session
+# (taskdash_publish.interactive_pattern).
+DEFAULT_INTERACTIVE_REQUIRED_PATTERN = config_default("scheduler.interactive_required_pattern")
 
 # (run_status, is_error, result_text) for events that settle a run's outcome outright --
 # these outrank whatever the 201 result code says because several of them (101/153/322/332)
@@ -234,21 +240,17 @@ $rows = foreach ($task in $tasks) {
             $primaryArguments = [string]$actionList[0].Arguments
             $primaryWorkingDirectory = [string]$actionList[0].WorkingDirectory
         }
-        $actionIndex = 0
         $actionDetails = @($actionList | ForEach-Object {
             $parts = @()
             if ($_.Execute) { $parts += $_.Execute }
             if ($_.Arguments) { $parts += $_.Arguments }
             if ($_.WorkingDirectory) { $parts += "(wd=$($_.WorkingDirectory))" }
-            $detail = [ordered]@{
-                index = [int]$actionIndex
+            [ordered]@{
                 execute = [string]$_.Execute
                 arguments = [string]$_.Arguments
                 working_directory = [string]$_.WorkingDirectory
                 display = [string]($parts -join " ")
             }
-            $actionIndex += 1
-            $detail
         })
         $actions = ($actionDetails | ForEach-Object { $_.display } | Where-Object { $_ }) -join " | "
     } catch {
@@ -406,7 +408,7 @@ function Get-XmlDataMap {
 # ConstrainedLanguage refuses $event.ToXml() (a method on a type outside the allowed list), so
 # there the fields come from $event.Properties by position. Each row lists the field names of that
 # event's template in order, as printed by ToXml() on real events; an event with no row (or more
-# values than names) keeps only the fields it has names for. 330 has no sample: TaskName only.
+# values than names) keeps only the fields it has names for. 330 is from a manual End captured 2026-11-13.
 $FullLanguage = $ExecutionContext.SessionState.LanguageMode -eq 'FullLanguage'
 $PropertyNames = @{
     100 = @('TaskName', 'UserContext', 'InstanceId')
@@ -421,7 +423,7 @@ $PropertyNames = @{
     203 = @('TaskName', 'TaskInstanceId', 'ActionName', 'ResultCode')
     322 = @('TaskName', 'TaskInstanceId')
     329 = @('TaskName', 'TaskInstanceId')
-    330 = @('TaskName')
+    330 = @('TaskName', 'TaskInstanceId', 'UserContext')
     332 = @('TaskName', 'UserName')
 }
 
@@ -557,6 +559,11 @@ class EventLogDisabled(SystemExit):
     of the run instead of discarding the task inventory and the alerts."""
 
 
+class EventLogUnreadable(SystemExit):
+    """Like EventLogDisabled, for a log that exists but cannot be read: access denied, a missing
+    channel, or a history query that failed. The run goes on without events and exits 1 at the end."""
+
+
 def check_event_log_health(
     log_name: str = OPERATIONAL_LOG_NAME, timeout_seconds: int = 180
 ) -> Dict[str, Any]:
@@ -567,15 +574,17 @@ def check_event_log_health(
     rows = run_powershell_json(script, timeout_seconds)
     info = rows[0] if rows else {}
     if not info.get("exists", False):
-        raise SystemExit(
+        raise EventLogUnreadable(
             f"Cannot read event log '{log_name}': {info.get('error_message') or 'not found'}. "
             f"Run this collector elevated, or confirm the channel exists on this host.\n"
             + see_troubleshooting("The Task Scheduler log cannot be read")
         )
     if not info.get("is_enabled", False):
         raise EventLogDisabled(
-            f"Event log '{log_name}' is disabled, so run history cannot be collected. Enable "
-            f"it with: wevtutil sl \"{log_name}\" /e:true (run elevated), then retry."
+            f"Event log '{log_name}' is disabled, so run history cannot be collected. Enable it "
+            f"with {command_text('preflight', '--enable-event-log', '--apply')} (run elevated), which also "
+            f"sets the size the log needs, then retry.\n"
+            + see_troubleshooting("The Task Scheduler log is turned off")
         )
     return info
 
@@ -607,7 +616,14 @@ def collect_run_events(days_back: int, max_events: int, timeout_seconds: int = 1
     )
     global oldest_record_id
     oldest_record_id = None
-    rows = run_powershell_json(script, timeout_seconds)
+    try:
+        rows = run_powershell_json(script, timeout_seconds)
+    except PowerShellTimeout:
+        raise
+    except SystemExit as exc:
+        # The query failed (access denied, a bad filter). Only this read degrades; the task
+        # listing, which shares run_powershell_json, still stops the run.
+        raise EventLogUnreadable(str(exc.code)) from exc
     for row in rows:
         if "oldest_record_id" in row:
             oldest_record_id = safe_int(row["oldest_record_id"])
@@ -995,7 +1011,7 @@ def should_include_task(row: Dict[str, Any], scheduler_config: Dict[str, Any]) -
     if scheduler_config.get("exclude_microsoft_tasks", True) and (
             folder == "\\microsoft" or folder.startswith("\\microsoft\\")):
         return False
-    if not scheduler_config.get("include_disabled", True) and not row.get("enabled"):
+    if not scheduler_config.get("include_disabled", config_default("scheduler.include_disabled")) and not row.get("enabled"):
         return False
 
     for pattern_key, value in (
@@ -1034,17 +1050,38 @@ def should_include_task(row: Dict[str, Any], scheduler_config: Dict[str, Any]) -
 # config_warnings ("; "-joined, capped) and logon_type, but left out of health_status/
 # needs_attention so an already-passing task's health does not flip on a definition nit.
 
+def row_actions(row: Dict[str, Any]) -> List[Tuple[Any, Any, Any]]:
+    """TD-042: every action of a task as (executable, arguments, working directory). A row
+    without action_details (an older capture) has its primary_* fields as its one action."""
+    details = [d for d in row.get("action_details") or [] if isinstance(d, dict)]
+    if not details:
+        return [(row.get("primary_executable"), row.get("primary_arguments"),
+                 row.get("primary_working_directory"))]
+    return [(d.get("execute"), d.get("arguments"), d.get("working_directory")) for d in details]
+
+
+def _against_start_in(path: str, working_dir: str) -> Optional[str]:
+    """TD-041: path as Task Scheduler resolves it -- itself when it has a drive or a leading
+    separator, else under the action's Start-in folder. None when it is relative and the action
+    has no Start-in folder: the base is then unknown, and TaskDash's own folder is never it."""
+    if ntpath.splitdrive(path)[0] or path.startswith(("\\", "/")):
+        return path
+    return ntpath.join(working_dir, path) if working_dir else None
+
+
 def check_broken_action_targets(
     row: Dict[str, Any], exists: Callable[[str], bool] = os.path.exists, hide_paths: bool = False
 ) -> List[str]:
     """The interpreter/executable (when it is a path, not a bare PATH-resolved name), the
-    script it runs, and its working directory must exist on this host. Only meaningful when
-    running on the task's own host, which the collector always does -- a pure function over
-    (row, exists) so tests can inject a fake filesystem instead of hitting the real one.
+    script it runs, and its working directory must exist on this host, for every action of the
+    task. Only meaningful when running on the task's own host, which the collector always does --
+    a pure function over (row, exists) so tests can inject a fake filesystem instead of hitting
+    the real one.
 
     Paths are expanded (%SystemRoot%, %USERPROFILE%, etc.) before the exists() check -- Task
     Scheduler actions and working directories commonly use them, and the literal "%SystemRoot%"
     string is never a real path, which made every such action a false "not found" warning.
+    A relative path is checked under the action's working directory, as Task Scheduler runs it.
 
     hide_paths (privacy.hide_paths): the note says "(path hidden)" instead of the path, which can
     name a user profile or a share.
@@ -1053,20 +1090,25 @@ def check_broken_action_targets(
         return "(path hidden)" if hide_paths else path
 
     warnings: List[str] = []
-    executable = os.path.expandvars(strip_wrapping_quotes(row.get("primary_executable")))
-    if executable and ntpath.dirname(executable) and not exists(executable):
-        warnings.append(f"interpreter/executable not found: {shown(executable)}")
+    for raw_executable, arguments, raw_working_dir in row_actions(row):
+        working_dir = os.path.expandvars(strip_wrapping_quotes(raw_working_dir))
+        executable = os.path.expandvars(strip_wrapping_quotes(raw_executable))
+        if executable and ntpath.dirname(executable):
+            resolved = _against_start_in(executable, working_dir)
+            if resolved is not None and not exists(resolved):
+                warnings.append(f"interpreter/executable not found: {shown(resolved)}")
 
-    script_path, _ = classify_command_target(row.get("primary_executable"), row.get("primary_arguments"))
-    script_path = os.path.expandvars(script_path) if script_path else script_path
-    if script_path and script_path != executable and ntpath.dirname(script_path) and not exists(script_path):
-        warnings.append(f"script not found: {shown(script_path)}")
+        script_path, _ = classify_command_target(raw_executable, arguments)
+        script_path = os.path.expandvars(script_path) if script_path else script_path
+        if script_path and script_path != executable:
+            resolved = _against_start_in(script_path, working_dir)
+            if resolved is not None and not exists(resolved):
+                warnings.append(f"script not found: {shown(resolved)}")
 
-    working_dir = os.path.expandvars(strip_wrapping_quotes(row.get("primary_working_directory")))
-    if working_dir and not exists(working_dir):
-        warnings.append(f"working directory not found: {shown(working_dir)}")
+        if working_dir and not exists(working_dir):
+            warnings.append(f"working directory not found: {shown(working_dir)}")
 
-    return warnings
+    return list(dict.fromkeys(warnings))
 
 
 ARCPY_IMPORT_RE = re.compile(r"^\s*(?:import|from)\s+arcpy\b", re.MULTILINE)
@@ -1106,8 +1148,8 @@ def check_logon_type_drift(
     if current.lower() == "interactive" or imports_arcpy is False:
         return []
     return [
-        f"Runs ArcGIS Pro Python with LogonType '{current or 'unknown'}'. With a Single Use licence, "
-        "arcpy is licensed only in the Interactive session. Fix: Export-ScheduledTask, set LogonType "
+        f"Runs ArcGIS Pro Python with LogonType '{current or 'unknown'}'. With a Single Use or a "
+        "Named User licence, arcpy is licensed only in the Interactive session. Fix: Export-ScheduledTask, set LogonType "
         "to InteractiveToken, then Register-ScheduledTask -Xml (never Set-ScheduledTask -User -Password)."
     ]
 
@@ -1458,17 +1500,21 @@ def build_config_warnings(
     exists: Callable[[str], bool] = os.path.exists,
     acknowledged: Sequence[str] = (),
     hide_paths: bool = False,
+    matched_fragments: Optional[Set[str]] = None,
 ) -> str:
     """acknowledged: workflow_descriptions.json "acknowledge_config_warnings" text fragments. A
     warning containing one (case-insensitive) is dropped -- for a setting the owner keeps on
     purpose, e.g. StartWhenAvailable off on Server Restart Window, where a catch-up run would reboot
-    servers in business hours. Without it the note can never be cleared."""
+    servers in business hours. Without it the note can never be cleared.
+    matched_fragments, when given, receives each fragment (lower case) that dropped a note."""
     warnings = [
         *check_broken_action_targets(raw, exists, hide_paths),
-        *check_logon_type_drift(
-            raw.get("primary_executable"), raw.get("logon_type"), interactive_required_pattern,
-            script_imports_arcpy(classify_command_target(
-                raw.get("primary_executable"), raw.get("primary_arguments"))[0])),
+        *(note for executable, arguments, working_dir in row_actions(raw)
+          for note in check_logon_type_drift(
+              executable, raw.get("logon_type"), interactive_required_pattern,
+              script_imports_arcpy(_against_start_in(
+                  os.path.expandvars(classify_command_target(executable, arguments)[0]),
+                  os.path.expandvars(strip_wrapping_quotes(working_dir))) or ""))),
         *check_silent_skip_settings(
             raw.get("multiple_instances_policy"), raw.get("execution_time_limit"),
             raw.get("start_when_available"), schedule_bucket,
@@ -1477,11 +1523,33 @@ def build_config_warnings(
         *check_dst_offset_trigger(raw.get("trigger_details")),
     ]
     fragments = [f.lower() for f in (normalize_text(a) for a in acknowledged) if f]
-    kept = [w for w in warnings if not any(f in w.lower() for f in fragments)]
+    if matched_fragments is not None:
+        matched_fragments.update(f for f in fragments if any(f in w.lower() for w in warnings))
+    # Two actions can raise the same note; the task shows it once.
+    kept = [w for w in dict.fromkeys(warnings) if not any(f in w.lower() for f in fragments)]
     return "; ".join(w.rstrip(".") for w in kept)[:1000]  # no ".;" between two notes
 
 
 # --------------------------------------------------------------------------- inventory rows
+
+# The settings_detail field length (taskdash_publish TABLE_SPECS). The reason shares it with the settings text.
+SETTINGS_DETAIL_LENGTH = 255
+
+
+def _settings_detail(settings: str, reason: str, task: str) -> str:
+    """The settings text with " | Accepted: <reason>" appended. A reason that does not fit ends with
+    an ellipsis and a WARNING, not a silent cut mid-word."""
+    if not reason:
+        return settings[:SETTINGS_DETAIL_LENGTH]
+    text = f"{settings} | Accepted: {reason}"
+    if len(text) <= SETTINGS_DETAIL_LENGTH:
+        return text
+    _description_warning(task, "acknowledge_reason",
+                         f"is too long: the settings text holds {SETTINGS_DETAIL_LENGTH} characters, "
+                         f"so TaskDash shows the reason cut after {SETTINGS_DETAIL_LENGTH - len(settings) - 13} "
+                         "characters. Shorten it", ignored=False)
+    return text[:SETTINGS_DETAIL_LENGTH - 1].rstrip() + "\u2026"
+
 
 def build_inventory_rows(
     raw_tasks: List[Dict[str, Any]],
@@ -1550,11 +1618,19 @@ def build_inventory_rows(
 
         # 3.3 config checks: definition-level risk, always Warning-severity and reported
         # separately from health_status/needs_attention -- see the block comment above.
+        matched_fragments: Set[str] = set()
         config_warnings = build_config_warnings(
             raw, schedule_bucket, interactive_required_pattern=interactive_required_pattern,
             exists=exists, acknowledged=description_entry["acknowledge_config_warnings"],
-            hide_paths=hide_paths,
+            hide_paths=hide_paths, matched_fragments=matched_fragments,
         )
+        for fragment in description_entry["acknowledge_config_warnings"]:
+            if fragment.lower() not in matched_fragments:
+                _description_warning(task_name, "acknowledge_config_warnings",
+                                     f"fragment {fragment!r} matches no setting note of this task. It may be "
+                                     "misspelled, or you fixed the setting. Remove it", ignored=False)
+        # "Accepted" shows only when a note was accepted: a stale or misspelled fragment accepts none.
+        accepted_reason = description_entry["acknowledge_reason"] if matched_fragments else ""
 
         rows.append({
             "host_name": host_name,
@@ -1568,11 +1644,7 @@ def build_inventory_rows(
             "schedule_bucket": schedule_bucket,
             "trigger_types": normalize_text(raw.get("trigger_types")),
             "schedule_detail": describe_triggers(raw.get("trigger_details"))[:1000],
-            "settings_detail": (
-                describe_task_settings(raw)
-                + (" | Accepted: " + description_entry["acknowledge_reason"]
-                   if description_entry["acknowledge_reason"] else "")
-            )[:255],
+            "settings_detail": _settings_detail(describe_task_settings(raw), accepted_reason, task_name),
             "next_run_time": raw.get("next_run_time"),
             "next_run_in_hours": next_run_in_hours,
             "run_as_user": normalize_text(raw.get("run_as_user")),
@@ -1603,24 +1675,73 @@ def build_inventory_rows(
     return rows
 
 
-def parse_description_entry(value: Any) -> Dict[str, Any]:
+# A grace window beyond a year overflows the date arithmetic that uses it, and means "never overdue".
+MAX_OVERDUE_GRACE_MINUTES = 525600
+
+
+DESCRIPTION_ENTRY_KEYS = ("description", "overdue_grace_minutes", "acknowledge_config_warnings",
+                          "acknowledge_reason")
+
+
+def _description_warning(task: str, field: str, problem: str, sink: Optional[List[str]] = None,
+                         ignored: bool = True) -> None:
+    """One WARNING about workflow_descriptions.json: logged, or appended to `sink` (the preflight list)."""
+    where = f" for task '{task}'" if task else ""
+    text = f"WARNING: workflow_descriptions.json{where}: {field} {problem}" + ("; TaskDash ignores it." if ignored else ".")
+    emit(text) if sink is None else sink.append(text)
+
+
+def _did_you_mean(key: str, known: Sequence[str]) -> str:
+    close = difflib.get_close_matches(str(key).lower(), [k.lower() for k in known], n=1)
+    return f" (did you mean {close[0]!r}?)" if close else ""
+
+
+def _checked_grace(raw: Any, task: str, sink: Optional[List[str]] = None) -> Optional[float]:
+    """The per-task grace in minutes, or None (with a WARNING) when it is not a finite number in range."""
+    if raw is None or raw == "":
+        return None
+    number = None if isinstance(raw, bool) else safe_float(raw)
+    if number is None or not math.isfinite(number) or not 0 <= number <= MAX_OVERDUE_GRACE_MINUTES:
+        _description_warning(task, "overdue_grace_minutes",
+                             f"must be a number of minutes from 0 to {MAX_OVERDUE_GRACE_MINUTES}, "
+                             f"not {str(raw)[:40]!r}", sink)
+        return None
+    return number
+
+
+def _checked_fragments(raw: Any, task: str, sink: Optional[List[str]] = None) -> List[str]:
+    """acknowledge_config_warnings as a list of text fragments: one string or a list of strings."""
+    if raw is None or raw == "" or raw == []:
+        return []
+    items = [raw] if isinstance(raw, str) else raw
+    if not isinstance(items, list) or not all(isinstance(item, str) for item in items):
+        _description_warning(task, "acknowledge_config_warnings", "must be a text or a list of texts", sink)
+        return []
+    return [text for text in (normalize_text(item) for item in items) if text]
+
+
+def parse_description_entry(value: Any, task: str = "", sink: Optional[List[str]] = None) -> Dict[str, Any]:
     """A workflow_descriptions.json task value is either a plain string (the original format,
     kept working) or {"description": str, "overdue_grace_minutes": N} to also override this
     one task's overdue grace window, "acknowledge_config_warnings": [text, ...] to drop
     config notes the owner accepts (see build_config_warnings), and "acknowledge_reason" to say
     why -- shown on the card next to the acknowledged setting (build_inventory_rows), not just
     kept for the file's own reader (overview-catchup-off-acknowledgement-not-shown).
+
+    A field of the wrong shape gets a WARNING naming `task` and is left out; the rest of the entry
+    and of the file still apply. An entry that is neither a string nor an object is left out whole.
+    `sink` collects the warnings instead of logging them (the preflight check uses it).
     """
     if isinstance(value, dict):
-        acknowledged = value.get("acknowledge_config_warnings") or []
-        if isinstance(acknowledged, str):
-            acknowledged = [acknowledged]
         return {
             "description": normalize_text(value.get("description")),
-            "overdue_grace_minutes": safe_float(value.get("overdue_grace_minutes")),
-            "acknowledge_config_warnings": [normalize_text(a) for a in acknowledged if normalize_text(a)],
+            "overdue_grace_minutes": _checked_grace(value.get("overdue_grace_minutes"), task, sink),
+            "acknowledge_config_warnings": _checked_fragments(value.get("acknowledge_config_warnings"), task, sink),
             "acknowledge_reason": normalize_text(value.get("acknowledge_reason")),
         }
+    if value is not None and not isinstance(value, str):
+        _description_warning(task, "the entry", "must be a text or an object", sink)
+        value = ""
     return {"description": normalize_text(value), "overdue_grace_minutes": None,
             "acknowledge_config_warnings": [], "acknowledge_reason": ""}
 
@@ -1643,8 +1764,14 @@ def lookup_description(descriptions: Dict[str, Any], task_name: str, target_name
     return lookup_description_entry(descriptions, task_name, target_name)["description"]
 
 
-def load_descriptions(path_value: Optional[Path] = None) -> Dict[str, Dict[str, Any]]:
+def load_descriptions(path_value: Optional[Path] = None,
+                      warnings: Optional[List[str]] = None) -> Dict[str, Dict[str, Any]]:
+    """The parsed workflow_descriptions.json, keyed by lower-case task key. A problem in the file gets a
+    WARNING: logged, or appended to `warnings` when the caller passes a list (the preflight check)."""
     import json
+
+    def note(text: str) -> None:
+        emit(text) if warnings is None else warnings.append(text)
 
     source = path_value or (runtime_dir() / "workflow_descriptions.json")
     if not source.exists():
@@ -1653,20 +1780,70 @@ def load_descriptions(path_value: Optional[Path] = None) -> Dict[str, Dict[str, 
         # utf-8-sig: Notepad and PowerShell 5 save UTF-8 with a BOM, which plain utf-8 rejects.
         payload = json.loads(source.read_text(encoding="utf-8-sig"))
     except (OSError, ValueError) as exc:
-        emit(f"WARNING: could not read descriptions from {source}: {exc}")
+        note(f"WARNING: could not read descriptions from {source}: {exc}")
         return {}
 
-    raw_map = payload.get("tasks", {}) if isinstance(payload, dict) else {}
+    if not isinstance(payload, dict):
+        note('WARNING: workflow_descriptions.json: the file must be an object with a "tasks" object, '
+             f"not a {type(payload).__name__}; TaskDash uses no descriptions for this run.")
+        return {}
+    stray = [k for k in payload if k != "tasks" and not str(k).startswith("_")]
+    if "tasks" not in payload and stray:
+        typo = next((f"key {str(k)[:60]!r} is close to 'tasks'. " for k in stray if _did_you_mean(k, ("tasks",))), "")
+        note(f'WARNING: workflow_descriptions.json: no "tasks" object. {typo}Put the task entries inside '
+             '{"tasks": {...}}; TaskDash uses no descriptions for this run.')
+    else:
+        for key in stray:
+            note(f"WARNING: workflow_descriptions.json: key {str(key)[:60]!r} is not known"
+                 f"{_did_you_mean(key, ('tasks',))}; TaskDash ignores it.")
+    raw_map = payload.get("tasks", {})
+    if not isinstance(raw_map, dict):
+        note(f'WARNING: workflow_descriptions.json: "tasks" must be an object with one key per task, '
+             f"not a {type(raw_map).__name__}; TaskDash uses no descriptions for this run.")
+        return {}
     result: Dict[str, Dict[str, Any]] = {}
     for key, value in raw_map.items():
         clean_key = normalize_text(key).lower()
         if not clean_key or str(key).startswith("_"):
             continue
-        entry = parse_description_entry(value)
+        if isinstance(value, dict):
+            for field_name in value:
+                if field_name not in DESCRIPTION_ENTRY_KEYS and not str(field_name).startswith("_"):
+                    _description_warning(clean_key, f"key {str(field_name)[:60]!r}",
+                                         f"is not a known key{_did_you_mean(field_name, DESCRIPTION_ENTRY_KEYS)}",
+                                         warnings)
+        entry = parse_description_entry(value, clean_key, warnings)
         if (entry["description"] or entry["overdue_grace_minutes"] is not None
                 or entry["acknowledge_config_warnings"] or entry["acknowledge_reason"]):
             result[clean_key] = entry
     return result
+
+
+def description_names(raw: Dict[str, Any]) -> Tuple[str, str]:
+    """The two names a workflow_descriptions.json key can use for a task: its name, and the file name of its script."""
+    target_path, _ = classify_command_target(raw.get("primary_executable"), raw.get("primary_arguments"))
+    return normalize_text(raw.get("task_name")), ntpath.basename(target_path) if target_path else ""
+
+
+def description_key_warnings(descriptions: Dict[str, Any], raw_tasks: Sequence[Dict[str, Any]]) -> List[str]:
+    """One WARNING per workflow_descriptions.json key that names no task. A key names a task by its name
+    or by the file name of its script (the lookup build_inventory_rows makes); a renamed task silently
+    loses its description, grace time and accepted notes."""
+    names: Dict[str, str] = {}
+    for raw in raw_tasks:
+        for name in description_names(raw):
+            if name:
+                names.setdefault(name.lower(), name)
+    messages = []
+    for key in descriptions:
+        if str(key).lower() in names:
+            continue
+        close = difflib.get_close_matches(str(key).lower(), list(names), n=1)
+        hint = f" Did you mean {names[close[0]]!r}?" if close else ""
+        messages.append(f"WARNING: workflow_descriptions.json key {str(key)[:60]!r} matches no monitored task.{hint} "
+                        "After a task rename, change the key to the new name. Until then the description, grace "
+                        "time and accepted notes of that key do not apply.")
+    return messages
 
 
 # --------------------------------------------------------------------------- run rows
@@ -1720,6 +1897,10 @@ def resolve_run_outcome(
     """
     for event_id in OUTCOME_EVENT_PRIORITY:
         if event_id in outcome_event_ids:
+            # A bare 111 followed by a 201 for the same instance is not a kill: the action went on
+            # and reported its own code (seen on a task server, 3 runs with code 0, 2026-11-13).
+            if event_id == 111 and result_code is not None:
+                break
             status, is_error, description = OUTCOME_EVENT_STATUS[event_id]
             return status, is_error, description
     run_status = get_run_status(end_time_utc, result_code)
@@ -1810,7 +1991,6 @@ def build_run_rows(
             "task_name": snapshot.get("task_name"),
             "task_path": snapshot.get("task_path"),
             "user_context": "",
-            "computer_name": normalize_text(raw.get("computer_name")) or host_name,
             "start_time_utc": None,
             "end_time_utc": None,
             "first_event_time_utc": None,

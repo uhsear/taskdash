@@ -182,7 +182,7 @@ def test_install_guide_opens_with_a_two_command_quick_install():
     # The script and SHA256SUMS.txt come from the release page, so the section must say so.
     flat = " ".join(section.split())
     assert "Install-TaskDash.ps1" in flat and "SHA256SUMS.txt" in flat and "release page" in flat
-    assert "`Install-TaskDash.ps1`, the wheel, and `SHA256SUMS.txt`" in flat
+    assert "`Install-TaskDash.ps1`, the wheel, `requirements.lock`, and `SHA256SUMS.txt`" in flat
 
 
 def test_nothing_in_an_existing_folder_runs_before_it_is_trusted():
@@ -209,8 +209,49 @@ def test_the_installed_wheel_is_the_locked_copy_that_was_hashed():
     body = _function("Install-Venv")
     copy = body.index("Copy-Item -LiteralPath $WheelPath -Destination $wheelCopy")
     assert body.index("New-LockedFolder") < copy < body.index("Confirm-WheelHash $WheelPath $wheelCopy")
-    assert body.index("Confirm-WheelHash $WheelPath $wheelCopy") < body.index('pip install "${wheelCopy}[smtp]"')
-    assert "${WheelPath}[smtp]" not in body
+    assert body.index("Confirm-WheelHash $WheelPath $wheelCopy") < body.index("pip install --no-deps $wheelCopy")
+    assert "$WheelPath}" not in body and "install $WheelPath" not in body
+
+
+def test_the_locked_packages_install_first_from_the_hashed_copy_of_the_lock():
+    body = _function("Install-Venv")
+    assert body.index("Confirm-LockHash $LockPath $lockCopy") < body.index("pip install --require-hashes -r $lockCopy")
+    assert body.index("pip install --require-hashes -r $lockCopy") < body.index("pip install --no-deps $wheelCopy")
+    # Step-Venv stops on a missing or wrong lock in check mode too, before the Apply gate.
+    step = _function("Step-Venv")
+    assert step.index("Confirm-LockHash $lockPath") < step.index("if (-not $Apply)") < step.index("Install-Venv $wheelPath")
+
+
+@needs_powershell
+def test_the_wheel_and_the_lock_need_sha256sums_and_a_matching_value(tmp_path):
+    wheel = tmp_path / "taskdash-1.3.0-py3-none-any.whl"
+    wheel.write_bytes(b"wheel")
+    lock = tmp_path / "requirements.lock"
+    lock.write_bytes(b"lock")
+    sums = tmp_path / "SHA256SUMS.txt"
+    head = ("function Report([string]$Step, [string]$Text) { Write-Host \"$Step $Text\" }\n"
+            "function Stop-Install([string]$Message) { Write-Host \"STOP: $Message\"; exit 3 }\n" +
+            _function("Get-ExpectedHash") + _function("Get-ListedHash") + _function("Confirm-WheelHash") +
+            _function("Confirm-LockHash"))
+    # No sums file: both stop instead of skipping the check.
+    result = _ps(tmp_path, head + f"Confirm-WheelHash '{wheel}'\n'passed'\n")
+    assert result.returncode == 3 and "STOP: There is no" in result.stdout and "passed" not in result.stdout
+    result = _ps(tmp_path, head + f"Confirm-LockHash '{lock}'\n'passed'\n")
+    assert result.returncode == 3 and "STOP: There is no SHA256SUMS.txt" in result.stdout
+    # A sums file that lists the wheel but not the lock stops the lock only.
+    sums.write_text(hashlib.sha256(b"wheel").hexdigest() + "  " + wheel.name + "\n", encoding="utf-8")
+    result = _ps(tmp_path, head + f"Confirm-WheelHash '{wheel}'\nConfirm-LockHash '{lock}'\n'passed'\n")
+    assert result.returncode == 3 and "wheel SHA-256 matches" in result.stdout
+    assert "does not list 'requirements.lock'" in result.stdout
+    # Listed and equal passes; a swapped copy stops.
+    sums.write_text(sums.read_text(encoding="utf-8") + hashlib.sha256(b"lock").hexdigest() + "  requirements.lock\n",
+                    encoding="utf-8")
+    result = _ps(tmp_path, head + f"Confirm-LockHash '{lock}'\n'passed'\n")
+    assert result.returncode == 0 and "lock SHA-256 matches" in result.stdout, result.stdout + result.stderr
+    swapped = tmp_path / "copy.lock"
+    swapped.write_bytes(b"changed after the check")
+    result = _ps(tmp_path, head + f"Confirm-LockHash '{lock}' '{swapped}'\n'passed'\n")
+    assert result.returncode == 3 and "STOP: The SHA-256 of" in result.stdout
 
 
 @needs_powershell
@@ -309,7 +350,7 @@ def test_the_folder_is_checked_again_after_the_create_and_parents_before_anythin
 def test_every_python_call_is_isolated_from_the_current_folder():
     script = SCRIPT.read_text(encoding="utf-8")
     calls = re.findall(r"& \$(?:launcher|venvPython) [^\n]*", script)
-    assert len(calls) == 3
+    assert len(calls) == 5
     for call in calls:
         assert " -I " in call, call
 

@@ -4700,6 +4700,9 @@
 }
 ],
 "host_name": "APP-HOST-01",
+"prior_drop_instances": [
+"{AFF50BC0-8543-FB07-4F16-A86C1932123C}"
+],
 "prior_tasks": [
 {
 "action_count": 1,
@@ -4992,8 +4995,8 @@
 "enabled": true,
 "execution_time_limit": "PT1H",
 "hidden": false,
-"last_run_time": "2026-10-16T08:24:00Z",
-"last_task_result": 2147942402,
+"last_run_time": "2026-10-15T08:24:00Z",
+"last_task_result": 0,
 "logon_type": "Password",
 "multiple_instances_policy": "StopExisting",
 "next_run_time": "2026-10-17T08:24:00Z",
@@ -5225,7 +5228,7 @@
 "author": "SYNTH\\svc-tasks",
 "description": "",
 "enabled": true,
-"execution_time_limit": "PT1H",
+"execution_time_limit": "PT30M",
 "hidden": false,
 "last_run_time": "2026-10-16T01:51:00Z",
 "last_task_result": 0,

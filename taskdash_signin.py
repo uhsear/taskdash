@@ -9,6 +9,8 @@ Target: with --apply, one ArcGIS profile (password in the Windows Credential Man
     taskdash signin --apply    # the same checks, then save the profile and prove it signs in
     taskdash signin --for-task-account --apply   # after the checks, seal the sign-in for the task
                                                  # account instead (see taskdash_handoff.py)
+    taskdash signin --forget [--apply]           # list (or delete) this account's saved sign-in and mail password
+    taskdash signin --forget --for-task-account --apply   # the same as the task account, without runas
 
 The password is never an argument, never printed and never logged. Saving uses the same call the
 install guide used before this command: ProfileManager().create(profile, url, user, password).
@@ -22,8 +24,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from taskdash_common import (
-    DEFAULT_CONFIG_FILE, TASKDASH_VERSION, _open_gis, disable_arcpy_import, emit, load_config, normalize_text,
-    runtime_dir, see_troubleshooting,
+    CONFIG_ARG_HELP, DEFAULT_CONFIG_FILE, SMTP_KEYRING_SERVICE, TASKDASH_VERSION, _open_gis, disable_arcpy_import,
+    emit, load_config, normalize_text, runtime_dir, see_troubleshooting,
 )
 from taskdash_handoff import HANDOFF_FILE, write_handoff
 from taskdash_preflight import FAIL, MARKS, OK, Context, check_privileges
@@ -40,7 +42,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         description="Sign in to ArcGIS, check the account, and store the sign-in profile. "
                     "Saves nothing unless you pass --apply.")
     parser.add_argument("--config", default="", metavar="PATH",
-                        help="Config file. Default: the config next to the scripts.")
+                        help=CONFIG_ARG_HELP)
     parser.add_argument("--apply", action="store_true", help="Save the profile.")
     parser.add_argument("--for-task-account", action="store_true",
                         help="Seal the sign-in into a hand-off file that the task account stores on its "
@@ -48,11 +50,52 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--task-user", default="", metavar="DOMAIN\\NAME",
                         help="With --for-task-account, the task account. Default: the account of the "
                              "collector task.")
+    parser.add_argument("--forget", action="store_true",
+                        help="Delete the saved sign-in profile and the saved mail password of the account "
+                             "that runs the command, instead of storing one. Asks for no password. With "
+                             "--for-task-account, do this as the task account through a temporary task.")
     parser.add_argument("--version", action="version", version=f"TaskDash {TASKDASH_VERSION}")
     args = parser.parse_args(argv)
     if args.task_user and not args.for_task_account:
         parser.error("--task-user needs --for-task-account")
     return args
+
+
+def forget_here(config: Dict[str, Any], apply: bool) -> int:
+    """List (or with apply, delete) the saved profile and mail password of the account that runs this.
+    Nothing here signs in or prompts. A missing entry is reported, not an error: the undo can be run twice."""
+    profile = normalize_text((config.get("arcgis") or {}).get("profile"))
+    if not profile:
+        emit("arcgis.profile is empty, so there is no sign-in profile name to look for. Set arcgis.profile "
+             "to the name that setup used (the example config uses taskdash), then run again.")
+        return 1
+    me = getpass.getuser()
+    disable_arcpy_import()
+    from arcgis.gis import ProfileManager
+    manager = ProfileManager()
+    try:
+        if profile in manager.list():
+            emit(f"{'Deleting' if apply else 'Would delete'} the sign-in profile '{profile}' of {me}.")
+            if apply:
+                manager.delete(profile)
+        else:
+            emit(f"No sign-in profile '{profile}' is saved for {me}.")
+        smtp_user = normalize_text((config.get("smtp") or {}).get("user"))
+        if smtp_user:
+            import keyring
+            if keyring.get_password(SMTP_KEYRING_SERVICE, smtp_user) is None:
+                emit(f"No mail password for '{smtp_user}' is saved for {me}.")
+            else:
+                emit(f"{'Deleting' if apply else 'Would delete'} the saved mail password for '{smtp_user}' of {me}.")
+                if apply:
+                    keyring.delete_password(SMTP_KEYRING_SERVICE, smtp_user)
+    except Exception as exc:  # noqa: BLE001 - a profile or keyring backend error is one failure to the user
+        emit(f"Could not delete the saved sign-in ({type(exc).__name__}). Run the command again from a normal, "
+             "signed-in window of that account, or delete the entries in Credential Manager.")
+        return 1
+    if not apply:
+        emit("Nothing deleted. Run again with --apply to delete what is listed.")
+    return 0
 
 
 def save_profile(profile: str, url: str, user: str, password: str) -> None:
@@ -124,17 +167,19 @@ def org_url(gis: Any) -> str:
     return f"https://{key}.{base}" if key and base else ""
 
 
-def _suggest_url(args: argparse.Namespace, config: Dict[str, Any], gis: Any, typed: str) -> None:
-    """The config had no URL: print the line to put there, and with --apply write only that key."""
+def _suggest_url(args: argparse.Namespace, config: Dict[str, Any], gis: Any, typed: str) -> str:
+    """The config had no URL: print the line to put there, and with --apply write only that key.
+    Returns that URL, so the profile and the hand-off use the same one as the config."""
     url = org_url(gis) or typed
     emit(f"Set arcgis.url to {url} in the config. TaskDash signs in with the config's URL."
          + ("" if args.apply else " Run again with --apply to write it for you."))
     if not args.apply:
-        return
+        return url
     from taskdash_setup import backup_config, config_file, write_config_key
     path = config_file(args)
     backup_config(path)
     write_config_key(path, config, "url", url)
+    return url
 
 
 def _task_account(config: Dict[str, Any], task_user: str) -> str:
@@ -182,6 +227,11 @@ def _hand_off(args: argparse.Namespace, config: Dict[str, Any], settings: Tuple[
 def main(argv: Optional[List[str]] = None) -> int:
     args = parse_args(argv)
     config = load_config(Path(args.config) if args.config else runtime_dir() / DEFAULT_CONFIG_FILE)
+    if args.forget:
+        if args.for_task_account:
+            from taskdash_astask import run_as_task  # only this path needs pywin32
+            return run_as_task(args, forget=True)
+        return forget_here(config, args.apply)
     url_was_blank = not normalize_text((config.get("arcgis") or {}).get("url"))
     url, user, profile = _settings(config)
     password = getpass.getpass("ArcGIS password (not shown): ")
@@ -198,7 +248,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     if not passed:
         return 1
     if url_was_blank:
-        _suggest_url(args, config, gis, url)
+        url = _suggest_url(args, config, gis, url)
     if args.for_task_account:
         return _hand_off(args, config, (url, user, profile), password)
     if not args.apply:
@@ -212,8 +262,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 1
     if not _report("profile", *_check_saved(url, profile)):
         return 1
-    emit("This profile belongs to the Windows account that ran the command. Run it again as the "
-         "task account.")
+    emit("This profile belongs to the Windows account that ran the command. To sign in the task "
+         "account, run: taskdash signin --for-task-account --task-user DOMAIN\\NAME --apply")
     return 0
 
 

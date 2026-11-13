@@ -207,7 +207,7 @@ def test_migrate_reports_and_creates_the_missing_table(monkeypatch):
                         staticmethod(lambda item: SimpleNamespace(manager=Manager())))
     monkeypatch.setattr(publish, "get_tables", lambda item: tables_without())
     stamps = []
-    monkeypatch.setattr(publish, "stamp_service_version", lambda item: stamps.append(item))
+    monkeypatch.setattr(publish, "stamp_service_version", lambda item, *a: stamps.append(item))
     publish.apply_migration(tables_without(MC), item="ITEM")
     assert [d["tables"][0]["name"] for d in created] == [MC]
     assert stamps == ["ITEM"]
@@ -311,7 +311,7 @@ def test_the_collector_reads_only_this_hosts_metric_rows(monkeypatch):
     monkeypatch.setattr(publish, "apply_edits_chunked", lambda *a, **k: {})
     monkeypatch.setattr(publish, "purge_older_than", lambda *a, **k: 0)
     publish.sync_metric_change(tables, "O'Neil-PC", "2026-10-22T00:00:00+00:00", 200, 90)
-    assert seen[0] == ("host_name = 'O''Neil-PC' AND metric_value IS NOT NULL "
+    assert seen[0] == ("host_name = 'O''NEIL-PC' AND metric_value IS NOT NULL "
                        "AND observed_at_utc IS NOT NULL")
 
 
@@ -379,7 +379,7 @@ def test_without_the_table_publish_warns_once_and_publishes_everything_else(monk
     messages, calls, counts = publish_with(monkeypatch, base, [publish_row()])
     warnings = [m for m in messages if MC in m]
     assert len(warnings) == 1
-    assert "taskdash collect --migrate --apply" in warnings[0] and "taskdash dashboard" in warnings[0]
+    assert "taskdash collect --migrate --target prod --apply" in warnings[0] and "taskdash dashboard" in warnings[0]
     assert calls == [publish.TABLE_RUNS, publish.TABLE_METRICS]     # the same writes as before
     assert counts["metrics_added"] == 0 and "sync" not in calls
 

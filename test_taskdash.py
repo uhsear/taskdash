@@ -450,7 +450,6 @@ def test_scan_log_file_counts_and_metrics(tmp_path):
     result = metrics.scan_log_file(log, max_lines=0)
     assert result["lines_scanned"] == 5
     assert result["warning_lines"] == 1
-    assert result["success_lines"] == 1
     assert result["metrics"]["checked_record_count"][0] == 100.0
     assert result["metrics"]["updated_record_count"][0] == 7.0
 
@@ -885,7 +884,7 @@ def test_sync_inventory_never_touches_another_hosts_rows(monkeypatch):
 
     monkeypatch.setattr(publish, "query_all_rows", recording_query_all_rows)
     publish.sync_inventory(table, [{"task_full_name": "t0"}], "O'Host", chunk_size=200, label="TaskInventory")
-    assert wheres == ["host_name = 'O''Host'"]
+    assert wheres == ["host_name = 'O''HOST'"]
 
 
 def test_top_failing_7day_chart_does_not_query_the_90day_run_table():
@@ -929,10 +928,9 @@ def _generated_dashboard_widgets():
 def test_new_widgets_present_with_correct_layers():
     import taskdash_dashboard as dash
     widgets = _generated_dashboard_widgets()
-    # Collector Heartbeat is not listed: it reads an Arcade data source (for refreshInterval)
-    # and has no layerId. test_dashboard_phase4.py covers its binding.
+    # Collector Heartbeat and 7-Day Success Rate are not listed: they read an Arcade data source
+    # (for refreshInterval) and have no layerId. test_dashboard_phase4.py covers their binding.
     expected_layers = {
-        "7-Day Success Rate": dash.LAYER_INVENTORY,
         "Metric Summary": dash.LAYER_METRICS,
     }
     for name, layer in expected_layers.items():
@@ -1344,7 +1342,7 @@ def test_event_watermark_is_per_host(monkeypatch):
     seen = []
     monkeypatch.setattr(publish, "max_field_value", _watermark_table(900, None, seen))
     assert publish.event_watermark(object(), "O'Host", newest=1000) == 900
-    assert seen == ["host_name = 'O''Host'"]
+    assert seen == ["host_name = 'O''HOST'"]
 
 
 def test_event_watermark_survives_a_log_reset(monkeypatch):

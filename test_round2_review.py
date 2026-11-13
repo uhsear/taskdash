@@ -258,7 +258,7 @@ def test_refresh_metrics_is_check_by_default(monkeypatch, tmp_path, apply):
     table = _MetricsTable([_stored(1, "features_max_oid", "new.log")])
     monkeypatch.setattr(publish, "connect_agol", lambda config: None)
     monkeypatch.setattr(publish, "ensure_service", lambda gis, config, target: None)
-    monkeypatch.setattr(publish, "check_schema_drift", lambda tables: None)  # fakes have no schema
+    monkeypatch.setattr(publish, "check_schema_drift", lambda tables, *a: None)  # fakes have no schema
     monkeypatch.setattr(publish, "get_tables", lambda item: {publish.TABLE_METRICS: table,
                                                              publish.TABLE_INVENTORY: _MetricsTable([])})
     monkeypatch.setattr(publish, "mine_metrics",
@@ -289,8 +289,36 @@ def test_refresh_metrics_refuses_an_unmigrated_service_with_the_fix(monkeypatch)
     monkeypatch.setattr(publish, "get_tables", lambda item: {publish.TABLE_METRICS: object(),
                                                              publish.TABLE_INVENTORY: object()})
 
-    def drift(tables):
+    def drift(tables, *a):
         raise SystemExit("Schema drift -- Run `--migrate --apply` to add them.")
     monkeypatch.setattr(publish, "check_schema_drift", drift)
     with pytest.raises(SystemExit, match="--migrate --apply"):
         publish.run_refresh_metrics({"host_name_override": "H"}, publish.parse_args(["--refresh-metrics"]))
+
+
+def test_refresh_leaves_another_computers_rows_alone():
+    # examined and own_tasks carry no host, so H2's row for the same task and log read as gone for H.
+    other = {**_stored(7, "idle_replica_count", "dry.log"), "host_name": "H2"}
+    other_own = {**_stored(8, "metric_rows", "taskdash_1.log", task="\\Task Dash"), "host_name": "H2"}
+    stored = [_stored(1, "idle_replica_count", "dry.log"), other, other_own]
+    examined = {("\\S", "dry.log")}
+    deletes, _ = publish.plan_metric_refresh(stored, [], "OBJECTID", examined, ["\\Task Dash"], host_name="H")
+    assert deletes == [1]
+    deletes, _ = publish.plan_metric_refresh(stored, [], "OBJECTID", examined, ["\\Task Dash"])
+    assert sorted(deletes) == [1, 7, 8]  # the unscoped call keeps the old behaviour: the reason for the scope
+
+
+def test_refresh_metrics_reads_only_this_computers_rows(monkeypatch, tmp_path):
+    table = _MetricsTable([])
+    wheres = []
+    real_query = table.query
+    table.query = lambda **kw: (wheres.append(kw.get("where")), real_query(**kw))[1]
+    monkeypatch.setattr(publish, "connect_agol", lambda config: None)
+    monkeypatch.setattr(publish, "ensure_service", lambda gis, config, target: None)
+    monkeypatch.setattr(publish, "check_schema_drift", lambda tables, *a: None)
+    monkeypatch.setattr(publish, "get_tables", lambda item: {publish.TABLE_METRICS: table,
+                                                             publish.TABLE_INVENTORY: _MetricsTable([])})
+    monkeypatch.setattr(publish, "mine_metrics", lambda config, inventory, host, examined=None: ([], {}))
+    config = {"host_name_override": "H", "privacy": {"hide_paths": False}, "logging": {"log_dir": str(tmp_path)}}
+    publish.run_refresh_metrics(config, publish.parse_args(["--refresh-metrics"]))
+    assert "host_name = 'H'" in wheres

@@ -91,7 +91,7 @@ def test_alert_still_sent_when_publish_raises_and_error_is_reraised(monkeypatch,
     monkeypatch.setattr(publish, "ensure_service",
                         lambda gis, cfg, tgt: type("I", (), {"title": "x", "id": tgt})())
     monkeypatch.setattr(publish, "get_tables", lambda item: {})
-    monkeypatch.setattr(publish, "check_schema_drift", lambda tables: None)
+    monkeypatch.setattr(publish, "check_schema_drift", lambda tables, *a: None)
     monkeypatch.setattr(publish, "collect_everything",
                         lambda *a, **k: {"host_name": "H", "inventory": [], "runs": [],
                                          "metrics": [], "log_summary": {}})
@@ -213,7 +213,7 @@ def test_watermark_to_does_not_advance_when_publish_fails(monkeypatch, tmp_path)
     monkeypatch.setattr(publish, "ensure_service",
                         lambda gis, cfg, tgt: type("I", (), {"title": "x", "id": tgt})())
     monkeypatch.setattr(publish, "get_tables", lambda item: {publish.TABLE_RUNS: object()})
-    monkeypatch.setattr(publish, "check_schema_drift", lambda tables: None)
+    monkeypatch.setattr(publish, "check_schema_drift", lambda tables, *a: None)
     monkeypatch.setattr(publish, "event_watermark", lambda *a, **k: 500)
     monkeypatch.setattr(publish, "collect_everything",
                         lambda *a, **k: {"host_name": "H", "inventory": [], "log_summary": {},
@@ -242,7 +242,7 @@ def test_no_alert_for_a_failed_test_target_publish(monkeypatch, tmp_path):
     monkeypatch.setattr(publish, "ensure_service",
                         lambda gis, cfg, tgt: type("I", (), {"title": "x", "id": tgt})())
     monkeypatch.setattr(publish, "get_tables", lambda item: {})
-    monkeypatch.setattr(publish, "check_schema_drift", lambda tables: None)
+    monkeypatch.setattr(publish, "check_schema_drift", lambda tables, *a: None)
     monkeypatch.setattr(publish, "collect_everything",
                         lambda *a, **k: {"host_name": "H", "inventory": [], "runs": [],
                                          "metrics": [], "log_summary": {}})

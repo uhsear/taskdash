@@ -10,6 +10,7 @@ from __future__ import annotations
 import functools
 import json
 import logging
+import ntpath
 import os
 import re
 import stat
@@ -19,14 +20,16 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from taskdash_common import (
-    data_dir, emit, home_dir, normalize_text, parse_iso_datetime, see_troubleshooting, utc_now,
+    config_default, data_dir, emit, home_dir, normalize_text, parse_iso_datetime, see_troubleshooting, utc_now,
 )
 
-DEFAULT_MAX_LOG_FILES_PER_TASK = 40
-DEFAULT_MAX_LINES_PER_FILE = 5000
+DEFAULT_MAX_LOG_FILES_PER_TASK = config_default("metrics.max_log_files_per_task")
+DEFAULT_MAX_LINES_PER_FILE = config_default("metrics.max_lines_per_file")
 # task_detail-01/metrics_tab-10: a scheduled run creates its log when it starts, so a log file
 # created more than this long after last_run_time is a manual/other run, not the scheduled one.
 MANUAL_RUN_SLACK_MINUTES = 15
+# TD-038: a log line may carry a time a little before LastRunTime (clock skew, launch latency).
+EARLIER_RUN_SLACK_SECONDS = 60
 LOG_SUFFIXES = (".log", ".txt")
 # metrics-08: a directory named Logs/logs/Log/log is unambiguously a log folder, so any .txt
 # in it is fair game. A bare script folder is not -- README.txt, data.txt etc. sit right next
@@ -53,15 +56,21 @@ LOG_LEVEL_RE: re.Pattern
 # findings as "- INFO -   CRITICAL LOUDLY ..." / "- INFO -   WARNING LOUDLY ...". Both count
 # the same way; the old rule counted any "warning" substring but never a leading CRITICAL.
 MESSAGE_LEVEL_RE = re.compile(r"^[\W_]*(?P<level>ERRORS?|CRITICAL|FATAL|WARNINGS?|WARN)\b", re.IGNORECASE)
+# TD-039: Python's default format ("INFO:root:msg") and "INFO - msg" carry no timestamp, so
+# LOG_LEVEL_RE misses them. A leading INFO/DEBUG followed by a separator is a level, not prose.
+QUIET_LEVEL_RE = re.compile(r"^[\W_]*(?P<level>INFO|DEBUG)(?=\s*[:|\]-])", re.IGNORECASE)
 ERROR_LEVELS = {"ERROR", "ERRORS", "CRITICAL", "FATAL"}
 WARNING_LEVELS = {"WARNING", "WARNINGS", "WARN"}
 FAILED_WORD_RE = re.compile(r"\bfailed\b")
 WARNING_KEYWORD_RE = re.compile(r"\bwarnings?:")
+# TD-039: the only "failed" an INFO or DEBUG line may carry and still count is a nonzero tally
+# ("3 failed", "failed: 2"); the bare word is prose ("Retrying the failed upload").
+FAILED_COUNT_RE = re.compile(r"\b[1-9]\d*\s+(?:[a-z_]+\s+)?failed\b|\bfailed\s*[:=]?\s*[1-9]")
 
 # metrics-07: "0 failed" / "errors: 0" / "failed: 0" report SUCCESS, not a failure -- without
 # this a clean run with a zero-failure summary line counted as an error line.
 ZERO_COUNT_RE = re.compile(
-    r"(?i)\b(?:0|no|zero)\s+(?:failed|failures?|errors?|warnings?)\b"
+    r"(?i)\b(?:0|no|zero)\s+(?:[a-z_]+\s+)?(?:failed|failures?|errors?|warnings?)\b"
     r"|\b(?:failed|failures?|errors?|warnings?)\s*:?\s*0\b"
 )
 
@@ -429,24 +438,49 @@ def compute_metric_change(rows: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]
     table. The flag rules stay in that Arcade, so the lowest and highest earlier value and the
     earlier count are kept too. `rows` are TaskMetrics rows as a query returns them, with
     observed_at_utc in epoch milliseconds. A series with fewer than METRIC_CHANGE_MIN_HISTORY
-    earlier values has no usual value, lowest or highest."""
+    earlier values has no usual value, lowest or highest.
+
+    history_count is the number of earlier values inside one window that every series of the task
+    shares. The window ends at the series' own newest value and starts at the newest start among
+    the task's series that hold METRIC_CHANGE_HISTORY values before that time. Counted per series
+    up to the cap, a metric logged only on busy runs looked as often logged as one logged on every
+    run, so "Not in last run" flagged it on quiet nights. In the shared window it has half the
+    count. A metric that stopped keeps its count, because its window ends where it stopped. The
+    Metric Change Arcade must stay in step."""
     series: Dict[str, List[Dict[str, Any]]] = {}
     for row in rows:
         if row.get("metric_value") is None or row.get("observed_at_utc") is None:
             continue
         key = metric_series_key(row.get("host_name"), row.get("task_full_name"), row.get("metric_key"))
         series.setdefault(key, []).append(row)
-    computed = []
+    recent: Dict[str, List[Dict[str, Any]]] = {}
+    by_task: Dict[Tuple[Any, Any], List[List[Dict[str, Any]]]] = {}
     for key, found in series.items():
         found.sort(key=lambda r: r["observed_at_utc"], reverse=True)
+        recent[key] = found[1:METRIC_CHANGE_HISTORY + 1]
+        by_task.setdefault((found[0].get("host_name"), found[0].get("task_full_name")), []).append(found)
+
+    def window_start(task_series: List[List[Dict[str, Any]]], before: Any) -> Any:
+        """Newest start, among the task's series, of METRIC_CHANGE_HISTORY values before `before`."""
+        start = None
+        for found in task_series:
+            older = [r["observed_at_utc"] for r in found if r["observed_at_utc"] < before][:METRIC_CHANGE_HISTORY]
+            if len(older) == METRIC_CHANGE_HISTORY and (start is None or older[-1] > start):
+                start = older[-1]
+        return start
+
+    computed = []
+    for key, found in series.items():
         head = found[0]
-        earlier = sorted(r["metric_value"] for r in found[1:METRIC_CHANGE_HISTORY + 1])
+        earlier = sorted(r["metric_value"] for r in recent[key])
+        start = window_start(by_task[(head.get("host_name"), head.get("task_full_name"))], head["observed_at_utc"])
+        in_window = sum(1 for r in recent[key] if start is None or r["observed_at_utc"] >= start)
         enough = len(earlier) >= METRIC_CHANGE_MIN_HISTORY
         computed.append({
             "series_key": key, "host_name": head.get("host_name"), "task_name": head.get("task_name"),
             "task_full_name": head.get("task_full_name"), "metric_key": head.get("metric_key"),
             "display_name": head.get("display_name"), "latest_value": head["metric_value"],
-            "latest_at_utc": head["observed_at_utc"], "history_count": len(earlier),
+            "latest_at_utc": head["observed_at_utc"], "history_count": in_window,
             "usual_value": statistics.median(earlier) if enough else None,
             "lowest_value": earlier[0] if enough else None,
             "highest_value": earlier[-1] if enough else None,
@@ -525,10 +559,11 @@ def _compile_rule(where: str, pattern: Any, flags: int = 0, group: Any = None) -
     try:
         compiled = re.compile(pattern, flags)
     except re.error as exc:
-        raise _rules_error(where, f"bad regex {pattern!r} ({exc})",
+        # json.dumps shows the pattern as it is written in the JSON file, not as a Python repr.
+        raise _rules_error(where, f"bad regex {json.dumps(pattern, ensure_ascii=False)} ({exc})",
                            "correct the regex; in JSON one backslash is written as two")
     if group is not None and not (compiled.groups >= group if isinstance(group, int) else group in compiled.groupindex):
-        raise _rules_error(where, f"the regex {pattern!r} has no capture group {group!r}",
+        raise _rules_error(where, f"the regex {json.dumps(pattern, ensure_ascii=False)} has no capture group {group!r}",
                            f"add the capture group {group!r} that holds the value")
     return compiled
 
@@ -551,13 +586,13 @@ def _merge_ordered(where: str, section: str, value: Any, target: Dict[int, Tuple
     if not isinstance(value, list):
         raise _rules_error(where, "the section must be a list of objects", "use [ {...}, {...} ]")
     for index, entry in enumerate(value):
-        at = f"{where} entry {index}"
+        at = f"{where} entry {index + 1}"
         if not isinstance(entry, dict):
             raise _rules_error(at, f"the entry must be an object, got {entry!r}", f"give it the fields order, {', '.join(fields)}")
         order = entry.get("order")
         if not isinstance(order, int) or isinstance(order, bool):
             raise _rules_error(at, f"order must be a whole number, got {order!r}", 'give the entry a number "order"')
-        at = f"{where} entry {index} (order {order})"
+        at = f"{where} entry {index + 1}, order {order}"
         unknown = sorted(k for k in entry if k != "order" and k not in fields and not k.startswith("_"))
         wrong = [f for f in fields if f not in _NON_STRING_FIELDS and not isinstance(entry.get(f), str)]
         keys, number = entry.get("keys"), entry.get("value")
@@ -566,9 +601,12 @@ def _merge_ordered(where: str, section: str, value: Any, target: Dict[int, Tuple
         if "value" in fields and (isinstance(number, bool) or not isinstance(number, (int, float))):
             wrong.append("value")
         if unknown or wrong:
-            raise _rules_error(at, f"unknown field(s) {unknown} or missing/non-string field(s) {wrong}",
-                               f"use exactly the fields {', '.join(fields)} (strings, except "
-                               f"{'; '.join(f'{n} is {d}' for n, d in _NON_STRING_FIELDS.items() if n in fields) or 'none'})")
+            problems = [f"{label}: {', '.join(names)}" for label, names in
+                        (("unknown field(s)", unknown), ("missing or wrong-type field(s)", wrong)) if names]
+            exceptions = [f"{n} is {d}" for n, d in _NON_STRING_FIELDS.items() if n in fields]
+            raise _rules_error(at, "; ".join(problems),
+                               f"use exactly the fields {', '.join(fields)}, each a text"
+                               + (f" except that {'; '.join(exceptions)}" if exceptions else ""))
         if order in target:
             raise _rules_error(at, f"order {order} is already used by {target[order][0]}",
                                "give each entry an order number used nowhere else in the loaded rules files")
@@ -658,6 +696,9 @@ def load_rules(profiles: Tuple[str, ...] = ()) -> Dict[str, Any]:
                       else tuple(entry[f]) if f == "keys" else float(entry[f]) if f == "value" else entry[f]
                       for f in fields]
             compiled.append(tuple(values) if len(values) > 1 else values[0])
+        if section == "metric_change_lower_is_better":
+            # Metric keys are lower case and the dashboard matches the token by plain substring.
+            compiled = [token.lower() for token in compiled]
         rules[section] = compiled
     missing = sorted(({cause for cause, _ in rules["cause_patterns"]} | {""}) - set(rules["cause_text"]))
     if missing:
@@ -671,7 +712,7 @@ def _compile_task_settings(tasks: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
     for task_name, raw in tasks.items():
         where = f"config metrics.tasks[{task_name!r}]"
         if not isinstance(raw, dict) or set(raw) - _TASK_SETTING_KEYS:
-            raise _rules_error(where, f"expected an object with only {sorted(_TASK_SETTING_KEYS)}, got {raw!r}",
+            raise _rules_error(where, f"expected an object with only {', '.join(sorted(_TASK_SETTING_KEYS))}, got {raw!r}",
                                "remove or rename the unknown setting")
         enabled = raw.get("enabled", True)
         extra_rules, extra_noise = raw.get("prose_count_rules", []), raw.get("noise_metric_key_patterns", [])
@@ -680,12 +721,12 @@ def _compile_task_settings(tasks: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
                                'use {"enabled": false, "prose_count_rules": [], "noise_metric_key_patterns": []}')
         rules = []
         for index, entry in enumerate(extra_rules):
-            at = f"{where} prose_count_rules entry {index}"
+            at = f"{where} prose_count_rules entry {index + 1}"
             if not isinstance(entry, dict) or set(entry) != {"pattern", "key"} or not isinstance(entry["key"], str):
                 raise _rules_error(at, f"expected {{\"pattern\": regex, \"key\": name}}, got {entry!r}",
                                    "give the entry exactly the string fields pattern and key")
             rules.append((_compile_rule(at, entry["pattern"], re.IGNORECASE, 1), entry["key"]))
-        noise = [_compile_rule(f"{where} noise_metric_key_patterns entry {index}", pattern, re.IGNORECASE)
+        noise = [_compile_rule(f"{where} noise_metric_key_patterns entry {index + 1}", pattern, re.IGNORECASE)
                  for index, pattern in enumerate(extra_noise)]
         settings[task_name] = {"enabled": enabled, "prose_count_rules": rules, "noise_metric_key_patterns": noise}
     return settings
@@ -773,6 +814,11 @@ def _dir_key(path: Path) -> str:
         return str(path).lower()
 
 
+def _is_relative_path(text: str) -> bool:
+    """True for a Windows path with neither a drive (or UNC share) nor a leading separator."""
+    return not ntpath.splitdrive(text)[0] and not text.startswith(("\\", "/"))
+
+
 def discover_log_directories(target_path: Any, working_directory: Any = None) -> List[Path]:
     """A workflow's logs live beside its script, in a Logs/ subdirectory of either the script's
     own folder, or -- when the scheduled task's action carries its own working directory --
@@ -781,7 +827,16 @@ def discover_log_directories(target_path: Any, working_directory: Any = None) ->
     """
     roots: List[Path] = []
     script_root: Optional[Path] = None
-    clean = normalize_text(target_path)
+    # An unexpanded %VAR% path has no drive, so it would look relative and be joined under the
+    # Start-in folder. check_broken_action_targets expands before the same test.
+    clean = os.path.expandvars(normalize_text(target_path))
+    wd_clean = os.path.expandvars(normalize_text(working_directory))
+    if "%" in clean:
+        clean = ""  # a variable that is not set here: the script's folder is unknown, not the Start-in's child
+    if clean and _is_relative_path(clean):
+        # TD-041: Task Scheduler resolves a relative script against the action's Start-in folder.
+        # Without one the base is unknown, and TaskDash's own folder is never the answer.
+        clean = str(Path(wd_clean, clean)) if wd_clean else ""
     if clean:
         # Keep script_root even when the directory is absent on this machine: the ancestor test
         # below must be lexical, or it silently stops guarding whenever the script path is not
@@ -790,7 +845,6 @@ def discover_log_directories(target_path: Any, working_directory: Any = None) ->
         if script_root.exists():
             roots.append(script_root)
 
-    wd_clean = normalize_text(working_directory)
     if wd_clean:
         wd_root = Path(wd_clean)
         # Reject a working directory that is an ANCESTOR of the script directory. Measured on
@@ -826,15 +880,22 @@ def list_recent_log_files(
     *,
     file_filter: Optional[Callable[[Path], bool]] = None,
     trusted_dirs: Optional[set] = None,
+    listing_cache: Optional[Dict[str, List[Path]]] = None,
 ) -> List[Path]:
+    """listing_cache (TD-150): one pass lists each folder once, however many tasks share it."""
     cutoff = (utc_now() - timedelta(days=days_back)).timestamp()
     trusted = trusted_dirs or set()
     found: List[Tuple[float, Path]] = []
     for directory in directories:
-        try:
-            entries = list(directory.iterdir())
-        except OSError:
-            continue
+        key = _dir_key(directory)
+        entries = listing_cache.get(key) if listing_cache is not None else None
+        if entries is None:
+            try:
+                entries = list(directory.iterdir())
+            except OSError:
+                entries = []
+            if listing_cache is not None:
+                listing_cache[key] = entries
         # metrics-08: .log is a log anywhere; .txt only counts inside a directory actually
         # named Logs/logs/Log/log -- a stray .txt beside the script itself is not a log.
         # metrics-09: an operator-supplied override directory is trusted the same way, even
@@ -971,13 +1032,19 @@ def classify_line(line: str) -> Tuple[bool, bool]:
     metrics-11: a real ERROR/CRITICAL level is never hidden by a zero-count phrase elsewhere on
     the line ("ERROR | Append failed: 0 features written"). Only the zero-count phrases are
     scrubbed before the keyword fallback, so "12 succeeded, 3 failed, 0 errors" still counts.
+
+    TD-039: the bare words "failed" and "warning:" count only on a line with no level at all. An
+    INFO or DEBUG line, with or without a timestamp, that says "Retrying the failed upload" is
+    not an error; it counts only when it reports a nonzero tally ("3 failed, 9 succeeded"). A "traceback" counts at any level.
     """
     level_match = LOG_LEVEL_RE.match(line)
     scrubbed = ZERO_COUNT_RE.sub("", LOG_PREAMBLE_RE.sub("", line, count=1).lower())
-    head_match = MESSAGE_LEVEL_RE.match(scrubbed)
+    head_match = MESSAGE_LEVEL_RE.match(scrubbed) or QUIET_LEVEL_RE.match(scrubbed)
     levels = {m.group("level").upper() for m in (level_match, head_match) if m}
-    is_error = bool(levels & ERROR_LEVELS) or "traceback" in scrubbed or bool(FAILED_WORD_RE.search(scrubbed))
-    is_warning = bool(levels & WARNING_LEVELS) or bool(WARNING_KEYWORD_RE.search(scrubbed))
+    keywords = not levels
+    failed = FAILED_WORD_RE if keywords else FAILED_COUNT_RE
+    is_error = bool(levels & ERROR_LEVELS) or "traceback" in scrubbed or bool(failed.search(scrubbed))
+    is_warning = bool(levels & WARNING_LEVELS) or (keywords and bool(WARNING_KEYWORD_RE.search(scrubbed)))
     return is_error, is_warning
 
 
@@ -1015,13 +1082,18 @@ def _resolve_metrics(
     return metrics
 
 
-def scan_log_file(path: Path, max_lines: int, task_settings: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+def scan_log_file(path: Path, max_lines: int, task_settings: Optional[Dict[str, Any]] = None,
+                  since: Optional[datetime] = None) -> Dict[str, Any]:
     """Return one value per metric in this file, plus line-level counters.
 
     metrics-10: any OSError while reading (open, seek, or decode of a truncated/locked file)
     is isolated to this file -- it must not abort the whole hourly publish. read_error=True
     tells the caller not to report a false "0 errors" for a file it never actually read.
     task_settings is the task's TASK_SETTINGS entry: its extra rules and extra noise keys.
+
+    TD-038: since, when given, drops every line stamped before it, with the unstamped lines
+    that follow (a traceback). A log that every run appends to then speaks for its last run only,
+    not for all the runs in the file. earlier_run_lines counts what was dropped.
     """
     # Sample lines are scrubbed before their 240-character cut: a cut first can drop a flag or a
     # URL scheme and leave its secret where prepare_rows' scrubber no longer recognizes it.
@@ -1030,29 +1102,35 @@ def scan_log_file(path: Path, max_lines: int, task_settings: Optional[Dict[str, 
 
     extra_rules = (task_settings or {}).get("prose_count_rules", ())
     extra_noise = (task_settings or {}).get("noise_metric_key_patterns", ())
-    counts = {"lines_scanned": 0, "error_lines": 0, "warning_lines": 0, "success_lines": 0}
+    counts = {"lines_scanned": 0, "error_lines": 0, "warning_lines": 0}
     try:
         lines = read_last_lines(path, max_lines)
     except OSError as exc:
         emit(f"WARNING: could not read {path}: {exc}")
-        return {"metrics": {}, **counts, "read_error": True}
+        return {"metrics": {}, **counts, "earlier_run_lines": 0, "read_error": True}
 
     occurrences: Dict[str, List[Tuple[Optional[str], int, float, str]]] = {}
     section: Optional[str] = None
     explicit: Dict[str, Tuple[float, str]] = {}
+    earlier_run_lines = 0
+    in_window = True
     for raw_line in lines:
         line = raw_line.strip()
         if not line:
             continue
+        if since is not None:
+            stamp = _leading_line_time(line)
+            if stamp is not None:
+                in_window = stamp >= since
+            if not in_window:
+                earlier_run_lines += 1
+                continue
         counts["lines_scanned"] += 1
         taskdash_pairs = extract_taskdash_line(line)
         # A TASKDASH line is author-written data ('failed=0' must not count as an error line).
         is_error, is_warning = (False, False) if taskdash_pairs else classify_line(line)
         counts["error_lines"] += is_error
         counts["warning_lines"] += is_warning
-        lower = line.lower()
-        if "completed successfully" in lower or "success" in lower:
-            counts["success_lines"] += 1
 
         if taskdash_pairs:
             # Last line wins, and no section prefix: the author named the key, so it stays as written.
@@ -1067,7 +1145,8 @@ def scan_log_file(path: Path, max_lines: int, task_settings: Optional[Dict[str, 
                 occurrences.setdefault(canonical, []).append(
                     (section, priority, value, _scrub_secrets(line)[:240]))
 
-    return {"metrics": {**_resolve_metrics(occurrences), **explicit}, **counts, "read_error": False}
+    return {"metrics": {**_resolve_metrics(occurrences), **explicit}, **counts,
+            "earlier_run_lines": earlier_run_lines, "read_error": False}
 
 
 # --------------------------------------------------------------------------- rows
@@ -1080,6 +1159,10 @@ def _name_tokens(text: str, min_len: int = 3) -> List[str]:
 
 
 _OWN_SCRIPT_NAME_RE = re.compile(r"^taskdash_\w+\.py$", re.IGNORECASE)
+
+# command_target_type values (taskdash_collect.classify_command_target) whose target path is an
+# interpreter, not a script: the task runs it with no script of its own to sit beside logs.
+INTERPRETER_TARGET_TYPES = frozenset({"Python", "PowerShell", "CommandShell", "ScriptHost"})
 
 
 def is_taskdash_command(command_target_name: Any, command_target_arguments: Any = "") -> bool:
@@ -1099,38 +1182,54 @@ def is_taskdash_command(command_target_name: Any, command_target_arguments: Any 
     return name.lower() == "taskdash.exe" and bool(arguments) and arguments[0].lower() == "collect"
 
 
-def _log_belongs_to_task(filename: str, script_stem: str, name_tokens: Sequence[str]) -> bool:
-    """metrics-03: does this log file's name plausibly belong to this task?
+def _log_claimants(filename: str, owners: Dict[Any, Tuple[str, Sequence[str]]]) -> set:
+    """metrics-03 / TD-040: the tasks of a shared folder whose name claims this log file.
 
+    owners maps each task of the folder to (script stem, task-name tokens). A script stem in
+    the file name wins over the task name, and the longest stem wins among those ("run2" over
+    "run"). Only when no stem matches does a task claim the file, and then its name must
+    contribute every token: one common word ("daily") no longer claims a log.
     Used only when a directory is shared by more than one task (see build_metric_rows) --
     a folder with a single task keeps today's unfiltered behaviour.
-    # ponytail: substring/token match, not a scoring model; misattributes if two tasks in one
-    # shared folder have overlapping name tokens (e.g. both contain "Nightly"). Tighten to a
-    # stricter match (e.g. require the full task name) if that turns out to happen on the task server.
     """
     lower = filename.lower()
-    if script_stem and script_stem in lower:
-        return True
-    return any(token in lower for token in name_tokens)
+    by_stem = {name: stem for name, (stem, _) in owners.items() if stem and stem in lower}
+    if by_stem:
+        longest = max(len(stem) for stem in by_stem.values())
+        return {name for name, stem in by_stem.items() if len(stem) == longest}
+    return {name for name, (_, tokens) in owners.items() if tokens and all(token in lower for token in tokens)}
+
+
+def unmatched_override_keys(overrides: Dict[str, Any], task_full_names: Iterable[Any]) -> List[str]:
+    """The metrics.log_directory_overrides keys that name no task. The match ignores case, as the lookup does."""
+    known = {normalize_text(name).lower() for name in task_full_names}
+    return [key for key in overrides if normalize_text(key).lower() not in known]
 
 
 def _plan_task_directories(
     inventory_rows: Sequence[Dict[str, Any]],
     overrides: Dict[str, str],
     own_log_keys: set,
-) -> Tuple[List[Dict[str, Any]], Dict[str, set]]:
-    """First pass: resolve each task's candidate directories (no file I/O yet) and count how
-    many distinct tasks reference each directory. metrics-03: several tasks sharing one
-    folder used to mine every log in it for every task, misattributing metrics and
-    latest_log. A folder referenced by exactly one task keeps today's unfiltered behaviour.
+) -> Tuple[List[Dict[str, Any]], Dict[str, Dict[Any, Tuple[str, List[str]]]]]:
+    """First pass: resolve each task's candidate directories (no file I/O yet) and list which
+    tasks reference each directory, with the script stem and name tokens that claim its logs.
+    metrics-03: several tasks sharing one folder used to mine every log in it for every task,
+    misattributing metrics and latest_log. A folder referenced by exactly one task keeps
+    today's unfiltered behaviour.
     """
     task_plans: List[Dict[str, Any]] = []
-    dir_task_owners: Dict[str, set] = {}
+    dir_task_owners: Dict[str, Dict[Any, Tuple[str, List[str]]]] = {}
     skipped_keys: set = set()
+    # Task names are not case-sensitive in Windows, so a key typed in another case still matches.
+    overrides_by_name = {normalize_text(key).lower(): value for key, value in overrides.items()}
 
     for task in inventory_rows:
         task_full_name = task.get("task_full_name")
-        override_dir = normalize_text(overrides.get(task_full_name)) if task_full_name else ""
+        override_dir = normalize_text(overrides_by_name.get(normalize_text(task_full_name).lower())) if task_full_name else ""
+        # TD-041: an interpreter's own folder (C:\Python313, System32) never holds the task's logs,
+        # and its name ("python") says nothing about which log is the task's.
+        script_path = ("" if normalize_text(task.get("command_target_type")) in INTERPRETER_TARGET_TYPES
+                       else normalize_text(task.get("command_target_path")))
         if is_taskdash_command(task.get("command_target_name"), task.get("command_target_arguments")):
             # Never mine Task Dash's own logs -- independent of install folder, override or
             # log_dir. Keep the own_dir/own_logs_dir filter below too, as a second layer.
@@ -1139,27 +1238,26 @@ def _plan_task_directories(
             override_path = Path(override_dir)
             directories = [override_path] if override_path.is_dir() else []
         else:
-            directories = discover_log_directories(
-                task.get("command_target_path"), task.get("command_target_working_directory")
-            )
+            directories = discover_log_directories(script_path, task.get("command_target_working_directory"))
         directories = [d for d in directories if _dir_key(d) not in own_log_keys]
         outside = [d for d in directories if not log_path_allowed(d)]
         if outside:
             skipped_keys.update(_dir_key(d) for d in outside)
             directories = [d for d in directories if d not in outside]
 
-        script_path = normalize_text(task.get("command_target_path"))
+        script_stem = Path(script_path).stem.lower() if script_path else ""
+        name_tokens = _name_tokens(task.get("task_name") or "")
         task_plans.append({
             "task": task,
             "directories": directories,
-            "script_stem": Path(script_path).stem.lower() if script_path else "",
-            "name_tokens": _name_tokens(task.get("task_name") or ""),
+            "script_stem": script_stem,
+            "name_tokens": name_tokens,
             # metrics-09: an override directory was pointed at deliberately by an operator,
             # not discovered by walking a shared folder -- trust its .txt files too.
             "is_override": bool(override_dir),
         })
         for directory in directories:
-            dir_task_owners.setdefault(_dir_key(directory), set()).add(task_full_name)
+            dir_task_owners.setdefault(_dir_key(directory), {})[task_full_name] = (script_stem, name_tokens)
 
     if skipped_keys:
         emit(f"WARNING: skipped {len(skipped_keys)} log folder(s) outside metrics.log_roots or reached "
@@ -1171,6 +1269,13 @@ _LATEST_LOG_FIELDS = (
     "latest_log_name", "latest_log_path", "latest_log_time_utc", "latest_log_age_hours",
     "latest_log_error_lines", "latest_log_warning_lines", "latest_log_lines_scanned",
 )
+
+
+def _modified_since(path: Path, cutoff: float) -> bool:
+    try:
+        return path.stat().st_mtime >= cutoff
+    except OSError:
+        return False
 
 
 def _file_created_dt(path: Path) -> Optional[datetime]:
@@ -1198,8 +1303,7 @@ def _summarize_task_logs(
     """Build the latest_log_* summary dict for one task from its newest file's scan result."""
     # newest_scan is only None when the newest file vanished mid-loop (stat() failed) -- that
     # is unread, not a clean run, so the fallback must carry read_error True too.
-    scan = newest_scan or {"lines_scanned": 0, "error_lines": 0, "warning_lines": 0,
-                            "success_lines": 0, "read_error": True}
+    scan = newest_scan or {"lines_scanned": 0, "error_lines": 0, "warning_lines": 0, "read_error": True}
     # metrics-10: a newest log that failed to read is UNKNOWN, not a clean 0 -- reporting 0
     # would hide a real problem (permissions, a locked/rotating file) behind a healthy-looking row.
     read_failed = scan.get("read_error", False)
@@ -1220,6 +1324,19 @@ def _summarize_task_logs(
 # separator), kept as its own regex because callers here need the matched text, not a stripped
 # line.
 _LEADING_TIMESTAMP_RE = re.compile(r"^\s*\[?(?P<ts>\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?)\]?")
+
+
+def _leading_line_time(line: str) -> Optional[datetime]:
+    """The UTC time a log line starts with, or None when it has no parsable leading timestamp."""
+    match = _LEADING_TIMESTAMP_RE.match(line)
+    if not match:
+        return None
+    try:
+        stamp = datetime.fromisoformat(match.group("ts").replace(",", "."))
+    except ValueError:
+        return None
+    # A naive stamp is the server's local time: astimezone() reads it that way.
+    return stamp.astimezone(timezone.utc)
 
 
 def _count_recent_debug_lines(
@@ -1247,15 +1364,9 @@ def _count_recent_debug_lines(
         line = raw_line.strip()
         if not line:
             continue
-        match = _LEADING_TIMESTAMP_RE.match(line)
-        if not match:
+        ts = _leading_line_time(line)
+        if ts is None:
             continue
-        try:
-            ts = datetime.fromisoformat(match.group("ts").replace(",", "."))
-        except ValueError:
-            continue
-        # A naive stamp is the server's local time: astimezone() reads it that way.
-        ts = ts.astimezone(timezone.utc)
         any_parsed = True
         if ts < cutoff:
             continue
@@ -1297,7 +1408,7 @@ def _scan_own_task_logs(
 
 def _scan_task_logs(
     plan: Dict[str, Any],
-    dir_task_owners: Dict[str, set],
+    dir_task_owners: Dict[str, Dict[Any, Tuple[str, List[str]]]],
     *,
     host_name: str,
     days_back: int,
@@ -1306,6 +1417,7 @@ def _scan_task_logs(
     now: Any,
     own_logs_dir: Path,
     examined: Optional[set] = None,
+    listing_cache: Optional[Dict[str, List[Path]]] = None,
 ) -> Tuple[List[Dict[str, Any]], Optional[Dict[str, Any]]]:
     """Scan one task's candidate directories. Returns (its metric rows, its log summary entry
     -- None when the task had no files at all to record a summary for).
@@ -1326,24 +1438,36 @@ def _scan_task_logs(
         # row" as "gone" and delete its stored history. Leave its files out of examined.
         examined = None
     directories = plan["directories"]
-    script_stem = plan["script_stem"]
-    name_tokens = plan["name_tokens"]
 
     # Shared-ness is a directory-level fact -- resolve it once per task's (few) directories
     # instead of once per candidate file, which used to re-resolve path.parent repeatedly.
-    shared_dirs = {d for d in directories if len(dir_task_owners.get(_dir_key(d), ())) > 1}
+    shared_dirs = {d: dir_task_owners[_dir_key(d)] for d in directories
+                   if len(dir_task_owners.get(_dir_key(d), ())) > 1}
     trusted_dirs = {_dir_key(d) for d in directories} if plan["is_override"] else set()
+    recent_cutoff = (now - timedelta(days=days_back)).timestamp()
 
-    def belongs_to_this_task(path: Path, _stem=script_stem, _tokens=name_tokens, _shared=shared_dirs) -> bool:
+    def belongs_to_this_task(path: Path) -> bool:
         if not log_path_allowed(path):
             return False
-        if path.parent not in _shared:
+        owners = shared_dirs.get(path.parent)
+        if owners is None:
             return True
-        return _log_belongs_to_task(path.name, _stem, _tokens)
+        claimants = _log_claimants(path.name, owners)
+        if task_full_name not in claimants:
+            return False
+        if len(claimants) == 1:
+            return True
+        # TD-040: a file two tasks both claim goes to neither. One of them says so, once per pass.
+        if task_full_name == min(claimants, key=str) and _modified_since(path, recent_cutoff):
+            emit(f"WARNING: log file {path.name!r} in {path.parent} matches {len(claimants)} tasks "
+                 f"({', '.join(sorted(str(c) for c in claimants))}), so no task reads it. Name each "
+                 "task's log after its script, or set metrics.log_directory_overrides to a folder "
+                 "of its own for each task.")
+        return False
 
     files = list_recent_log_files(
         directories, days_back, max_files_per_task,
-        file_filter=belongs_to_this_task, trusted_dirs=trusted_dirs,
+        file_filter=belongs_to_this_task, trusted_dirs=trusted_dirs, listing_cache=listing_cache,
     )
     if directories and not files:
         # Directories resolved but nothing recent was in them -- a real signal (wrong folder,
@@ -1378,6 +1502,7 @@ def _scan_task_logs(
     raw_last_run = task.get("last_run_time")
     last_run_dt = (datetime.fromtimestamp(raw_last_run / 1000, tz=timezone.utc)
                    if isinstance(raw_last_run, (int, float)) else parse_iso_datetime(raw_last_run))
+    since = last_run_dt - timedelta(seconds=EARLIER_RUN_SLACK_SECONDS) if last_run_dt is not None else None
     if last_run_dt is not None:
         # A script can open a later log after a long first step, so the run's own length counts.
         slack = max(MANUAL_RUN_SLACK_MINUTES * 60.0, float(task.get("last_duration_seconds") or 0))
@@ -1418,7 +1543,18 @@ def _scan_task_logs(
             # must not silently drop out -- log it, same as the newest-file case above.
             emit(f"WARNING: {path} vanished during scanning; skipping this file.")
             continue
-        scan = scan_log_file(path, max_lines_per_file, settings)
+        # TD-038: a file the last run wrote to may hold older runs too (one log appended to every
+        # run); only the last run's lines speak for it. An older per-run file is read whole.
+        window = since if since is not None and observed_dt >= since else None
+        scan = scan_log_file(path, max_lines_per_file, settings, since=window)
+        if scan.get("earlier_run_lines") and not scan["lines_scanned"]:
+            # Every line predates the run: a log kept in another time zone, more likely than a
+            # run that wrote nothing. Read it whole rather than report a clean 0.
+            scan = scan_log_file(path, max_lines_per_file, settings)
+        elif scan.get("earlier_run_lines"):
+            emit(f"Task {task_full_name!r}: {path.name} holds {scan['earlier_run_lines']} line(s) from "
+                 "earlier runs; read only the last run's. TaskDash keeps one value per metric per log "
+                 "file, so a log that every run appends to charts no history. Write one log file per run.")
         if path == newest:
             newest_scan = scan
         if not settings.get("enabled", True):
@@ -1497,15 +1633,19 @@ def build_metric_rows(
         if key not in known_tasks:
             emit(f"WARNING: metrics.tasks key {key!r} matches no collected task; keys must be full "
                  "task paths like '\\Folder\\Task' (see task_full_name in the Tasks table).")
+    for key in unmatched_override_keys(overrides, known_tasks):
+        emit(f"WARNING: metrics.log_directory_overrides key {key!r} matches no collected task; keys must be "
+             "full task paths like '\\Folder\\Task' (see task_full_name in the Tasks table). The case does not matter.")
 
     metric_rows: List[Dict[str, Any]] = []
     log_summary: Dict[str, Dict[str, Any]] = {}
+    listing_cache: Dict[str, List[Path]] = {}
     for plan in task_plans:
         task_full_name = plan["task"].get("task_full_name")
         task_rows, summary_entry = _scan_task_logs(
             plan, dir_task_owners, host_name=host_name, days_back=days_back,
             max_files_per_task=max_files_per_task, max_lines_per_file=max_lines_per_file, now=now,
-            own_logs_dir=own_logs_dir, examined=examined,
+            own_logs_dir=own_logs_dir, examined=examined, listing_cache=listing_cache,
         )
         metric_rows.extend(task_rows)
         if summary_entry is not None:

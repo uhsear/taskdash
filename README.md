@@ -22,8 +22,9 @@ Not affiliated with, endorsed by or supported by Esri.
 - Installs as a Python wheel. One command creates the ArcGIS items, and a preflight check tells you
   what is missing before the first run.
 - Writes nothing to ArcGIS Online and sends no e-mail unless you pass `--apply`.
-- Includes `taskdash demo`, which shows the dashboard on invented data before you point it at
-  real tasks. See [Try the demo](docs/USE.md#try-the-demo).
+- Includes `taskdash demo`, which shows TaskDash on invented data before you point it at real
+  tasks. Offline, it prints the tiles, the task rows and the alert e-mail previews as text. With
+  `--apply`, it also publishes a demo dashboard. See [Try the demo](docs/USE.md#try-the-demo).
 
 ## Instructions
 
@@ -39,15 +40,15 @@ Not affiliated with, endorsed by or supported by Esri.
 ## Requirements
 
 - Windows 10, Windows 11 or Windows Server 2016 or later, with PowerShell.
-- 64-bit Python 3.11 installed for all users. The package needs Python 3.11 or later, and 3.11 is the
-  tested version.
+- 64-bit Python 3.13 installed for all users. Python 3.13 is the supported version. The package
+  installs on 3.11 and 3.12, and CI tests both, but they are not supported.
 - The `arcgis` package, version 2.4 or later and earlier than 3. The wheel installs it.
 - An ArcGIS Online built-in account of the Creator user type, without multifactor authentication.
 - A Windows account for the hourly task. It must belong to the local Administrators group.
 - ArcGIS Pro only if the tasks you monitor run arcpy.
 
-TaskDash is tested on one computer with 29 tasks that run at most hourly. ArcGIS Enterprise is not
-tested yet. [docs/INTRODUCTION.md](docs/INTRODUCTION.md) lists the details and all known limits.
+TaskDash is tested on one computer with 29 tasks that run at most hourly. A weekly automated test
+also runs the offline passes on 500 synthetic tasks. ArcGIS Enterprise is not tested yet. [docs/INTRODUCTION.md](docs/INTRODUCTION.md) lists the details and all known limits.
 
 ## Resources
 

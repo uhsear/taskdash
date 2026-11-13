@@ -54,9 +54,15 @@ def test_a_public_source_stops_the_publish_when_a_view_is_configured():
 
 
 def test_source_sharing_is_not_judged_without_a_view_or_when_private(capsys):
-    publish.check_source_sharing(_Item("public"), {"arcgis": {}}, "prod")
+    publish.check_source_sharing(_Item("private"), {"arcgis": {}}, "prod")
+    publish.check_source_sharing(_Item("org"), {"arcgis": {}}, "prod")
     publish.check_source_sharing(_Item("private"), {"arcgis": {"view_item_id": "v1"}}, "prod")
     assert "WARNING" not in capsys.readouterr().out
+
+
+def test_a_public_source_stops_the_publish_even_when_no_view_is_configured():
+    with pytest.raises(SystemExit, match="Set its sharing to Owner"):
+        publish.check_source_sharing(_Item("public"), {"arcgis": {}}, "prod")
 
 
 def test_the_apply_publish_runs_the_sharing_check_after_the_schema_check(monkeypatch, tmp_path):
@@ -65,7 +71,7 @@ def test_the_apply_publish_runs_the_sharing_check_after_the_schema_check(monkeyp
     monkeypatch.setattr(publish, "connect_agol", lambda config: "gis")
     monkeypatch.setattr(publish, "ensure_service", lambda gis, config, target: item)
     monkeypatch.setattr(publish, "get_tables", lambda i: {})
-    monkeypatch.setattr(publish, "check_schema_drift", lambda tables: calls.append("schema"))
+    monkeypatch.setattr(publish, "check_schema_drift", lambda tables, *a: calls.append("schema"))
     # The refusal skips every write but still collects and alerts (see test_alerting_hardening).
     monkeypatch.setattr(publish, "collect_everything",
                         lambda *a, **k: {"host_name": "H", "inventory": [], "runs": [],
@@ -74,7 +80,7 @@ def test_the_apply_publish_runs_the_sharing_check_after_the_schema_check(monkeyp
     monkeypatch.setattr(publish, "maybe_send_alert", lambda *a: False)
     monkeypatch.setattr(publish, "publish",
                         lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not write")))
-    args = SimpleNamespace(apply=True, target="prod", allow_host_mismatch=False, full_history=False,
+    args = SimpleNamespace(apply=True, target="prod", allow_host_mismatch=False, full_history=False, show_metrics=False,
                            fixture="")
     with pytest.raises(SystemExit, match="shared with everyone"):
         publish._run_publish(args, {"arcgis": {"view_item_id": "v1"}}, tmp_path,
@@ -456,7 +462,7 @@ class _Response(io.BytesIO):
 
 
 def _urlopen(answers, seen):
-    def fake(url, timeout=None):
+    def fake(url, timeout=None, context=None):
         seen.append(url)
         answer = answers[url.split("/query?")[0]]
         if isinstance(answer, BaseException):
@@ -533,7 +539,7 @@ def test_migrate_apply_ends_with_the_anonymous_check(monkeypatch):
     monkeypatch.setattr(publish, "connect_agol", lambda config: "gis")
     monkeypatch.setattr(publish, "ensure_service", lambda gis, config, target: item)
     monkeypatch.setattr(publish, "get_tables", lambda i: {"T": SimpleNamespace(url="https://h/svc1/0")})
-    monkeypatch.setattr(publish, "apply_migration", lambda tables, item=None: None)
+    monkeypatch.setattr(publish, "apply_migration", lambda tables, item=None, **k: None)
     monkeypatch.setattr("urllib.request.urlopen", _urlopen({"https://h/svc1/0": {"features": []}}, []))
     with pytest.raises(SystemExit, match="Anonymous users may read"):
         publish.run_migration({"arcgis": {}}, SimpleNamespace(target="prod", apply=True))
@@ -585,10 +591,10 @@ def test_interactive_rule_stays_on_unless_the_value_is_false(value):
             == collect.DEFAULT_INTERACTIVE_REQUIRED_PATTERN)
 
 
-def test_the_logon_note_names_the_single_use_licence():
+def test_the_logon_note_names_the_single_use_and_named_user_licences():
     (note,) = collect.check_logon_type_drift(collect.DEFAULT_INTERACTIVE_REQUIRED_PATTERN + "\\python.exe",
                                              "Password")
-    assert "With a Single Use licence, arcpy is licensed only in the Interactive session." in note
+    assert "With a Single Use or a Named User licence, arcpy is licensed only in the Interactive session." in note
 
 
 # ------------------------------------------------------------------ 10. capture warning
@@ -704,7 +710,7 @@ def test_the_manual_create_view_tells_the_user_to_share_with_the_viewers_group(m
     monkeypatch.setattr(publish, "create_view", lambda *a, **k: view)
     monkeypatch.setattr(publish, "table_urls", lambda *a: [])
     monkeypatch.setattr(publish, "require_no_anonymous_access", lambda urls: None)
-    publish.run_create_view({}, SimpleNamespace(target="prod", apply=True))
+    publish.run_create_view({}, SimpleNamespace(target="prod", apply=True, replace=False))
     assert "owner only" in capsys.readouterr().out
 
 
@@ -830,6 +836,11 @@ BYPASS_CASES = [
     (f"$pw = '{DUMMY}'", "$pw = <redacted>"),
     (f'$password = "{DUMMY} two"', "$password = <redacted>"),
     (f"$ApiToken='{DUMMY}'; Invoke-X", "$ApiToken=<redacted>; Invoke-X"),
+    (f"net user svc {DUMMY} /add", "net user svc <redacted> /add"),
+    (f"sqlplus scott/{DUMMY}@orcl @report.sql", "sqlplus scott/<redacted>@orcl @report.sql"),
+    (f"sqlplus -S scott/{DUMMY}@orcl", "sqlplus -S scott/<redacted>@orcl"),
+    (f"sshpass -p {DUMMY} ssh -p 2222 u@h", "sshpass -p <redacted> ssh -p 2222 u@h"),
+    (f"sshpass -p{DUMMY} ssh u@h", "sshpass -p<redacted> ssh u@h"),
 ]
 
 
@@ -857,6 +868,12 @@ BYPASS_NOT_SECRETS = [
     "Out-File -Encoding utf8 x.txt",
     "$name = 'report'",
     "$path = 'C:\\Jobs'",
+    "net user svc /domain",
+    "net user svc\nnext line",
+    "net user svc * /domain",
+    "sqlplus / as sysdba",
+    "sqlplus -S /nolog",
+    "sshpass -e ssh -p 22 u@h",
 ]
 
 
@@ -868,7 +885,8 @@ def test_the_new_scrubber_forms_leave_ordinary_text_alone(text):
 def test_the_scrubber_stays_linear_on_many_mysql_tokens():
     import time
     # 16 KB as specified; the 64 KB line is the one the old lazy-bridge pattern fails (seconds).
-    for text in ("mysql " * 2731, "mysql " * 10923, "mysql -p" * 2048, "psexec -p " * 1640, "$" + "a" * 16000 + " = 1", "-eyJ" * 16000):
+    for text in ("mysql " * 2731, "mysql " * 10923, "mysql -p" * 2048, "psexec -p " * 1640, "$" + "a" * 16000 + " = 1", "-eyJ" * 16000,
+                 "sqlplus -S " * 1500, "sshpass -x " * 1500, "net user a " * 1500):
         started = time.perf_counter()
         publish._scrub_secrets(text)
         assert time.perf_counter() - started < 0.5, text[:20]

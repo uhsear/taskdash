@@ -40,6 +40,7 @@ import taskdash_collect as collect
 import taskdash_metrics as metrics
 from taskdash_common import (
     DEFAULT_CHUNK_SIZE,
+    config_default,
     STALE_LOCK_HOURS,
     TABLE_COLLECTOR_RUNS,
     TABLE_INVENTORY,
@@ -49,20 +50,25 @@ from taskdash_common import (
     TABLE_TASK_CHANGES,
     SCHEMA_VERSION,
     TASKDASH_VERSION,
+    CONFIG_ARG_HELP,
+    MANUAL_LOG_PREFIX,
     PowerShellTimeout,
     RunLockHeld,
     apply_edits_chunked,
     atomic_write_json,
     chunked,
+    command_text,
     strip_control_chars,
     cleanup_old_logs,
     write_bootstrap_fail,
     max_field_value,
+    mail_failure_hint,
     arcgis_version_warning,
     connect_agol,
     emit,
     escape_sql_string,
     get_host_name,
+    host_clause,
     get_tables,
     load_config,
     make_field,
@@ -277,6 +283,12 @@ OPTIONAL_TABLES = (TABLE_METRIC_CHANGE,)
 REQUIRED_TABLES = tuple(name for name in TABLE_SPECS if name not in OPTIONAL_TABLES)
 
 
+def migrate_apply(target: str = "prod") -> str:
+    """The command a refusal names to create or repair the schema. It carries the run's own
+    --target, so a test run is never told to write schema to the production service."""
+    return command_text("collect", "--migrate", "--target", target, "--apply")
+
+
 # Field sets match the upsert/sync keys actually used in publish(): TaskRuns.run_key
 # (upsert_by_key), TaskInventory (host_name, task_full_name) (sync_inventory), TaskMetrics
 # (host_name, task_full_name, metric_key, log_file_name) (upsert_by_key). The non-unique
@@ -454,7 +466,7 @@ def find_duplicate_keys(table: Any, key_fields: Sequence[str], limit: int = 5) -
     return dupes
 
 
-def check_schema_drift(tables: Dict[str, Any]) -> None:
+def check_schema_drift(tables: Dict[str, Any], target: str = "prod") -> None:
     """Refuse to publish against a table missing field(s), or a unique index a keyed upsert
     relies on to survive a resent write, that the current code needs.
 
@@ -472,7 +484,7 @@ def check_schema_drift(tables: Dict[str, Any]) -> None:
     missing_tables = [name for name in REQUIRED_TABLES if name not in tables]
     if missing_tables:
         emit(f"WARNING: table(s) not found on the service: {', '.join(missing_tables)} -- "
-            f"run --migrate --apply to create them.")
+            f"run {migrate_apply(target)} to create them.")
 
     problems = []
     type_warnings = []
@@ -536,7 +548,7 @@ def describe_migration(tables: Dict[str, Any]) -> bool:
     return changed
 
 
-def apply_migration(tables: Dict[str, Any], item: Any = None) -> None:
+def apply_migration(tables: Dict[str, Any], item: Any = None, target: str = "prod") -> None:
     """Add missing fields, then missing indexes. Additive only -- never drops or retypes.
 
     With `item` (the service's Item, from run_migration), a table entirely absent from `tables`
@@ -561,7 +573,7 @@ def apply_migration(tables: Dict[str, Any], item: Any = None) -> None:
             tables = get_tables(item)
             if name not in tables:
                 raise SystemExit(
-                    f"{name}: created but not found on re-query -- re-run --migrate --apply.\n"
+                    f"{name}: created but not found on re-query -- run {migrate_apply(target)} again.\n"
                     + see_troubleshooting("A schema change failed")
                 )
         table = tables[name]
@@ -594,7 +606,7 @@ def apply_migration(tables: Dict[str, Any], item: Any = None) -> None:
             emit(f"{name}: added {'unique ' if spec['unique'] else ''}index on "
                  f"{', '.join(spec['fields'])}.")
     if item is not None:
-        stamp_service_version(item)
+        stamp_service_version(item, target)
 
 
 def service_schema_version(item: Any) -> Optional[int]:
@@ -619,7 +631,7 @@ def warn_if_service_schema_newer(item: Any) -> None:
         emit(newer_schema_warning(item, stamp))
 
 
-def stamp_service_version(item: Any) -> None:
+def stamp_service_version(item: Any, target: str = "prod") -> None:
     """Record which TaskDash and schema version last migrated the service, in the item's
     properties. Other keys in properties are kept. A newer stamp is never lowered."""
     current = service_schema_version(item)
@@ -630,7 +642,7 @@ def stamp_service_version(item: Any) -> None:
     properties = dict(getattr(item, "properties", None) or {})
     properties.update({"taskdash_version": TASKDASH_VERSION, "taskdash_schema_version": SCHEMA_VERSION})
     if not item.update(item_properties={"properties": json.dumps(properties)}):
-        raise SystemExit(f"Could not stamp the version on service {item.id}. Re-run --migrate --apply.\n"
+        raise SystemExit(f"Could not stamp the version on service {item.id}. Run {migrate_apply(target)} again.\n"
                          + see_troubleshooting("The version stamp could not be saved"))
     emit(f"Service stamped: TaskDash {TASKDASH_VERSION}, schema {SCHEMA_VERSION}.")
 
@@ -971,9 +983,7 @@ def summarize_runs_from_agol(runs_table: Any, host_name: str,
     differ from a 90-day read are mean_duration_seconds (now a 30-day mean, a fallback used only
     when the baseline has under 5 runs) and a stuck Running row older than the window.
     """
-    from taskdash_common import escape_sql_string
-
-    host_where = f"host_name = '{escape_sql_string(host_name)}'"
+    host_where = host_clause(host_name)
     now = now or utc_now()
     cutoff = now - dt.timedelta(days=DURATION_BASELINE_WINDOW_DAYS)
     fields = ("task_full_name,start_time_utc,duration_seconds,is_error,run_status,result_text,"
@@ -1369,7 +1379,7 @@ def fetch_other_host_counts(table: Any, host_name: str, now: dt.datetime) -> Lis
     counts describe no run in the current one. Its rows (and its old stamp, which the tile's MIN
     can still pick) stay until they are deleted -- the heartbeat already shows that host DOWN.
     """
-    rows = query_all_rows(table, where=f"host_name <> '{escape_sql_string(host_name)}'",
+    rows = query_all_rows(table, where=host_clause(host_name, exclude=True),
                           out_fields="host_name,collected_at_utc,runs_last_7_days,failures_last_7_days")
     cutoff = to_epoch_millis(now - dt.timedelta(days=7))
     return [r for r in rows if (safe_float(r.get("collected_at_utc")) or 0) >= cutoff]
@@ -1389,13 +1399,23 @@ def ensure_service(gis: Any, config: Dict[str, Any], target: str) -> Any:
         raise SystemExit(
             f"No arcgis.{key} in the config. A new install runs `taskdash setup --apply`, which "
             f"creates the service and fills the id in. To add a service to an existing install, "
-            f"run --create-service, then paste the returned item id into the config.\n"
+            f"run {command_text('collect', '--create-service', '--apply')}, then paste the returned item id "
+            f"into the config.\n"
             + see_troubleshooting("The service is not in the config")
         )
     item = gis.content.get(item_id)
     if item is None:
         raise SystemExit(f"ArcGIS item {item_id} not found or not visible to this account.\n"
                          + see_troubleshooting("The service or view item cannot be found"))
+    # A view or a dashboard id here otherwise ends in a misleading schema-drift or raw error.
+    item_type, keywords = getattr(item, "type", None), getattr(item, "typeKeywords", None)
+    is_view = isinstance(keywords, (list, tuple)) and "View Service" in keywords
+    if (isinstance(item_type, str) and item_type != "Feature Service") or is_view:
+        shown = "a hosted view" if is_view else f"an item of type '{item_type}'"
+        raise SystemExit(f"arcgis.{key} is {item_id}, which is {shown}. It must be the hosted table service that "
+                         f"the collector writes to. Put the view's id in arcgis.{view_key(target)} and the "
+                         "dashboard's id in arcgis.dashboard_id.\n"
+                         + see_troubleshooting("The service id holds a view or a dashboard"))
     return item
 
 
@@ -1580,7 +1600,7 @@ def view_shown_hidden_fields(view_tables: Dict[str, Any], config: Dict[str, Any]
     return shown
 
 
-def migrate_view(view_item: Any, config: Dict[str, Any], apply: bool) -> None:
+def migrate_view(view_item: Any, config: Dict[str, Any], apply: bool, target: str = "prod") -> None:
     """Report (or with apply, fix) the view's fields: expose service fields it lacks, and hide
     fields the switches hide that it still shows. Whether AGOL views pick up new source fields on
     their own is unverified, so this reads the view as it is now and acts only on the difference."""
@@ -1588,7 +1608,8 @@ def migrate_view(view_item: Any, config: Dict[str, Any], apply: bool) -> None:
     absent = sorted(set(TABLE_SPECS) - set(view_tables))
     if absent:
         emit(f"WARNING: the view has no table(s) {', '.join(absent)}; a view cannot gain a "
-             f"table here. Create a new view with --create-view and update the config.")
+             f"table here. Recreate the view with {command_text('collect', '--create-view', '--replace', '--apply')}: "
+             f"see 'Rebuild or move the ArcGIS items' in docs/TROUBLESHOOTING.md for the steps.")
     missing = view_missing_fields(view_tables, config)
     exposed = view_shown_hidden_fields(view_tables, config)
     if not missing and not exposed:
@@ -1608,11 +1629,11 @@ def migrate_view(view_item: Any, config: Dict[str, Any], apply: bool) -> None:
             if fields:
                 _definition_update(view_tables[name].manager, {"fields": fields}, f"{name} fields")
 
-    update_then_resend(update, view_item, lambda: get_tables(view_item))
+    update_then_resend(update, view_item, lambda: get_tables(view_item), target)
 
 
 def update_then_resend(update: Callable[[], None], view_item: Any,
-                       view_tables: Callable[[], Dict[str, Any]]) -> None:
+                       view_tables: Callable[[], Dict[str, Any]], target: str = "prod") -> None:
     """Run a view field update, then re-send the capabilities even after a failed update: a partly
     applied field change can still have reopened Query. A re-send that fails while the update's
     own error propagates is a WARNING, so it never masks that error."""
@@ -1623,7 +1644,7 @@ def update_then_resend(update: Callable[[], None], view_item: Any,
             resend_view_capabilities(view_item, view_tables())
         except Exception as exc:
             emit(f"WARNING: re-sending the view capabilities ({VIEW_CAPABILITIES}) also failed "
-                 f"({type(exc).__name__}: {exc}). Re-run --migrate --apply, then --check-anonymous.")
+                 f"({type(exc).__name__}: {exc}). Run {migrate_apply(target)} again, then {command_text('collect', '--check-anonymous')}.")
         raise
     resend_view_capabilities(view_item, view_tables())
 
@@ -1646,13 +1667,14 @@ def warn_shared_source(item: Any) -> None:
 
 
 def check_source_sharing(item: Any, config: Dict[str, Any], target: str) -> None:
-    """With a view configured, the service itself must not be shared: Esri's view pattern keeps the
-    editable source owner-only. Reads only item.access, loaded with the item: item_sharing
-    makes several portal requests, and this runs hourly outside the outage-tolerant block."""
-    if not normalize_text(config.get("arcgis", {}).get(view_key(target))):
-        return
+    """A public service is refused whether or not a view is configured: it allows anonymous edits.
+    With a view configured, the service must not be shared at all (a warning for org and group
+    sharing): Esri's view pattern keeps the editable source owner-only. Reads only item.access,
+    loaded with the item: item_sharing makes several portal requests, and this runs hourly
+    outside the outage-tolerant block."""
     refuse_public_source(item)
-    warn_shared_source(item)
+    if normalize_text(config.get("arcgis", {}).get(view_key(target))):
+        warn_shared_source(item)
 
 
 def check_release_sharing(gis: Any, config: Dict[str, Any], target: str) -> None:
@@ -1679,12 +1701,14 @@ def check_release_sharing(gis: Any, config: Dict[str, Any], target: str) -> None
 
 def create_view(gis: Any, item: Any, config: Dict[str, Any], apply: bool,
                 target: str = "prod", folder: Optional[str] = None,
-                on_create: Optional[Callable[[Any], None]] = None) -> Optional[Any]:
+                on_create: Optional[Callable[[Any], None]] = None,
+                name: Optional[str] = None) -> Optional[Any]:
     """Plan (default) or create the read-only view of the service, then print its item id.
-    on_create gets the view as soon as it exists, so a caller can record it before a later step fails."""
+    on_create gets the view as soon as it exists, so a caller can record it before a later step fails.
+    name overrides the default '<service title>_view' for the title and the service (URL) name."""
     from arcgis.features import FeatureLayerCollection
 
-    name = f"{item.title}_view"
+    name = name or f"{item.title}_view"
     hidden = view_hidden_fields(config)
     # access first: a public service stops here before the sharing requests.
     refuse_public_source(item)
@@ -1701,9 +1725,11 @@ def create_view(gis: Any, item: Any, config: Dict[str, Any], apply: bool,
                                         item_type="Feature Service"):
         if candidate.title == name:
             raise SystemExit(f"A feature service named '{name}' already exists ({candidate.id}). "
-                             f"It may be half-configured by an earlier failed run, with no fields "
-                             f"hidden. Delete it in ArcGIS Online and re-run; do not set "
-                             f"arcgis.{view_key(target)} to it.\n"
+                             f"It may be the view you are replacing, or a view that an earlier failed "
+                             f"run left with no fields hidden. Delete it in ArcGIS Online and re-run, unless "
+                             f"it is the view you use now. Then rename its title (add _old) and re-run; "
+                             f"delete it only after the dashboard reads the new view. Do "
+                             f"not set arcgis.{view_key(target)} to it.\n"
                              + see_troubleshooting("A view with that name exists, and it may be half built"))
     # updateable=False: the library default makes an updatable view, one setting from an edit path.
     extra = {"folder": folder} if folder else {}
@@ -1722,7 +1748,7 @@ def create_view(gis: Any, item: Any, config: Dict[str, Any], apply: bool,
     absent = sorted(set(REQUIRED_TABLES) - set(view_tables))
     if absent:
         raise SystemExit(f"The new view {view.id} has no table(s) {', '.join(absent)}. Run "
-                         f"--migrate --apply on the service first, delete the view, and retry.\n"
+                         f"{migrate_apply(target)} on the service first, delete the view, and retry.\n"
                          + see_troubleshooting("The new view has no tables"))
     def update() -> None:
         for table_name, fields in hidden.items():
@@ -1730,7 +1756,7 @@ def create_view(gis: Any, item: Any, config: Dict[str, Any], apply: bool,
                                {"fields": [{"name": f, "visible": False} for f in fields]},
                                f"{table_name} hidden fields")
 
-    update_then_resend(update, view, lambda: view_tables)
+    update_then_resend(update, view, lambda: view_tables, target)
     # Owner only: the service's org and group sharing is not copied. This call confirms it is private.
     share_item(view)
     warn_shared_source(item)
@@ -1754,14 +1780,32 @@ def _arcgis_error_code(raw: bytes) -> Optional[int]:
     return safe_int(error.get("code")) if isinstance(error, dict) else None
 
 
+def _anonymous_ssl_context() -> Optional[Any]:
+    """The probe's TLS trust, equal to an ArcGIS call's. requests (so arcgis) reads REQUESTS_CA_BUNDLE,
+    the fix TaskDash tells users to set behind a TLS-inspecting proxy; urllib ignores it. None means the
+    default context, which already trusts the Windows certificate store."""
+    import ssl
+
+    bundle = os.environ.get("REQUESTS_CA_BUNDLE") or os.environ.get("SSL_CERT_FILE")
+    if not bundle:
+        return None
+    context = ssl.create_default_context()
+    if os.path.isdir(bundle):
+        context.load_verify_locations(capath=bundle)
+    else:
+        context.load_verify_locations(cafile=bundle)
+    return context
+
+
 def _anonymous_answer(url: str, timeout: int) -> str:
     """'' when an anonymous query of the table was refused, else what came back instead."""
+    import ssl
     import urllib.error
     import urllib.request
 
     query = f"{url.rstrip('/')}/query?where=1%3D1&resultRecordCount=1&f=json"
     try:
-        with urllib.request.urlopen(query, timeout=timeout) as response:
+        with urllib.request.urlopen(query, timeout=timeout, context=_anonymous_ssl_context()) as response:
             raw = response.read()
     except urllib.error.HTTPError as exc:
         if exc.code not in (401, 403):
@@ -1774,6 +1818,10 @@ def _anonymous_answer(url: str, timeout: int) -> str:
             f"HTTP {exc.code} without an ArcGIS error body (a proxy or firewall may have answered), "
             f"{_INCONCLUSIVE}")
     except (urllib.error.URLError, OSError, ValueError) as exc:
+        if isinstance(getattr(exc, "reason", exc), ssl.SSLError):
+            return (f"no readable answer ({type(exc).__name__}): the certificate was not trusted. Set the "
+                    f"REQUESTS_CA_BUNDLE variable to the proxy's root certificate file, as for ArcGIS "
+                    f"calls, {_INCONCLUSIVE}")
         return f"no readable answer ({type(exc).__name__}), {_INCONCLUSIVE}"
     try:
         body = json.loads(raw.decode("utf-8", errors="replace") or "{}")
@@ -1802,7 +1850,7 @@ def table_urls(*items: Any) -> List[str]:
 
 
 ANONYMOUS_FIX = ("Set the service sharing to Owner and the view to your organization or groups in "
-                 "ArcGIS Online. Then run --check-anonymous. An inconclusive line means the answer "
+                 f"ArcGIS Online. Then run {command_text('collect', '--check-anonymous')}. An inconclusive line means the answer "
                  "did not come from ArcGIS: open the query URL in a private browser window to "
                  "confirm it asks for a sign-in.")
 
@@ -1816,12 +1864,107 @@ def require_no_anonymous_access(urls: Iterable[str]) -> None:
     emit("Anonymous check: every table refused a query without a token.")
 
 
+def _rename_old_view(old: Any, title: str) -> None:
+    """Free the title for the new view. A re-run after a failed attempt finds it already renamed."""
+    if normalize_text(old.title) == title:
+        return
+    if not old.update(item_properties={"title": title}):
+        raise SystemExit(f"Could not rename the old view {old.id} to '{title}'. Rename it in ArcGIS "
+                         f"Online, then run the command again.\n"
+                         + see_troubleshooting("A view with that name exists, and it may be half built"))
+    emit(f"Renamed the old view to '{title}'. The config still names it until the new view is ready.")
+
+
+def _free_view_name(gis: Any, item: Any) -> str:
+    """A view name no service in the organization uses. Renaming the old view's title does not free
+    its service (URL) name, which stays unique across the organization, so the new view needs another."""
+    base = f"{item.title}_view"
+    for number in range(2, 20):
+        name = f"{base}_v{number}"
+        if gis.content.is_service_name_available(name, "featureService"):
+            return name
+    raise SystemExit(f"No free service name from '{base}_v2' to '{base}_v19'. Delete the unused views "
+                     f"with those names in ArcGIS Online, then run the command again.\n"
+                     + see_troubleshooting("A view with that name exists, and it may be half built"))
+
+
+def run_replace_view(config: Dict[str, Any], args: argparse.Namespace, old_id: str) -> int:
+    """--create-view --replace: build a new view beside the one the config names, give it that view's
+    sharing and delete protection, and point the config, the manifest and the dashboard at it. The old
+    view is renamed and kept: only its owner deletes it, after the dashboard reads the new one."""
+    from taskdash_setup import (backup_config, config_file, protect_items, replace_manifest_view,
+                                write_config_key)
+
+    key = view_key(args.target)
+    if not old_id:
+        raise SystemExit(f"arcgis.{key} is empty, so there is no view to replace. Run "
+                         f"{command_text('collect', '--create-view', '--apply')} to make the first view.\n"
+                         + see_troubleshooting("A view already exists"))
+    gis = connect_agol(config)
+    item = ensure_service(gis, config, args.target)
+    old = gis.content.get(old_id)
+    if old is None:
+        raise SystemExit(f"View item {old_id} not found or not visible to this account.\n"
+                         + see_troubleshooting("The service or view item cannot be found"))
+    sharing = item_sharing(old)
+    refuse_public_sharing(sharing["everyone"])
+    old_title = normalize_text(old.title)
+    renamed = old_title if old_title.endswith("_old") else f"{old_title}_old"
+    protected = getattr(old, "protected", False) is True
+    folder_id = getattr(old, "ownerFolder", None)
+    folder = gis.content.folders.get(folder=folder_id) if folder_id else None
+    new_name = _free_view_name(gis, item)
+    emit(f"Plan: replace view '{old_title}' ({old.id}). Rename it '{renamed}' and keep it. Create "
+         f"'{new_name}'. Copy its sharing ({'organization, ' if sharing['org'] else ''}"
+         f"{len(sharing['groups'])} group(s)) and delete protection ({'on' if protected else 'off'}) "
+         f"to the new view.")
+    emit(f"Plan: set arcgis.{key} to the new view, update the setup manifest and rebuild the dashboard.")
+    if args.apply:
+        refuse_public_source(item)  # before the rename: a refusal then leaves the old view as it was
+        _rename_old_view(old, renamed)
+    new = create_view(gis, item, config, args.apply, args.target, folder=folder, name=new_name,
+                      on_create=lambda v: emit(f"New view item {v.id} exists. If this run stops, delete "
+                                               f"it in ArcGIS Online before you run the command again."))
+    if new is None:
+        emit("DRY RUN - nothing written. Re-run with --create-view --replace --apply to replace the view.")
+        return 0
+    path = config_file(args)
+    share_item(new, org=sharing["org"], groups=sharing["groups"])
+    # Before the config write and the protection: a refusal then leaves the config on the old view
+    # and the new view deletable, so the advice above to delete it and run again holds.
+    require_no_anonymous_access(table_urls(item, new))
+    if protected:
+        protect_items([new], [])
+    backup_config(path)
+    write_config_key(path, config, key, new.id)
+    if replace_manifest_view(path, old.id, new):
+        emit("Setup manifest: the new view replaces the old one, so `taskdash remove` knows it.")
+    else:
+        emit("Setup manifest: it does not list the old view, so it is unchanged.")
+    emit(f"Created view '{new.title}' -> item id {new.id}; arcgis.{key} now names it.")
+    from taskdash_dashboard import main as rebuild_dashboard
+    try:
+        rebuild_dashboard(["--target", args.target, "--apply"]
+                          + (["--config", args.config] if args.config else []))
+    except SystemExit as exc:
+        emit(f"WARNING: the dashboard rebuild stopped: {exc}\nRun "
+             f"{command_text('dashboard', '--target', args.target, '--apply')} once the cause is fixed.")
+        return 1
+    emit(f"The old view '{renamed}' ({old.id}) still exists. Check that the dashboard shows data. Then "
+         f"open that view in ArcGIS Online, turn off delete protection and delete it. TaskDash never "
+         f"deletes it.")
+    return 0
+
+
 def run_create_view(config: Dict[str, Any], args: argparse.Namespace) -> int:
     key = view_key(args.target)
     existing = normalize_text(config.get("arcgis", {}).get(key))
+    if args.replace:
+        return run_replace_view(config, args, existing)
     if existing:
-        raise SystemExit(f"arcgis.{key} is already {existing}; the view exists. Remove the key "
-                         f"only if you mean to create another view.\n"
+        raise SystemExit(f"arcgis.{key} is already {existing}; the view exists. To replace it, run "
+                         f"{command_text('collect', '--create-view', '--replace', '--apply')}. To make "
+                         f"another view, remove the key first.\n"
                          + see_troubleshooting("A view already exists"))
     gis = connect_agol(config)
     item = ensure_service(gis, config, args.target)
@@ -1889,8 +2032,7 @@ def fetch_keys(table: Any, rows: Sequence[Dict[str, Any]], key_fields: Sequence[
                 index[folded_key(row, key_fields)] = row.get(oid_field)
         return index
     hosts = {normalize_text(row.get("host_name")) for row in rows if row.get("host_name")}
-    where = ("host_name IN (" + ",".join(f"'{escape_sql_string(h)}'" for h in hosts) + ")"
-            if hosts else "1=1")
+    where = host_clause(*sorted(hosts)) if hosts else "1=1"
     if extra_where:
         where = f"{where} AND {extra_where}"
     for row in query_all_rows(table, where=where, out_fields=out_fields):
@@ -2105,7 +2247,7 @@ def _inventory_key(row: Dict[str, Any]) -> str:
 def _inventory_index(table: Any, host_name: str, oid_field: str) -> Dict[str, List[Any]]:
     """This host's stored task_full_name (case-folded) -> every OID stored under it (normally one;
     more than one is a duplicate row left by an earlier resent write, healed by sync_inventory)."""
-    host_where = f"host_name = '{escape_sql_string(host_name)}'"
+    host_where = host_clause(host_name)
     existing = query_all_rows(table, where=host_where, out_fields=f"{oid_field},task_full_name")
     index: Dict[str, List[Any]] = {}
     for row in existing:
@@ -2137,14 +2279,66 @@ def _inventory_edits(
 def _previous_name_is_live(runs_table: Any, name: str, interval_minutes: float) -> bool:
     """True when a collector under `name` ran within 2 collector intervals (the status and
     heartbeat late threshold): a replacement computer that took the old name is still publishing."""
-    result = runs_table.query(where=f"host_name = '{escape_sql_string(name)}'", out_fields="started_utc",
-                              return_geometry=False, order_by_fields="started_utc DESC",
-                              result_record_count=1)
+    result = with_retry(lambda: runs_table.query(
+        where=host_clause(name), out_fields="started_utc",
+        return_geometry=False, order_by_fields="started_utc DESC", result_record_count=1),
+        label="previous-host liveness query")
     features = getattr(result, "features", None) or []
     started = features[0].attributes.get("started_utc") if features else None
     if not isinstance(started, (int, float)):
         return False
     return utc_now().timestamp() * 1000 - started < 2 * interval_minutes * 60000
+
+
+def fetch_silent_peers(runs_table: Any, inventory_table: Any, host_name: str, now: dt.datetime,
+                       silent_after_minutes: float) -> List[Tuple[str, dt.datetime]]:
+    """The other computers whose newest CollectorRuns row is older than silent_after_minutes, as
+    (name, newest start), longest silent first. One grouped query on each table: a computer that
+    stopped has no new row, so only its newest start says so. Only a computer that still has
+    TaskInventory rows counts, the dashboard heartbeat's rule: --retire-host removes the inventory
+    but keeps CollectorRuns rows until retention, so those rows alone would list it for months."""
+    named = with_retry(lambda: inventory_table.query(
+        where=host_clause(host_name, exclude=True), out_fields="host_name",
+        return_geometry=False, group_by_fields_for_statistics="host_name",
+        out_statistics=[{"statisticType": "count", "onStatisticField": "host_name",
+                         "outStatisticFieldName": "inventory_rows"}]),
+        label="other computers' inventory")
+    in_inventory = {normalize_text(feature.attributes.get("host_name")).lower()
+                    for feature in getattr(named, "features", None) or []}
+    result = with_retry(lambda: runs_table.query(
+        where=host_clause(host_name, exclude=True), out_fields="host_name",
+        return_geometry=False, group_by_fields_for_statistics="host_name",
+        out_statistics=[{"statisticType": "max", "onStatisticField": "started_utc",
+                         "outStatisticFieldName": "newest_start"}]),
+        label="other computers' newest collector run")
+    limit = now.timestamp() * 1000 - silent_after_minutes * 60000
+    peers = []
+    for feature in getattr(result, "features", None) or []:
+        name = normalize_text(feature.attributes.get("host_name"))
+        newest = safe_float(feature.attributes.get("newest_start"))
+        if name and name.lower() in in_inventory and newest is not None and newest < limit:
+            peers.append((name, dt.datetime.fromtimestamp(newest / 1000, tz=dt.timezone.utc)))
+    return sorted(peers, key=lambda peer: peer[1])
+
+
+def _silent_peer_lines(collected: Dict[str, Any]) -> List[str]:
+    """The daily check's lines about other computers that stopped. collected["silent_peers"] is a
+    callable set by the publish run, so the hourly runs that send nothing never run the query. A
+    failed read is a WARNING and no lines: the daily check must still go out."""
+    load = collected.get("silent_peers")
+    if load is None:
+        return []
+    try:
+        peers, minutes = load()
+    except Exception as exc:
+        emit(f"WARNING: could not read the other computers' collector runs for the daily check "
+             f"({type(exc).__name__}: {_scrub_secrets(normalize_text(exc))[:200]}). The e-mail leaves them out.")
+        return []
+    if not peers:
+        return []
+    return ["", f"{len(peers)} other computer(s) with no collector run in the last {minutes:g} min:",
+            *(f"  {name}: last run {_local_stamp(moment)}" for name, moment in peers),
+            f"If one is gone for good, retire it: {command_text('collect', '--retire-host', '<name>')}"]
 
 
 def adopt_previous_hosts(table: Any, host_name: str, previous_names: Sequence[str],
@@ -2180,7 +2374,7 @@ def adopt_previous_hosts(table: Any, host_name: str, previous_names: Sequence[st
              f"publishes under that name. Stop its collector first, or remove '{name}' from host_previous_names.")
     names = [n for n in names if n not in live]
     for name in names:
-        where = f"host_name = '{escape_sql_string(name)}'"
+        where = host_clause(name)
         for row in query_all_rows(table, where=where, out_fields=f"{oid_field},task_full_name"):
             key = _inventory_key(row)
             if key not in collected_keys:
@@ -2278,7 +2472,7 @@ def event_watermark(runs_table: Any, host_name: str, newest: Optional[int]) -> i
     90-day purge, so each pass would read nothing (or re-read the whole window) for months. The
     bound makes the first pass after a reset a window read and later passes normal again.
     """
-    host_where = f"host_name = '{escape_sql_string(host_name)}'"
+    host_where = host_clause(host_name)
     stored = int(max_field_value(runs_table, "max_event_record_id", where=host_where) or 0)
     if newest is None or stored <= newest:
         return stored
@@ -2290,8 +2484,10 @@ def event_watermark(runs_table: Any, host_name: str, newest: Optional[int]) -> i
 
 
 def resolve_log_dir(config: Dict[str, Any]) -> Path:
-    """TaskDash's own log folder; metrics mining must skip it, so both sides use this."""
-    return Path(normalize_text(config.get("logging", {}).get("log_dir")) or (runtime_dir() / "Logs"))
+    """TaskDash's own log folder; metrics mining must skip it, so both sides use this.
+    A relative log_dir is anchored to the TaskDash folder, not to the folder the command ran from."""
+    configured = Path(normalize_text(config.get("logging", {}).get("log_dir")) or "Logs")
+    return configured if configured.is_absolute() else runtime_dir() / configured
 
 
 FIRST_RUN_BUDGET_FILE = "first_run_budget.json"
@@ -2431,7 +2627,7 @@ def read_run_events(history: Dict[str, Any], timeout: int, min_record_id: int,
     if max_events:
         configured, budget_setting = max_events, "history.first_run_max_events"
     else:
-        configured = int(history.get("max_events_per_run", 5000))
+        configured = int(history.get("max_events_per_run", config_default("history.max_events_per_run")))
         budget_setting = "history.max_events_per_run"
     event_budget = configured
     if budget_path:
@@ -2445,7 +2641,7 @@ def read_run_events(history: Dict[str, Any], timeout: int, min_record_id: int,
         emit(f"Incremental fetch: events newer than record id {min_record_id}.")
     try:
         raw_events = collect.collect_run_events(
-            int(history.get("days_back", 30)), event_budget, timeout, min_record_id=min_record_id)
+            int(history.get("days_back", config_default("history.days_back"))), event_budget, timeout, min_record_id=min_record_id)
     except PowerShellTimeout:
         # ponytail: a timed-out read repeated itself every hour (the watermark stays put until
         # a read gets through). Halve the next budget, saved in the log folder, so a
@@ -2523,7 +2719,9 @@ def read_run_events(history: Dict[str, Any], timeout: int, min_record_id: int,
 # with no daylight-saving time; TEST had stored v7 notes in the old wording.
 # v9 (phase 2.5): the LogonType note names the Single Use licence, and privacy.hide_paths (on by
 # default) puts "(path hidden)" in the not-found notes. Both change stored note text.
-DEFINITION_HASH_PREFIX = "v9"
+# v10 (audit TD-148, TD-041, TD-042): the LogonType note also names the Named User licence, and the
+# not-found notes name the path under the Start-in folder and cover every action of a task.
+DEFINITION_HASH_PREFIX = "v10"
 
 
 def compute_definition_hash(raw: Dict[str, Any]) -> str:
@@ -2601,9 +2799,9 @@ def mine_metrics(config: Dict[str, Any], inventory: Sequence[Dict[str, Any]],
     return metrics.build_metric_rows(
         inventory,
         host_name=host_name,
-        days_back=int(metrics_cfg.get("days_back", 30)),
-        max_files_per_task=int(metrics_cfg.get("max_log_files_per_task", 40)),
-        max_lines_per_file=int(metrics_cfg.get("max_lines_per_file", 5000)),
+        days_back=int(metrics_cfg.get("days_back", config_default("metrics.days_back"))),
+        max_files_per_task=int(metrics_cfg.get("max_log_files_per_task", config_default("metrics.max_log_files_per_task"))),
+        max_lines_per_file=int(metrics_cfg.get("max_lines_per_file", config_default("metrics.max_lines_per_file"))),
         log_directory_overrides=metrics_cfg.get("log_directory_overrides") or {},
         own_log_dir=resolve_log_dir(config),
         examined=examined,
@@ -2612,7 +2810,7 @@ def mine_metrics(config: Dict[str, Any], inventory: Sequence[Dict[str, Any]],
 
 def interactive_pattern(scheduler: Dict[str, Any]) -> str:
     """scheduler.interactive_required_pattern: only the boolean false turns the LogonType check off,
-    for an install whose Pro licence is not Single Use. A missing key, null or "" keeps the ArcGIS
+    for an install whose Pro licence also works in a background session. A missing key, null or "" keeps the ArcGIS
     Pro default, as before Phase 2.5: a blanked value must not silently drop the check."""
     value = scheduler.get("interactive_required_pattern")
     if value is False:
@@ -2622,11 +2820,12 @@ def interactive_pattern(scheduler: Dict[str, Any]) -> str:
 
 def collect_everything(config: Dict[str, Any], fixture: Optional[Path],
                        min_record_id: int = 0, max_events: int = 0,
-                       first_run_budget: bool = True, target: str = "prod") -> Dict[str, Any]:
+                       first_run_budget: bool = True, target: str = "prod",
+                       stored_durations: Optional[Dict[str, float]] = None) -> Dict[str, Any]:
     host_name = get_host_name(config)
     scheduler = config.get("scheduler", {})
     history = config.get("history", {})
-    timeout = int(config.get("powershell_timeout_seconds", 180))
+    timeout = int(config.get("powershell_timeout_seconds", config_default("powershell_timeout_seconds")))
     # Taken before the slow task and event queries: a task due at 10:00 that starts at 10:00:05
     # must not look overdue because the audit clock was read a minute later.
     audit_dt = utc_now()
@@ -2647,7 +2846,7 @@ def collect_everything(config: Dict[str, Any], fixture: Optional[Path],
     else:
         emit("Collecting scheduled tasks...")
         collect.unreadable_tasks.clear()
-        raw_tasks = collect.collect_tasks(timeout, scheduler.get("exclude_microsoft_tasks", True))
+        raw_tasks = collect.collect_tasks(timeout, scheduler.get("exclude_microsoft_tasks", config_default("scheduler.exclude_microsoft_tasks")))
         task_read_warning = "; ".join(collect.unreadable_tasks)
         emit(f"Collected {len(raw_tasks)} task row(s) before filtering.")
         emit("Collecting run events...")
@@ -2669,7 +2868,7 @@ def collect_everything(config: Dict[str, Any], fixture: Optional[Path],
             # reported once. A cleared log restarts low, so the newest read wins over the old mark.
             ids = [safe_int(e.get("event_record_id")) or 0 for e in raw_events]
             event_read_mark = max(max(ids, default=0) or read_mark, (collect.oldest_record_id or 1) - 1)
-        except (collect.EventLogDisabled, PowerShellTimeout) as exc:
+        except (collect.EventLogDisabled, collect.EventLogUnreadable, PowerShellTimeout) as exc:
             event_log_error = exc
             raw_events, stalled_risk = [], False
             emit(f"WARNING: {exc} Continuing without run history; the run will exit 1 at the end.")
@@ -2688,6 +2887,8 @@ def collect_everything(config: Dict[str, Any], fixture: Optional[Path],
         # them here wrote false "script not found" config notes. LogonType and silent-skip checks
         # read only captured data and still run.
         exists=(lambda _path: True) if fixture else os.path.exists)
+    for message in collect.description_key_warnings(descriptions, filtered):
+        emit(message)
 
     # definition_hash (3.7's TaskChanges) and each task's ExecutionTimeLimit (3.5's stuck
     # detection) both come from the raw PowerShell row, not the inventory row, so they are
@@ -2717,18 +2918,41 @@ def collect_everything(config: Dict[str, Any], fixture: Optional[Path],
             "run once with --full-history to jump to the current log window.\n"
             + see_troubleshooting("Run collection is stalled"))
 
+    # The log miner sizes its manual-run window from last_duration_seconds, and the enrichment
+    # that sets it needs the log summary the miner returns. So the duration is set from this
+    # pass's runs first; enrich_inventory writes it again below. An incremental pass may hold no
+    # new run of a task, so the duration stored by an earlier pass stands in for it.
+    run_summary = summarize_runs(runs, audit_dt)
+    stored_durations = stored_durations or {}
+    for row in inventory:
+        name = row["task_full_name"]
+        duration = run_summary.get(name, {}).get("last_duration_seconds")
+        row["last_duration_seconds"] = duration if duration is not None else stored_durations.get(name)
     metric_rows, log_summary = mine_metrics(config, inventory, host_name)
     emit(f"Mined {len(metric_rows)} metric observation(s) from {len(log_summary)} task log set(s).")
 
     # Enrich from this pass only; publish() re-does it from the accumulated table when writing.
-    enrich_inventory(inventory, summarize_runs(runs, audit_dt), log_summary, execution_time_limits,
-                     audit_dt)
+    enrich_inventory(inventory, run_summary, log_summary, execution_time_limits, audit_dt)
     return {"host_name": host_name, "raw_tasks": raw_tasks, "raw_events": raw_events,
             "inventory": inventory, "runs": runs, "metrics": metric_rows,
             "log_summary": log_summary, "execution_time_limits": execution_time_limits,
             "audit_dt": audit_dt, "event_log_error": event_log_error,
             "task_read_warning": task_read_warning, "event_gap_warning": event_gap,
             "event_read_mark": event_read_mark}
+
+
+def report_metrics(collected: Dict[str, Any]) -> None:
+    """--show-metrics: the newest value of each metric key per task, so a rule author sees what a rule
+    mines without publishing. Task, key, value and log file name only; no log line is printed."""
+    newest: Dict[str, Dict[str, Any]] = {}
+    for row in collected["metrics"]:
+        if row["series_key"] not in newest or row["observed_at_utc"] > newest[row["series_key"]]["observed_at_utc"]:
+            newest[row["series_key"]] = row
+    emit("Metric keys mined (task | key | newest value | log file):")
+    for row in sorted(newest.values(), key=lambda r: (r["task_name"].lower(), r["metric_key"])):
+        emit(f"  {row['task_name'][:40]} | {row['metric_key']} | {row['metric_value']:g} | {row['log_file_name']}")
+    if not newest:
+        emit("  none. See 'Which log files count' in docs/CONFIGURE.md.")
 
 
 def report(collected: Dict[str, Any]) -> None:
@@ -2764,15 +2988,30 @@ _CHANGE_DETECTION_FIELDS = ("task_full_name", "task_name", "definition_hash", "l
 def _fetch_prior_inventory_for_changes(table: Any, host_name: str) -> Dict[str, Dict[str, Any]]:
     """This host's stored TaskInventory rows, queried before sync_inventory overwrites them --
     the "before" side of detect_task_changes' diff. Keyed on task_full_name."""
-    host_where = f"host_name = '{escape_sql_string(host_name)}'"
+    host_where = host_clause(host_name)
     rows = query_all_rows(table, where=host_where, out_fields=",".join(_CHANGE_DETECTION_FIELDS))
     return {normalize_text(r.get("task_full_name")): r for r in rows}
+
+
+def _fetch_stored_durations(table: Any, host_name: str) -> Dict[str, float]:
+    """Each task's last_duration_seconds as the previous pass stored it. The log miner needs it on
+    a pass that read no new end event of the task. Best effort: a failed read only narrows the
+    manual-run window back to its minimum."""
+    try:
+        rows = query_all_rows(table, where=host_clause(host_name),
+                              out_fields="task_full_name,last_duration_seconds")
+    except (Exception, SystemExit) as exc:
+        emit(f"WARNING: could not read the stored run durations ({type(exc).__name__}: {exc}); "
+             "the log miner uses its minimum manual-run window this pass.")
+        return {}
+    return {normalize_text(r.get("task_full_name")): float(r["last_duration_seconds"])
+            for r in rows if safe_float(r.get("last_duration_seconds")) is not None}
 
 
 def _fetch_failing_history(table: Any, host_name: str) -> Dict[str, Tuple[bool, str]]:
     """Per task, whether its newest became_failing/recovered TaskChanges row says failing, and
     that row's reason. detect_task_changes reads it when the stored inventory row is mid-run."""
-    where = (f"host_name = '{escape_sql_string(host_name)}' "
+    where = (f"{host_clause(host_name)} "
              f"AND change_kind IN ('became_failing', 'recovered')")
     rows = query_all_rows(table, where=where,
                           out_fields="task_full_name,change_kind,changed_utc,new_summary")
@@ -3031,7 +3270,7 @@ def _delete_gone_metric_changes(table: Any, stored: Sequence[Dict[str, Any]], ke
 
 
 def sync_metric_change(tables: Dict[str, Any], host_name: str, collected_at: str, chunk_size: int,
-                       retention_days: int, changed: bool = True) -> bool:
+                       retention_days: int, changed: bool = True, target: str = "prod") -> bool:
     """H4-3: store each of this host's metric series' newest and usual value in MetricChange, so
     the dashboard reads one row per series. Runs after TaskMetrics is written and purged, and
     works from the stored rows, so it agrees with what the old dashboard source read.
@@ -3052,11 +3291,11 @@ def sync_metric_change(tables: Dict[str, Any], host_name: str, collected_at: str
     table = tables.get(TABLE_METRIC_CHANGE)
     if table is None:
         emit(f"WARNING: the service has no {TABLE_METRIC_CHANGE} table, so the dashboard's Metric Change "
-             f"keeps reading all of {TABLE_METRICS}. Run `taskdash collect --migrate --apply`, then "
-             f"`taskdash dashboard` to switch it.")
+             f"keeps reading all of {TABLE_METRICS}. Run {migrate_apply(target)}, then "
+             f"{command_text('dashboard', '--target', target, '--apply')} to switch it.")
         return True
     try:
-        where = f"host_name = '{escape_sql_string(host_name)}'"
+        where = host_clause(host_name)
         if changed or not with_retry(lambda: table.query(where=where, return_count_only=True),
                                      label=f"{TABLE_METRIC_CHANGE} count"):
             # ponytail: one host-scoped read of TaskMetrics per changed pass; limit it to the
@@ -3085,7 +3324,8 @@ def sync_metric_change(tables: Dict[str, Any], host_name: str, collected_at: str
 
 
 def publish(gis: Any, item: Any, collected: Dict[str, Any], config: Dict[str, Any],
-            force: bool = False, metrics_plan: Optional[Dict[str, Any]] = None) -> Dict[str, int]:
+            force: bool = False, metrics_plan: Optional[Dict[str, Any]] = None,
+            target: str = "prod") -> Dict[str, int]:
     chunk_size = int(config.get("upload", {}).get("chunk_size", DEFAULT_CHUNK_SIZE))
     retention = config.get("retention", {})
     collected_at = utc_now().isoformat()
@@ -3093,7 +3333,8 @@ def publish(gis: Any, item: Any, collected: Dict[str, Any], config: Dict[str, An
 
     missing = {TABLE_INVENTORY, TABLE_RUNS, TABLE_METRICS} - set(tables)
     if missing:
-        raise SystemExit(f"Target service is missing table(s): {sorted(missing)}. Run --create-service.\n"
+        raise SystemExit(f"Target service is missing table(s): {', '.join(sorted(missing))}. "
+                         f"Run {migrate_apply(target)} to create them.\n"
                          + see_troubleshooting("A service table is missing"))
 
     # Runs go first: the inventory's 7-day counts are derived from the accumulated run table,
@@ -3151,6 +3392,7 @@ def publish(gis: Any, item: Any, collected: Dict[str, Any], config: Dict[str, An
         # Best-effort, like the 3.7 snapshot above: the metrics upsert and the TaskRuns/
         # TaskMetrics purges below must still run even if this write or purge fails -- a lost
         # pass of state transitions is preferable to aborting the rest of publish() over it.
+        # with_retry ends in SystemExit, so that is caught too.
         try:
             # Read only when a stored row is mid-run: most passes then skip the extra query.
             failing_history = (_fetch_failing_history(tables[TABLE_TASK_CHANGES], collected["host_name"])
@@ -3161,13 +3403,18 @@ def publish(gis: Any, item: Any, collected: Dict[str, Any], config: Dict[str, An
                                           privacy_hides(privacy, "hide_paths"))
             if changes:
                 prepared_changes = prepare_rows(changes, TABLE_TASK_CHANGES, collected_at, privacy)
+                # Every row of this pass is dated collected_at, so a stored row of any of these keys
+                # is dated at or after it (the clause rounds down to the second). Without the
+                # bound the key read returns the host's whole TaskChanges history, a year of rows.
+                changed_since = parse_iso_datetime(collected_at).strftime("%Y-%m-%d %H:%M:%S")
                 upsert_by_key(tables[TABLE_TASK_CHANGES], prepared_changes,
                              ["host_name", "task_full_name", "change_kind", "changed_utc"],
-                             chunk_size=chunk_size, label=TABLE_TASK_CHANGES)
+                             chunk_size=chunk_size, label=TABLE_TASK_CHANGES,
+                             existing_where=f"changed_utc >= TIMESTAMP '{changed_since}'")
                 emit(f"{TABLE_TASK_CHANGES}: recorded {len(changes)} change(s).")
             purge_older_than(tables[TABLE_TASK_CHANGES], "changed_utc",
-                             int(retention.get("changes_days", 365)), TABLE_TASK_CHANGES)
-        except Exception as exc:
+                             int(retention.get("changes_days", config_default("retention.changes_days"))), TABLE_TASK_CHANGES)
+        except (Exception, SystemExit) as exc:
             emit(f"WARNING: {TABLE_TASK_CHANGES} write/purge failed ({type(exc).__name__}: {exc}); "
                 f"this pass's state transitions are lost, not deferred.")
 
@@ -3188,12 +3435,12 @@ def publish(gis: Any, item: Any, collected: Dict[str, Any], config: Dict[str, An
         counts.update(metrics_added=result["added"], metrics_updated=result["updated"])
 
     purge_older_than(tables[TABLE_RUNS], "start_time_utc",
-                     int(retention.get("runs_days", 90)), TABLE_RUNS)
+                     int(retention.get("runs_days", config_default("retention.runs_days"))), TABLE_RUNS)
     purged_metrics = purge_older_than(tables[TABLE_METRICS], "observed_at_utc",
-                                      int(retention.get("metrics_days", 90)), TABLE_METRICS)
+                                      int(retention.get("metrics_days", config_default("retention.metrics_days"))), TABLE_METRICS)
     if not sync_metric_change(tables, collected["host_name"], collected_at, chunk_size,
-                              int(retention.get("metrics_days", 90)),
-                              changed=bool(metric_rows) or bool(purged_metrics)):
+                              int(retention.get("metrics_days", config_default("retention.metrics_days"))),
+                              changed=bool(metric_rows) or bool(purged_metrics), target=target):
         counts["metric_change_failed"] = 1
     return counts
 
@@ -3202,7 +3449,9 @@ def publish(gis: Any, item: Any, collected: Dict[str, Any], config: Dict[str, An
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Collect scheduled-task health and publish to ArcGIS Online.",
+        prog="taskdash collect",
+        description="Collect scheduled-task health and publish to ArcGIS Online. To create the service "
+                    "and view for a new install, run `taskdash setup`.",
         allow_abbrev=False,  # never let --apply be reachable by abbreviation
     )
     parser.add_argument("--apply", action="store_true", help="Write to ArcGIS Online (default is a dry run).")
@@ -3213,17 +3462,16 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
                         help="Permit --apply when this machine is not host_name_override.")
     parser.add_argument("--target", choices=("prod", "test"), default="prod",
                         help="Which configured item id to write to.")
-    parser.add_argument("--config", default="", help="Path to TaskDash.config.json.")
+    parser.add_argument("--config", default="", metavar="PATH", help=CONFIG_ARG_HELP)
     parser.add_argument("--fixture", default="", help="Use a captured JSON fixture instead of live collection.")
     parser.add_argument("--capture-fixture", default="",
                         help="Write a host-local collection to this JSON path and exit.")
-    parser.add_argument("--create-service", action="store_true",
-                        help="Print what the hosted table service would hold, then exit. With "
-                             "--apply, create it and print its item id.")
-    parser.add_argument("--service-name", default="TaskDash", help="Service name for --create-service.")
-    parser.add_argument("--create-view", action="store_true",
-                        help="Print the plan for a read-only hosted view of the service (Query only, "
-                             "never shared with everyone). With --apply, create it and print its id.")
+    # Hidden from --help: `taskdash setup` makes the service and view with a folder, delete
+    # protection, a viewers group and a manifest that `taskdash remove` reads; these do not.
+    parser.add_argument("--create-service", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--service-name", default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--create-view", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--replace", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--full-history", action="store_true",
                         help="Ignore the watermark once and re-read the whole event-log window. "
                              "Safe (the run upsert is keyed); use after a gap or to repair history.")
@@ -3243,7 +3491,11 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--scrub-history", action="store_true",
                         help="Report how many stored rows in each table still hold a value the "
                              "privacy switches hide or the secret scrubber redacts, then exit. With "
-                             "--apply, blank or redact those values.")
+                             "--apply, blank or redact those values. Only this computer's rows, "
+                             "unless you pass --all-hosts.")
+    parser.add_argument("--all-hosts", action="store_true",
+                        help="With --scrub-history: scrub the rows of every computer, not only this one's. "
+                             "Use it only when every computer has the same privacy switches.")
     parser.add_argument("--check-anonymous", action="store_true",
                         help="Query every table of the service and view without signing in. Exit 0 "
                              "when all refuse, 1 when any answers. Reads only.")
@@ -3251,6 +3503,9 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
                         help="Count the stored rows of the computer NAME, then exit. With --apply, "
                              "delete that computer's TaskInventory rows (the history tables keep "
                              "theirs and age out by retention). Run it from another computer.")
+    parser.add_argument("--show-metrics", action="store_true",
+                        help="After the collection, list each metric key mined from the task logs with its "
+                             "newest value, to test a rules file. Prints only; combine it with a dry run.")
     parser.add_argument("--version", action="version", version=f"TaskDash {TASKDASH_VERSION}")
     args = parser.parse_args(argv)
     # `is not None`, not truthiness: an empty NAME must reach run_retire_host and be refused there.
@@ -3263,8 +3518,17 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     for flag in ("--scrub-history", "--check-anonymous", "--retire-host"):
         if others[flag] and any(on for name, on in others.items() if name != flag):
             parser.error(f"{flag} runs on its own; leave out the other action flags and --fixture.")
+    if args.all_hosts and not args.scrub_history:
+        parser.error("--all-hosts works only with --scrub-history.")
     if args.check_anonymous and args.apply:
         parser.error("--check-anonymous only reads; run it without --apply.")
+    if args.show_metrics and any(others.values()):
+        parser.error("--show-metrics works with the plain collection only; leave out the other action flags.")
+    if args.capture_fixture and args.apply:
+        parser.error("--capture-fixture writes only the file; run it without --apply.")
+    if args.service_name is not None and not args.create_service:
+        parser.error("--service-name works only with --create-service.")
+    args.service_name = args.service_name or "TaskDash"
     for flag, chosen in (("--refresh-result-text", args.refresh_result_text),
                          ("--refresh-metrics", args.refresh_metrics)):
         if chosen and (args.migrate or args.preview_alert or args.capture_fixture
@@ -3272,6 +3536,8 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
                        or (args.refresh_result_text and args.refresh_metrics)):
             parser.error(f"{flag} runs on its own; leave out --migrate, --preview-alert, "
                          "--capture-fixture, --create-service, --fixture and the other --refresh flag.")
+    if args.replace and not args.create_view:
+        parser.error("--replace works only with --create-view.")
     if args.create_view and (args.migrate or args.preview_alert or args.capture_fixture
                              or args.create_service or args.fixture or args.refresh_result_text
                              or args.refresh_metrics):
@@ -3290,7 +3556,7 @@ def run_migration(config: Dict[str, Any], args: argparse.Namespace) -> int:
     item = ensure_service(gis, config, args.target)
     tables = get_tables(item)
     if args.apply:
-        apply_migration(tables, item=item)
+        apply_migration(tables, item=item, target=args.target)
     else:
         describe_migration(tables)
     view_id = normalize_text(config.get("arcgis", {}).get(view_key(args.target)))
@@ -3300,7 +3566,7 @@ def run_migration(config: Dict[str, Any], args: argparse.Namespace) -> int:
         if view_item is None:
             raise SystemExit(f"View item {view_id} not found or not visible to this account.\n"
                              + see_troubleshooting("The service or view item cannot be found"))
-        migrate_view(view_item, config, args.apply)
+        migrate_view(view_item, config, args.apply, args.target)
     if args.apply:
         emit("Migration complete.")
         # A definition change once opened Query to anonymous users; prove it did not this time.
@@ -3345,7 +3611,7 @@ def run_refresh_result_text(config: Dict[str, Any], args: argparse.Namespace) ->
     item = ensure_service(gis, config, args.target)
     tables = get_tables(item)
     if TABLE_RUNS not in tables:
-        raise SystemExit(f"Target service has no {TABLE_RUNS} table. Run --migrate --apply first.\n"
+        raise SystemExit(f"Target service has no {TABLE_RUNS} table. Run {migrate_apply(args.target)} first.\n"
                          + see_troubleshooting("A service table is missing"))
     chunk_size = int(config.get("upload", {}).get("chunk_size", DEFAULT_CHUNK_SIZE))
     outdated = refresh_result_text(tables[TABLE_RUNS], args.apply, chunk_size)
@@ -3382,10 +3648,12 @@ def plan_scrub_history(rows: Sequence[Dict[str, Any]], table_name: str,
 
 
 def scrub_history(tables: Dict[str, Any], privacy: Optional[Dict[str, Any]], apply: bool,
-                  chunk_size: int = DEFAULT_CHUNK_SIZE) -> Dict[str, int]:
+                  chunk_size: int = DEFAULT_CHUNK_SIZE, host_name: Optional[str] = None) -> Dict[str, int]:
     """Count (and with apply, write) the stored rows plan_scrub_history would change, per table.
-    Prints counts only, never a value: the values are what is being hidden."""
+    Prints counts only, never a value: the values are what is being hidden.
+    host_name limits it to that computer's rows: another computer may run other privacy switches."""
     counts: Dict[str, int] = {}
+    where = "1=1" if host_name is None else host_clause(host_name)
     for name in SCRUB_HISTORY_TABLES:
         if name not in tables:
             emit(f"{name}: table not found; skipped.")
@@ -3395,7 +3663,7 @@ def scrub_history(tables: Dict[str, Any], privacy: Optional[Dict[str, Any]], app
             continue
         table = tables[name]
         oid_field = object_id_field(table)
-        rows = query_all_rows(table, out_fields=",".join([oid_field, *fields]))
+        rows = query_all_rows(table, where=where, out_fields=",".join([oid_field, *fields]))
         updates = plan_scrub_history(rows, name, privacy, oid_field)
         counts[name] = len(updates)
         emit(f"{name}: {len(updates)} of {len(rows)} stored row(s) "
@@ -3412,9 +3680,13 @@ def run_scrub_history(config: Dict[str, Any], args: argparse.Namespace) -> int:
     item = ensure_service(gis, config, args.target)
     tables = get_tables(item)
     # The query names every scrubbed field; refuse an unmigrated service with the fix, not a 400.
-    check_schema_drift(tables)
+    check_schema_drift(tables, args.target)
     chunk_size = int(config.get("upload", {}).get("chunk_size", DEFAULT_CHUNK_SIZE))
-    counts = scrub_history(tables, config.get("privacy"), args.apply, chunk_size)
+    host_name = None if args.all_hosts else get_host_name(config)
+    emit("Scrubbing the rows of every computer." if host_name is None else
+         f"Scrubbing only the rows of this computer ('{host_name}'). Run it on each computer, or pass "
+         "--all-hosts if every computer uses the same privacy switches.")
+    counts = scrub_history(tables, config.get("privacy"), args.apply, chunk_size, host_name)
     if any(counts.values()) and not args.apply:
         emit("DRY RUN - nothing written. Re-run with --scrub-history --apply to rewrite them.")
     return 0
@@ -3434,17 +3706,18 @@ def retire_host_name(name: Any, own_host: str) -> str:
     if host.lower() == normalize_text(own_host).lower():
         raise SystemExit(f"Cannot retire '{host}': it is this computer, and its next collector run "
                          "would add the rows again. Stop the collector on that computer first, then "
-                         "run --retire-host from a computer that stays.\n"
+                         f"run {command_text('collect', '--retire-host', host)} from a computer that stays.\n"
                          + see_troubleshooting("`--retire-host` refuses the name"))
     return host
 
 
 def retire_host(tables: Dict[str, Any], host: str, apply: bool,
                 chunk_size: int = DEFAULT_CHUNK_SIZE, interval_minutes: float = 60) -> int:
-    """--retire-host: count the host's rows; with apply, delete its TaskInventory rows only.
+    """--retire-host: count the host's rows; with apply, delete its TaskInventory and MetricChange
+    rows. MetricChange is derived from TaskMetrics, and no later run rebuilds a retired host's rows.
     Refuses --apply while a collector under that name ran within 2 intervals: its next run would
     add every row back. Returns the number of inventory rows found."""
-    where = f"host_name = '{escape_sql_string(host)}'"
+    where = host_clause(host)
     inventory = tables[TABLE_INVENTORY]
     oid_field = object_id_field(inventory)
     oids = [row.get(oid_field) for row in query_all_rows(inventory, where=where, out_fields=oid_field)]
@@ -3456,24 +3729,39 @@ def retire_host(tables: Dict[str, Any], host: str, apply: bool,
         count = with_retry(lambda table=tables[name]: table.query(where=where, return_count_only=True),
                            label=f"retire-host {name} count")
         emit(f"{name}: {count} row(s) for host '{host}'. Kept; they age out by retention.")
-    if not oids:
-        emit(f"Nothing to retire: no {TABLE_INVENTORY} rows for '{host}'. Check the spelling; "
-             "names are case-sensitive.")
+    change_table = tables.get(TABLE_METRIC_CHANGE)
+    change_oids: List[Any] = []
+    if change_table is None:
+        emit(f"{TABLE_METRIC_CHANGE}: table not found; skipped.")
+    else:
+        change_oid_field = object_id_field(change_table)
+        change_oids = [row.get(change_oid_field)
+                       for row in query_all_rows(change_table, where=where, out_fields=change_oid_field)]
+        emit(f"{TABLE_METRIC_CHANGE}: {len(change_oids)} row(s) for host '{host}'. "
+             "Deleted with --apply, because the dashboard shows them as the host's latest values.")
+    if not oids and not change_oids:
+        emit(f"Nothing to retire: no {TABLE_INVENTORY} or {TABLE_METRIC_CHANGE} rows for '{host}'. "
+             "Check the spelling; the case does not matter.")
         return 0
     runs = tables.get(TABLE_COLLECTOR_RUNS)
     if runs is not None and _previous_name_is_live(runs, host, interval_minutes):
         message = (f"a collector under '{host}' ran within the last {2 * interval_minutes:g} min. Stop "
-                   "it first (step 1 of 'Retire a computer'), then run --retire-host again.")
+                   f"it first (step 1 of 'Retire a computer'), then run {command_text('collect', '--retire-host', host)} again.")
         if apply:
             raise SystemExit(f"Cannot retire '{host}': {message}\n"
                              + see_troubleshooting("`--retire-host` refuses the name"))
         emit(f"WARNING: {message}")
     if not apply:
         emit(f"DRY RUN - nothing written. Re-run with --retire-host {host} --apply to delete "
-             f"the {len(oids)} {TABLE_INVENTORY} row(s).")
+             f"the {len(oids)} {TABLE_INVENTORY} and {len(change_oids)} {TABLE_METRIC_CHANGE} row(s).")
         return len(oids)
-    apply_edits_chunked(inventory, deletes=oids, chunk_size=chunk_size, label=f"{TABLE_INVENTORY} retire")
-    emit(f"{TABLE_INVENTORY}: deleted {len(oids)} row(s) of host '{host}'.")
+    if oids:
+        apply_edits_chunked(inventory, deletes=oids, chunk_size=chunk_size, label=f"{TABLE_INVENTORY} retire")
+        emit(f"{TABLE_INVENTORY}: deleted {len(oids)} row(s) of host '{host}'.")
+    if change_oids:
+        apply_edits_chunked(change_table, deletes=change_oids, chunk_size=chunk_size,
+                            label=f"{TABLE_METRIC_CHANGE} retire")
+        emit(f"{TABLE_METRIC_CHANGE}: deleted {len(change_oids)} row(s) of host '{host}'.")
     return len(oids)
 
 
@@ -3484,7 +3772,7 @@ def run_retire_host(config: Dict[str, Any], args: argparse.Namespace) -> int:
     item = ensure_service(gis, config, args.target)
     tables = get_tables(item)
     if TABLE_INVENTORY not in tables:
-        raise SystemExit(f"Target service has no {TABLE_INVENTORY} table. Run --migrate --apply first.\n"
+        raise SystemExit(f"Target service has no {TABLE_INVENTORY} table. Run {migrate_apply(args.target)} first.\n"
                          + see_troubleshooting("A service table is missing"))
     chunk_size = int(config.get("upload", {}).get("chunk_size", DEFAULT_CHUNK_SIZE))
     from taskdash_dashboard import DEFAULT_COLLECTOR_INTERVAL_MINUTES
@@ -3496,7 +3784,7 @@ def run_retire_host(config: Dict[str, Any], args: argparse.Namespace) -> int:
 
 def plan_metric_refresh(stored: Sequence[Dict[str, Any]], fresh: Sequence[Dict[str, Any]],
                         oid_field: str, examined: Optional[set] = None,
-                        own_tasks: Iterable[str] = ()) -> Tuple[List[Any], List[Dict[str, Any]]]:
+                        own_tasks: Iterable[str] = (), host_name: str = "") -> Tuple[List[Any], List[Dict[str, Any]]]:
     """--refresh-metrics: the stored TaskMetrics rows to delete, and the display names to rewrite.
 
     TaskMetrics is upserted by (host, task, metric_key, log file), so a row under a key the miner
@@ -3508,6 +3796,8 @@ def plan_metric_refresh(stored: Sequence[Dict[str, Any]], fresh: Sequence[Dict[s
     Row by row, a stored row is also deleted when the miner examined its log this pass (read it,
     or ignored it as a manual run) and that log no longer gives its key -- Keep-Alive's dry-run
     "would touch" rows -- and every row of TaskDash's own task (own_tasks), which is not mined.
+    With host_name, only that computer's stored rows are judged: examined and own_tasks name no host,
+    so another computer's row for the same task and log file would otherwise read as gone.
     Returns (OIDs to delete, display_name updates).
     """
     def task_of(row: Dict[str, Any]) -> Tuple[str, str]:
@@ -3530,6 +3820,8 @@ def plan_metric_refresh(stored: Sequence[Dict[str, Any]], fresh: Sequence[Dict[s
     deletes: List[Any] = []
     updates: List[Dict[str, Any]] = []
     for row in stored:
+        if host_name and task_of(row)[0].casefold() != normalize_text(host_name).casefold():
+            continue
         key = normalize_text(row.get("metric_key"))
         log = normalize_text(row.get("log_file_name"))
         gone = ((task_of(row)[1], log) in examined_logs and task_of(row) + (log, key) not in fresh_rows)
@@ -3557,10 +3849,10 @@ def run_refresh_metrics(config: Dict[str, Any], args: argparse.Namespace) -> int
     tables = get_tables(item)
     if TABLE_METRICS not in tables or TABLE_INVENTORY not in tables:
         raise SystemExit(f"Target service has no {TABLE_METRICS} or {TABLE_INVENTORY} table. "
-                         "Run --migrate --apply first.\n" + see_troubleshooting("A service table is missing"))
+                         f"Run {migrate_apply(args.target)} first.\n" + see_troubleshooting("A service table is missing"))
     # The stored-row query names series_key: on a service not yet migrated it failed as an
     # opaque AGOL 400 ("'outFields' parameter is invalid"), so refuse with the fix instead.
-    check_schema_drift(tables)
+    check_schema_drift(tables, args.target)
     host_name = get_host_name(config)
     # The stored inventory holds each task's script path and working directory, so no
     # PowerShell or event read is needed to find the logs again -- unless privacy.hide_paths
@@ -3570,18 +3862,19 @@ def run_refresh_metrics(config: Dict[str, Any], args: argparse.Namespace) -> int
         inventory = collect_everything(config, None, first_run_budget=False)["inventory"]
     else:
         inventory = query_all_rows(tables[TABLE_INVENTORY],
-                                   where=f"host_name = '{escape_sql_string(host_name)}'")
+                                   where=host_clause(host_name))
     examined: set = set()
     fresh, _ = mine_metrics(config, inventory, host_name, examined)
     if not fresh:
         emit("WARNING: no task log resolved on this machine, so no metric key can be judged retired. "
-             "Run --refresh-metrics on the task host.")
+             f"Run {command_text('collect', '--refresh-metrics')} on the task host.")
     table = tables[TABLE_METRICS]
     oid_field = object_id_field(table)
-    stored = query_all_rows(table, out_fields=f"{oid_field},host_name,task_full_name,metric_key,"
-                                              "log_file_name,display_name,series_key")
+    stored = query_all_rows(table, where=host_clause(host_name),
+                            out_fields=f"{oid_field},host_name,task_full_name,metric_key,"
+                                       "log_file_name,display_name,series_key")
     own_tasks = [r.get("task_full_name") for r in inventory if metrics.is_taskdash_command(r.get("command_target_name"), r.get("command_target_arguments"))]
-    deletes, updates = plan_metric_refresh(stored, fresh, oid_field, examined, own_tasks)
+    deletes, updates = plan_metric_refresh(stored, fresh, oid_field, examined, own_tasks, host_name)
     emit(f"{TABLE_METRICS}: {len(deletes)} row(s) that the log miner no longer makes, {len(updates)} row(s) with an "
          f"outdated name or series key, of {len(stored)} stored.")
     if not (deletes or updates):
@@ -3649,7 +3942,8 @@ def _save_pending_collector_runs(path: Optional[Path], rows: List[Dict[str, Any]
         return
     if len(rows) > MAX_PENDING_COLLECTOR_RUNS:
         emit(f"WARNING: {len(rows) - MAX_PENDING_COLLECTOR_RUNS} unsent {TABLE_COLLECTOR_RUNS} row(s) dropped; "
-             f"only the newest {MAX_PENDING_COLLECTOR_RUNS} are kept in {path}.")
+             f"only the newest {MAX_PENDING_COLLECTOR_RUNS} are kept in {path}. "
+             + see_troubleshooting("ArcGIS Online was unreachable for a while"))
     try:
         atomic_write_json(path, rows[-MAX_PENDING_COLLECTOR_RUNS:])
     except OSError as exc:
@@ -3660,7 +3954,7 @@ def _write_collector_run_row(
     item: Any, config: Dict[str, Any], collected: Dict[str, Any], *,
     run_started: dt.datetime, run_ended: dt.datetime, exit_status: str, error_text: str,
     watermark_from: float, watermark_to: float, publish_counts: Dict[str, int], alert_sent: bool,
-    pending_path: Optional[Path] = None,
+    pending_path: Optional[Path] = None, target: str = "prod",
 ) -> None:
     """3.6: best-effort CollectorRuns audit row, written at the end of every --apply run.
 
@@ -3693,14 +3987,14 @@ def _write_collector_run_row(
         return
     if TABLE_COLLECTOR_RUNS not in tables:
         # Not saved: until --migrate --apply adds the table, no later run can write it either.
-        emit(f"{TABLE_COLLECTOR_RUNS}: table not found -- run --migrate --apply to add it; "
+        emit(f"{TABLE_COLLECTOR_RUNS}: table not found -- run {migrate_apply(target)} to add it; "
             f"skipping this run's audit row.")
         return
     try:
         prepared = prepare_rows(pending + [row], TABLE_COLLECTOR_RUNS, run_ended.isoformat())
         upsert_by_key(tables[TABLE_COLLECTOR_RUNS], prepared, ["run_id"],
                       chunk_size=DEFAULT_CHUNK_SIZE, label=TABLE_COLLECTOR_RUNS)
-    except Exception as exc:
+    except (Exception, SystemExit) as exc:
         emit(f"WARNING: could not write {TABLE_COLLECTOR_RUNS} row: {exc}")
         _save_pending_collector_runs(pending_path, pending + [row])
         return
@@ -3709,9 +4003,9 @@ def _write_collector_run_row(
         _save_pending_collector_runs(pending_path, [])
     try:
         # 90-day retention, like TaskRuns -- same config key, no new one needed.
-        retention_days = int(config.get("retention", {}).get("runs_days", 90))
+        retention_days = int(config.get("retention", {}).get("runs_days", config_default("retention.runs_days")))
         purge_older_than(tables[TABLE_COLLECTOR_RUNS], "started_utc", retention_days, TABLE_COLLECTOR_RUNS)
-    except Exception as exc:
+    except (Exception, SystemExit) as exc:
         emit(f"WARNING: could not purge old {TABLE_COLLECTOR_RUNS} rows: {exc}")
 
 
@@ -3735,6 +4029,17 @@ def run_publish(args: argparse.Namespace, config: Dict[str, Any], log_dir: Path)
                 watermark_to=0.0, publish_counts={}, alert_sent=False)
             _save_pending_collector_runs(pending_path, _read_pending_collector_runs(pending_path) + [row])
         raise
+
+
+def _publish_failure_note(error: BaseException, pending_path: Path, run_started: dt.datetime) -> str:
+    """Why the dashboard is out of date, for the alert e-mail: this run's publish error and when
+    publishing first failed. The first failure is the oldest unsent failed run saved in the pending
+    file, else this run."""
+    failed = [parse_iso_datetime(r.get("started_utc")) for r in _read_pending_collector_runs(pending_path)
+              if r.get("exit_status") == "failed"]
+    first = min([moment for moment in failed if moment] + [run_started])
+    return (f"TaskDash could not publish this run, so the dashboard is out of date. Publishing has failed "
+            f"since {_local_stamp(first)}. Reason: {_scrub_secrets(normalize_text(error))[:400]}")
 
 
 def host_mismatch(config: Dict[str, Any]) -> Optional[Tuple[str, str]]:
@@ -3775,17 +4080,20 @@ def _run_publish(args: argparse.Namespace, config: Dict[str, Any], log_dir: Path
         # e-mail (same reasoning as publish() below) -- caught and stashed so collection and
         # alerting still happen on whatever we can get, then re-raised at the end.
         tables: Dict[str, Any] = {}
+        # The label names the step that failed: a bad sign-in and an unreachable service need different fixes.
+        failed_step = "sign in to ArcGIS"
         try:
             # A hand-off file from `signin --for-task-account` becomes this account's own sign-in
             # first. Its failure is a sign-in failure: same alerting, same row, same exit code.
             consume_handoff()
             gis = connect_agol(config)
+            failed_step = "reach AGOL"
             item = ensure_service(gis, config, args.target)
             tables = get_tables(item)
         except (Exception, SystemExit) as exc:
             preflight_error = exc
             gis = item = None
-            emit(f"WARNING: could not reach AGOL before publishing ({type(exc).__name__}: {exc}); "
+            emit(f"WARNING: could not {failed_step} before publishing ({type(exc).__name__}: {exc}); "
                 f"still collecting and evaluating alerts before exiting.")
 
         if preflight_error is None:
@@ -3797,7 +4105,7 @@ def _run_publish(args: argparse.Namespace, config: Dict[str, Any], log_dir: Path
             # check_source_sharing reads only item.access, loaded above, so it makes no request.
             # check_release_sharing adds one content.get per configured view or dashboard.
             try:
-                check_schema_drift(tables)
+                check_schema_drift(tables, args.target)
                 check_source_sharing(item, config, args.target)
                 check_release_sharing(gis, config, args.target)
             except (Exception, SystemExit) as exc:
@@ -3811,7 +4119,7 @@ def _run_publish(args: argparse.Namespace, config: Dict[str, Any], log_dir: Path
                 warn_if_service_schema_newer(item)
                 if TABLE_RUNS in tables and not args.full_history:
                     newest = None if args.fixture else collect.newest_record_id(
-                        int(config.get("powershell_timeout_seconds", 180)))
+                        int(config.get("powershell_timeout_seconds", config_default("powershell_timeout_seconds"))))
                     watermark = event_watermark(tables[TABLE_RUNS], get_host_name(config), newest)
                 emit(f"Publishing to '{item.title}' ({item.id}) [{args.target}], watermark={watermark}")
             except (Exception, SystemExit) as exc:
@@ -3825,16 +4133,26 @@ def _run_publish(args: argparse.Namespace, config: Dict[str, Any], log_dir: Path
     # budget on the initial backfill. Measured: 5000 events reaches back only ~5 days here.
     history_cfg = config.get("history", {})
     max_events = 0
-    if args.apply and not watermark:
-        max_events = int(history_cfg.get("first_run_max_events", 30000))
+    if preflight_error is not None:
+        # No watermark only because the service was unreachable: the data feeds the alert and nothing
+        # is published, so it takes the normal budget and must not save a halved first-run budget.
+        emit("ArcGIS is unreachable or refused this run (see the WARNING above), so it reads only the "
+             "normal event budget (history.max_events_per_run) for the alert, and publishes nothing.")
+    elif args.apply and not watermark:
+        max_events = int(history_cfg.get("first_run_max_events", config_default("history.first_run_max_events")))
         why = "--full-history" if args.full_history else "No usable watermark"
         emit(f"{why}: reading the event-log window with up to {max_events} events.")
 
     # A dry run writes nothing, so it must not save a halved budget either.
+    stored_durations = (_fetch_stored_durations(tables[TABLE_INVENTORY], get_host_name(config))
+                        if item is not None and TABLE_INVENTORY in tables else None)
     collected = collect_everything(config, Path(args.fixture) if args.fixture else None,
                                    min_record_id=watermark, max_events=max_events,
-                                   first_run_budget=args.apply, target=args.target)
+                                   first_run_budget=args.apply and preflight_error is None, target=args.target,
+                                   stored_durations=stored_durations)
     report(collected)
+    if args.show_metrics:
+        report_metrics(collected)
     event_log_error = collected.get("event_log_error")
 
     if not args.apply:
@@ -3857,9 +4175,9 @@ def _run_publish(args: argparse.Namespace, config: Dict[str, Any], log_dir: Path
             metrics_plan = plan_metric_upload(
                 collected.get("metrics") or [], load_metrics_state(metrics_state_path),
                 metrics_state_signature(config, item.id), utc_now(),
-                int((config.get("retention") or {}).get("metrics_days", 90)))
+                int((config.get("retention") or {}).get("metrics_days", config_default("retention.metrics_days"))))
             publish_counts = publish(gis, item, collected, config, force=args.force,
-                                     metrics_plan=metrics_plan) or {}
+                                     metrics_plan=metrics_plan, target=args.target) or {}
         except (Exception, SystemExit) as exc:
             publish_error = exc
             emit(f"WARNING: publish() failed ({type(exc).__name__}: {exc}); still evaluating "
@@ -3868,12 +4186,24 @@ def _run_publish(args: argparse.Namespace, config: Dict[str, Any], log_dir: Path
     # A test publish must neither mail real recipients nor advance prod's alert state.
     alert_sent = False
     alert_failure = ""
+    alert_hint = ""
     if args.target == "prod":
+        if publish_error is not None:
+            collected["publish_note"] = _publish_failure_note(
+                publish_error, log_dir / PENDING_COLLECTOR_RUNS_FILE.format(target=args.target), run_started)
+        if item is not None and TABLE_COLLECTOR_RUNS in tables:
+            interval = (config.get("scheduler") or {}).get("collector_interval_minutes", config_default("scheduler.collector_interval_minutes"))
+            down_minutes = 3 * interval  # the dashboard heartbeat's Down limit
+            collected["silent_peers"] = lambda: (
+                fetch_silent_peers(tables[TABLE_COLLECTOR_RUNS], tables[TABLE_INVENTORY], collected["host_name"],
+                                   utc_now(), down_minutes),
+                down_minutes)
         try:
             alert_sent = bool(maybe_send_alert(collected, config, log_dir))
         except AlertSendError as exc:
             # Deferred like the errors above: publishing is done, so only the exit code is left.
             alert_failure = f"Alert e-mail failed: {_scrub_secrets(normalize_text(exc))}"
+            alert_hint = exc.hint
             emit(f"WARNING: {alert_failure}")
     else:
         emit("Alerting skipped: --target test never e-mails or touches alert_state.json.")
@@ -3915,7 +4245,7 @@ def _run_publish(args: argparse.Namespace, config: Dict[str, Any], log_dir: Path
             alert_failure))),
         watermark_from=float(watermark), watermark_to=watermark_to,
         publish_counts=publish_counts, alert_sent=alert_sent,
-        pending_path=log_dir / PENDING_COLLECTOR_RUNS_FILE.format(target=args.target),
+        pending_path=log_dir / PENDING_COLLECTOR_RUNS_FILE.format(target=args.target), target=args.target,
     )
     progress["recorded"] = True
 
@@ -3924,9 +4254,7 @@ def _run_publish(args: argparse.Namespace, config: Dict[str, Any], log_dir: Path
     if alert_failure:
         raise SystemExit(
             f"{alert_failure}. The data was published, but nobody was told about the problem. "
-            "Check smtp.host, smtp.port, smtp.from and smtp.user in the config and the stored SMTP "
-            "password, then run `taskdash test-alert --apply` to prove the mail path. The next run "
-            "tries again.\n" + see_troubleshooting("The alert e-mail failed"))
+            f"{alert_hint} The next run tries again.\n" + see_troubleshooting("The alert e-mail failed"))
 
     emit("TaskDash publish complete.")
     return 0
@@ -3935,8 +4263,8 @@ def _run_publish(args: argparse.Namespace, config: Dict[str, Any], log_dir: Path
 def _run_under_lock(log_dir: Path, action: Callable[[], int]) -> int:
     """Run action() inside run_lock, translating contention into an exit code.
 
-    0 for a normal hourly overlap; 1 (so Task Scheduler shows a failure) once the lock has been
-    held past STALE_LOCK_HOURS -- a run stuck that long would otherwise leave every later hourly
+    0 for a normal hourly overlap; an exit message (so Task Scheduler shows a failure) once the lock
+    has been held past STALE_LOCK_HOURS -- a run stuck that long would otherwise leave every later hourly
     run exiting 0 without writing anything, going silently stale forever, which is worse than a
     failed run.
     """
@@ -3946,10 +4274,16 @@ def _run_under_lock(log_dir: Path, action: Callable[[], int]) -> int:
     except RunLockHeld as exc:
         emit(f"Another TaskDash run is in progress; exiting. {exc}")
         if exc.held_since and (utc_now() - exc.held_since) > dt.timedelta(hours=STALE_LOCK_HOURS):
-            emit(f"WARNING: the lock has been held since {exc.held_since.isoformat()} -- more "
-                f"than {STALE_LOCK_HOURS}h, longer than any normal run. Treating it as stuck "
-                f"and exiting nonzero so Task Scheduler flags this.")
-            return 1
+            # An exit message, not a return: main() then logs "TaskDash exiting:" and pings the
+            # health check, and the text names how to free the lock.
+            end_it = (f"In PowerShell as administrator, run: Stop-Process -Id {exc.pid}" if exc.pid else
+                      "In PowerShell as administrator, run: Stop-ScheduledTask -TaskName "
+                      "\"TaskDash Collector\", or end the hung taskdash process in Task Manager")
+            raise SystemExit(
+                f"A TaskDash run has held the run lock {exc.lock_path or 'taskdash.lock'} since "
+                f"{exc.held_since.isoformat()}, more than {STALE_LOCK_HOURS} hours. It is stuck, and "
+                f"every hourly run fails until it ends. {end_it}. The next hourly run then starts "
+                f"normally.\n" + see_troubleshooting("A run is stuck holding the lock"))
         return 0
 
 
@@ -3959,7 +4293,7 @@ def run_preview_alert(args: argparse.Namespace, config: Dict[str, Any], log_dir:
     can be 7 days old. The hourly run gets it from the AGOL table; the preview stays off AGOL."""
     collected = collect_everything(
         config, Path(args.fixture) if args.fixture else None,
-        max_events=int(config.get("history", {}).get("first_run_max_events", 30000)),
+        max_events=int(config.get("history", {}).get("first_run_max_events", config_default("history.first_run_max_events"))),
         first_run_budget=False)   # a preview publishes nothing, so it must not halve or clear the hourly run's budget
     report(collected)
     preview_alert(collected, config, log_dir)
@@ -3975,15 +4309,15 @@ def _main_dispatch(args: argparse.Namespace, config: Dict[str, Any], log_dir: Pa
         if not args.apply:
             emit(f"Plan: hosted table service '{args.service_name}' with the tables {TABLE_INVENTORY}, "
                  f"{TABLE_RUNS} and {TABLE_METRICS}.")
-            emit(f"The same run then adds {TABLE_COLLECTOR_RUNS} and {TABLE_TASK_CHANGES}, "
-                 f"the indexes and the version stamp.")
+            later = [name for name in TABLE_SPECS if name not in (TABLE_INVENTORY, TABLE_RUNS, TABLE_METRICS)]
+            emit(f"The same run then adds {', '.join(later)}, the indexes and the version stamp.")
             emit("DRY RUN - nothing written. Re-run with --create-service --apply to create it.")
             return 0
         gis = connect_agol(config)
         item = create_service(gis, args.service_name, config)
         # Without this the first --apply publish needed --migrate --apply (Trap 1).
         apply_migration(get_tables(item), item=item)
-        emit(f"Add this to the config: \"item_id\": \"{item.id}\" (all 5 tables, indexes and the "
+        emit(f"Add this to the config: \"item_id\": \"{item.id}\" (all {len(TABLE_SPECS)} tables, indexes and the "
              f"version stamp exist; no --migrate needed).")
         return 0
 
@@ -4007,16 +4341,16 @@ def _main_dispatch(args: argparse.Namespace, config: Dict[str, Any], log_dir: Pa
         emit("WARNING: the fixture holds raw command lines and account names. Keep it private: "
              "never commit, share or upload it.")
         host_name = get_host_name(config)
-        timeout = int(config.get("powershell_timeout_seconds", 180))
+        timeout = int(config.get("powershell_timeout_seconds", config_default("powershell_timeout_seconds")))
         history = config.get("history", {})
         payload = {
             "host_name": host_name,
             "captured_at_utc": utc_now().isoformat(),
             "tasks": collect.collect_tasks(
-                timeout, (config.get("scheduler") or {}).get("exclude_microsoft_tasks", True)),
+                timeout, (config.get("scheduler") or {}).get("exclude_microsoft_tasks", config_default("scheduler.exclude_microsoft_tasks"))),
             "events": collect.collect_run_events(
-                int(history.get("days_back", 30)),
-                int(history.get("max_events_per_run", 5000)),
+                int(history.get("days_back", config_default("history.days_back"))),
+                int(history.get("max_events_per_run", config_default("history.max_events_per_run"))),
                 timeout),
         }
         out = Path(args.capture_fixture)
@@ -4071,21 +4405,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             write_bootstrap_fail(exc.code)
         raise
 
-    log_dir = resolve_log_dir(config)
-    log_path = setup_logging(log_dir, "taskdash")
-    cleanup_old_logs(log_dir, int(config.get("logging", {}).get("max_log_age_days", 30)))
-    for warning in config_warnings:
-        emit(warning)
-    emit(f"TaskDash started. Log: {log_path}")
-    version_warning = arcgis_version_warning()
-    if version_warning:
-        emit(version_warning)
-
-    # Every fatal error must reach the timestamped log file, not just stderr/bootstrap.log: a
-    # bare `raise SystemExit(msg)` or an uncaught exception only prints to stderr on its own,
-    # and pythonw/Task Scheduler runs have no stderr to read. Logged here once, in the one place
-    # every CLI branch passes through, then re-raised so the process still exits non-zero.
-    #
     # The dead man's switch pings only for the actual hourly prod publish job (--apply, no
     # --migrate/--capture-fixture/--create-service/--fixture/--preview-alert/--refresh-*,
     # --target prod): a manual dry run, a --target test run, a fixture replay or a --migrate would otherwise reset
@@ -4097,6 +4416,22 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                        and not args.refresh_result_text and not args.refresh_metrics
                        and not args.scrub_history and not args.check_anonymous
                        and args.retire_host is None)
+    log_dir = resolve_log_dir(config)
+    # Only the scheduled run keeps the plain prefix, so `taskdash status --offline` reads its log and
+    # not a manual run's (see cli.newest_run_log). Both match the taskdash_*.log globs.
+    log_path = setup_logging(log_dir, "taskdash" if is_prod_publish else MANUAL_LOG_PREFIX)
+    cleanup_old_logs(log_dir, int(config.get("logging", {}).get("max_log_age_days", config_default("logging.max_log_age_days"))))
+    for warning in config_warnings:
+        emit(warning)
+    emit(f"TaskDash started. Log: {log_path}")
+    version_warning = arcgis_version_warning()
+    if version_warning:
+        emit(version_warning)
+
+    # Every fatal error must reach the timestamped log file, not just stderr/bootstrap.log: a
+    # bare `raise SystemExit(msg)` or an uncaught exception only prints to stderr on its own,
+    # and pythonw/Task Scheduler runs have no stderr to read. Logged here once, in the one place
+    # every CLI branch passes through, then re-raised so the process still exits non-zero.
     if is_prod_publish:
         ping_healthcheck(config, "/start")
     try:
@@ -4111,6 +4446,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if is_prod_publish:
             ping_healthcheck(config, "/fail")
         raise
+    if result != 0:
+        # A nonzero return raises nothing, so without this line `taskdash status --offline` cannot tell the run failed.
+        logging.error(f"TaskDash exiting with code {result}.")
     if is_prod_publish:
         ping_healthcheck(config, "" if result == 0 else "/fail")
     return result
@@ -4214,6 +4552,15 @@ def _active_maintenance_windows(windows: Sequence[Dict[str, Any]], now: dt.datet
     for window in windows:
         if maintenance_window_is_misspelled_mute(window):
             continue  # load_config already warned; a stray key may be a misspelled "end"
+        # Checked here, once per window, not per task: a bad regex used to warn about 2N times a run.
+        pattern = window.get("task")
+        if isinstance(pattern, str) and pattern.strip():
+            try:
+                re.compile(normalize_text(pattern))
+            except re.error:
+                emit(f"WARNING: alerting.maintenance_windows task pattern {normalize_text(pattern)!r} is not a "
+                     f"valid regex; ignored.")
+                continue
         open_ended = "end" in window and window["end"] is None
         start = now if window.get("start") is None and open_ended else parse_iso_datetime(window.get("start"))
         end = parse_iso_datetime(window.get("end"))
@@ -4251,8 +4598,7 @@ def _task_in_maintenance(task_name: str, windows: Sequence[Dict[str, Any]]) -> O
             if re.search(pattern, task_name):
                 return window
         except re.error:
-            emit(f"WARNING: alerting.maintenance_windows task pattern {pattern!r} is not a "
-                f"valid regex; ignored.")
+            continue  # _active_maintenance_windows warned once and dropped the window
     return None
 
 
@@ -4271,6 +4617,11 @@ def partition_maintenance(
 
 
 MUTED_NOTE = "Muted (alerts off)"
+
+
+def _local_stamp(moment: dt.datetime) -> str:
+    """A UTC datetime as the host's local time, like the dashboard and the alert e-mail show it."""
+    return f"{moment.astimezone():%Y-%m-%d %H:%M %Z}"
 
 
 def apply_mute_notes(inventory: Sequence[Dict[str, Any]], config: Dict[str, Any],
@@ -4301,7 +4652,7 @@ def apply_mute_notes(inventory: Sequence[Dict[str, Any]], config: Dict[str, Any]
             note = MUTED_NOTE
             muted += 1
         else:
-            note = f"In maintenance until {end:%Y-%m-%d %H:%M} UTC"
+            note = f"In maintenance until {_local_stamp(end)}"
         reason = normalize_text(task.get("attention_reason"))[:1000 - len(note) - 2]
         task["attention_reason"] = f"{reason}; {note}" if reason else note
     if muted:
@@ -4394,6 +4745,17 @@ _USER_COLON_PATTERN = re.compile(
 _NET_USE_PATTERN = re.compile(
     r'(?i)(\bnet(?:\.exe)?\s+use\s+(?:(?:[a-z]:|\*)\s+)?(?:"\\\\[^"]*"|\\\\\S+)\s+)(?![/<])'
     + _SECRET_VALUE)
+# net user <name> <password> /add: positional. [ \t] keeps a bare `net user name` from reaching the
+# next line, and a value that starts with / (a switch), < or * (a prompt) is not a password.
+_NET_USER_PATTERN = re.compile(r'(?i)(\bnet(?:\.exe)?[ \t]+user[ \t]+[^\s/]+[ \t]+)(?![/<*])' + _SECRET_VALUE)
+# sqlplus/sqlldr/expdp/impdp user/password@db: the password sits between the first slash and the @.
+# `sqlplus / as sysdba` has no user before the slash, so it is left alone.
+_ORACLE_LOGIN_PATTERN = re.compile(
+    r'''(?i)(\b(?:sqlplus|sqlldr|expdp|impdp)\w*(?:\.exe)?[ \t]+(?:-\S+[ \t]+)*[^\s/@"'-][^\s/@"']*/)'''
+    r'''(?!<redacted>)[^\s@"']+''')
+# sshpass -p <password> (or -p<password>) before the command it wraps; that command's own -p is a port.
+_SSHPASS_PATTERN = re.compile(
+    r'((?i:\bsshpass\w*(?:\.exe)?)[ \t]+(?:-(?!p)\S+[ \t]+)*-p[ \t]*)(?!<redacted>)' + _SECRET_VALUE)
 # powershell -EncodedCommand <base64>: the whole script, credentials included, decodes from it.
 # Exact flag forms only: a looser -enc\w* would also take -Encoding utf8.
 _ENCODED_COMMAND_PATTERN = re.compile(r'(?i)(?<![\w-])(-(?:EncodedCommand|enc|ec))\s+(?!<redacted>)\S+')
@@ -4441,7 +4803,7 @@ def _powershell_secret(match: Any) -> str:
 def _scrub_secrets(text: str) -> str:
     """Redact secrets before the text reaches a published row or an e-mail: key=value and
     key: value pairs, password flags (sqlcmd, bcp, plink, psexec, schtasks, mysql, 7z, curl,
-    net use, /p:), -EncodedCommand values, PowerShell secret variables, Authorization headers,
+    net use, net user, sqlplus, sshpass, /p:), -EncodedCommand values, PowerShell secret variables, Authorization headers,
     SAS signatures, ConvertTo-SecureString literals and scheme://user:pass@ URLs.
     The flag or key stays; only the value becomes <redacted>."""
     text = _URL_CREDENTIAL_PATTERN.sub(r"\1<redacted>@", text)
@@ -4452,6 +4814,9 @@ def _scrub_secrets(text: str) -> str:
     text = _SAS_SIGNATURE_PATTERN.sub(r"\1<redacted>", text)
     text = _SECURE_STRING_PATTERN.sub(r"\1<redacted>", text)
     text = _NET_USE_PATTERN.sub(r"\1<redacted>", text)
+    text = _NET_USER_PATTERN.sub(r"\1<redacted>", text)
+    text = _ORACLE_LOGIN_PATTERN.sub(r"\1<redacted>", text)
+    text = _SSHPASS_PATTERN.sub(r"\1<redacted>", text)
     text = _USER_COLON_PATTERN.sub(r"\1\2:<redacted>", text)
     for command, flag, repl in _CONTEXT_FLAG_PATTERNS:
         text = _sub_after_command(command, flag, repl, text)
@@ -4521,8 +4886,8 @@ def should_alert(previous: Dict[str, Any], current: List[str], now: datetime,
     """Decide whether to send, and why. Pure -- no I/O, so it is testable.
 
     Sends when the problem set CHANGES (new problem, or recovery), never on every run: an
-    unchanged failure mailed hourly trains the reader to ignore it. The daily heartbeat exists
-    so that silence is meaningful -- without it, "no e-mail" and "monitor is dead" look alike.
+    unchanged failure mailed hourly trains the reader to ignore it. The daily heartbeat, sent by
+    the first run at or after its hour on each local day, exists so that silence is meaningful -- without it, "no e-mail" and "monitor is dead" look alike.
     realert_hours adds a per-problem cooldown on top of that: an unchanged problem set is
     resent once any still-open problem's last alert (previous["problem_last_alert_utc"]) is
     older than the cooldown, or was never recorded, so a long-lived failure is still repeated
@@ -4536,7 +4901,8 @@ def should_alert(previous: Dict[str, Any], current: List[str], now: datetime,
             return True, "recovered"
         return True, "changed"
 
-    if current and realert_hours is not None:
+    # 0 or less is off, like the neighbouring keys; only an open problem past the cooldown repeats.
+    if current and realert_hours is not None and realert_hours > 0:
         last_alert = previous.get("problem_last_alert_utc") or {}
         for key in current:
             ts = parse_iso_datetime(last_alert.get(key))
@@ -4547,7 +4913,9 @@ def should_alert(previous: Dict[str, Any], current: List[str], now: datetime,
         return False, ""
     last = parse_iso_datetime(previous.get("last_heartbeat_utc"))
     local = now.astimezone()
-    if local.hour == int(heartbeat_hour) and (last is None or (now - last).total_seconds() > 12 * 3600):
+    # The first run at or after the hour, if none went out today: a run that failed or lost the
+    # lock during the hour itself must not skip the whole day.
+    if local.hour >= int(heartbeat_hour) and (last is None or last.astimezone().date() < local.date()):
         return True, "heartbeat"
     return False, ""
 
@@ -4584,12 +4952,19 @@ def failure_causes(inventory: Sequence[Dict[str, Any]]) -> Dict[str, str]:
     return {_task_id(t): _failure_cause(t) for t in inventory if t.get("last_run_failed")}
 
 
-def problem_first_seen(previous: Dict[str, Any], current: Sequence[str],
-                       now: dt.datetime) -> Dict[str, str]:
+def problem_first_seen(previous: Dict[str, Any], current: Sequence[str], now: dt.datetime,
+                       seed_from: Sequence[Dict[str, Any]] = ()) -> Dict[str, str]:
     """When each open problem was first seen: kept from the alert state, else now. A task's
-    last_run_time is no substitute: a task that fails again moves it to the newest failure."""
+    last_run_time is no substitute: a task that fails again moves it to the newest failure.
+    Only seed_from, the tasks of a first run with no alert state, uses it: every failure there
+    is old, and "now" would make three old failures look like one new incident."""
     seen = previous.get("problem_first_seen_utc") or {}
-    return {k: seen.get(k) or now.isoformat() for k in current}
+    seeded: Dict[str, str] = {}
+    for task in seed_from:
+        ran = parse_iso_datetime(task.get("last_run_time"))
+        if task.get("last_run_failed") and ran and ran < now:
+            seeded[_problem_key(task)] = ran.isoformat()
+    return {k: seen.get(k) or seeded.get(k) or now.isoformat() for k in current}
 
 
 def shared_cause(inventory: Sequence[Dict[str, Any]], current: Sequence[str],
@@ -4696,18 +5071,39 @@ def compose_alert(collected: Dict[str, Any], config: Dict[str, Any], previous: D
     alerting = config.get("alerting", {})
     windows = run_maintenance_windows(collected, config, now)
     current, suppressed = partition_maintenance(collected["inventory"], windows)
+    if isinstance(collected.get("event_log_error"), (collect.EventLogUnreadable, PowerShellTimeout)):
+        # The run history failed to read this run, so a failure seen only in a run row (a launch that
+        # never happened) cannot show now. Keep the earlier failures open: "Cleared" would be wrong and
+        # the failure would be mailed as new when the read works again. A disabled log is not held (it
+        # repeats every run, so the key could never clear), and neither is a task whose scheduler
+        # last_run_time is newer than the failure: the scheduler vouches for the recovery.
+        held_tasks = {_task_id(t): t for t in collected["inventory"]}
+        seen = {**(previous.get("problem_last_alert_utc") or {}), **(previous.get("problem_first_seen_utc") or {})}
+
+        def _unvouched(key: str) -> bool:
+            since = parse_iso_datetime(seen.get(key))
+            ran = parse_iso_datetime(held_tasks[key[len("FAILED: "):]].get("last_run_time"))
+            return since is None or ran is None or ran <= since
+
+        current = sorted(set(current) | {
+            k for k in previous.get("signature") or []
+            if k.startswith("FAILED: ") and k[len("FAILED: "):] in held_tasks and k not in suppressed
+            and _unvouched(k)})
     heartbeat_hour = alerting.get("heartbeat_hour")
     send, reason = should_alert(previous, current, now,
                                 None if heartbeat_hour is None else int(heartbeat_hour),
-                                safe_float(alerting.get("realert_hours", 24)))
+                                safe_float(alerting.get("realert_hours", config_default("alerting.realert_hours"))))
     prior = previous.get("signature") or []
-    first_seen = problem_first_seen(previous, current, now)
-    min_tasks = int(safe_float(alerting.get("shared_cause_min_tasks", 3)) or 0)
+    # No alert state: nothing was ever sent from here, so every open failure is old news. It is
+    # listed as such, not grouped into an incident that "started" at this run.
+    first_run = not previous
+    first_seen = problem_first_seen(previous, current, now, collected["inventory"] if first_run else ())
+    min_tasks = 0 if first_run else int(safe_float(alerting.get("shared_cause_min_tasks", config_default("alerting.shared_cause_min_tasks"))) or 0)
     # Causes cost a log-tail read each: only for open failures, and only with the feature on.
     open_failed = {k[len("FAILED: "):] for k in current if k.startswith("FAILED: ")}
     causes = failure_causes([t for t in collected["inventory"] if _task_id(t) in open_failed]
                             if min_tasks > 0 else [])
-    digest_hours = safe_float(alerting.get("incident_digest_hours", 6))
+    digest_hours = safe_float(alerting.get("incident_digest_hours", config_default("alerting.incident_digest_hours")))
     incident = shared_cause(collected["inventory"], current, min_tasks, first_seen, causes)
     if incident:
         incident["digest"] = bool(digest_hours and digest_hours > 0)
@@ -4725,7 +5121,7 @@ def compose_alert(collected: Dict[str, Any], config: Dict[str, Any], previous: D
     if held_recovered and not send:
         send, reason = True, "changed"
     subject, body = _alert_message(collected, config, now, reason, current, suppressed,
-                                   prior, incident, held_recovered)
+                                   prior, incident, held_recovered, first_seen, first_run)
     return {"send": send, "reason": reason, "current": current, "suppressed": suppressed,
             "subject": subject, "body": body, "incident": incident, "digest_due": digest_due,
             "first_seen": first_seen, "digest_pending": pending if reason == "digest" else []}
@@ -4733,7 +5129,11 @@ def compose_alert(collected: Dict[str, Any], config: Dict[str, Any], previous: D
 
 class AlertSendError(RuntimeError):
     """An alert that was due could not be sent. Distinct from "nothing to send" (False), so the
-    run can fail instead of passing as a success."""
+    run can fail instead of passing as a success. hint is the fix for this cause."""
+
+    def __init__(self, message: str, hint: str = ""):
+        super().__init__(message)
+        self.hint = hint or mail_failure_hint("")
 
 
 def maybe_send_alert(collected: Dict[str, Any], config: Dict[str, Any], log_dir: Path) -> bool:
@@ -4762,7 +5162,7 @@ def maybe_send_alert(collected: Dict[str, Any], config: Dict[str, Any], log_dir:
     if not alert["send"]:
         if alert["reason"] == "digest":
             emit(f"No alert yet: new problem(s) during an open incident ({len(current)} open) wait "
-                 f"for the digest due {alert['digest_due']:%Y-%m-%d %H:%M} UTC.")
+                 f"for the digest due {_local_stamp(alert['digest_due'])}.")
             # Remember what is held, so a held failure that recovers first is still reported.
             try:
                 atomic_write_json(state_path, {**previous, "digest_pending": alert["digest_pending"],
@@ -4771,18 +5171,32 @@ def maybe_send_alert(collected: Dict[str, Any], config: Dict[str, Any], log_dir:
                 emit(f"WARNING: could not persist the held digest ({exc}).")
         else:
             emit(f"No alert: problem set unchanged ({len(current)} open, {len(suppressed)} in maintenance).")
+            if not previous and not current:
+                # A healthy host with no heartbeat never sends, so it would never get a state file and
+                # its first real failure would be read as "already open when alerts started".
+                try:
+                    atomic_write_json(state_path, {"signature": [], "updated_utc": now.isoformat()})
+                except OSError as exc:
+                    emit(f"WARNING: could not persist alert state ({exc}).")
         return False
 
     if not recipients:
         raise AlertSendError("alerting.enabled is true but alerting.to is empty, so there is nobody "
-                             "to e-mail")
+                             "to e-mail",
+                             "Add at least one address to alerting.to in the config, or set "
+                             "alerting.enabled to false.")
     mail = load_mail_settings(config)
     if not mail:
-        raise AlertSendError("no usable mail settings (see the WARNING above in the log)")
+        raise AlertSendError("no usable mail settings (see the WARNING above in the log)",
+                             "Fix the smtp block in the config and store the SMTP password as the "
+                             "account that runs the task; the WARNING above says which part is "
+                             "missing. Then run `taskdash preflight --as-task --apply` and read its "
+                             "smtp line.")
     taskdash_common.last_send_error = ""
     if not send_email(mail, recipients, alert["subject"], alert["body"]):
-        raise AlertSendError(taskdash_common.last_send_error or "the mail server did not accept "
-                             "the message (see the WARNING above in the log)")
+        reason = (taskdash_common.last_send_error or
+                  "the mail server did not accept the message (see the WARNING above in the log)")
+        raise AlertSendError(reason, mail_failure_hint(reason))
     state = {"signature": current, "updated_utc": now.isoformat(),
              "last_heartbeat_utc": now.isoformat() if alert["reason"] == "heartbeat"
              else previous.get("last_heartbeat_utc"),
@@ -4825,6 +5239,8 @@ def _alert_subject(host: str, reason: str, current: List[str], suppressed: List[
             return f"[TaskDash] problem list changed on {host} ({len(current)} open)"
         if reason == "realert":
             return f"[TaskDash] {len(current)} problem(s) still open on {host}"
+        if reason == "heartbeat":
+            return f"[TaskDash] daily check on {host}: {len(current)} problem(s) still open"
         return f"[TaskDash] {len(current)} problem(s) on {host}"
     if suppressed:
         # Not actually "all clear" -- these problems are still open, just in a maintenance
@@ -4857,7 +5273,9 @@ def _alert_message(collected: Dict[str, Any], config: Dict[str, Any], now: dt.da
                    reason: str, current: List[str], suppressed: List[str],
                    prior: Sequence[str] = (),
                    incident: Optional[Dict[str, Any]] = None,
-                   held_recovered: Sequence[str] = ()) -> Tuple[str, str]:
+                   held_recovered: Sequence[str] = (),
+                   first_seen: Optional[Dict[str, str]] = None,
+                   first_run: bool = False) -> Tuple[str, str]:
     inventory = collected["inventory"]
     host = collected["host_name"]
     others = _other_attention(inventory)
@@ -4866,12 +5284,20 @@ def _alert_message(collected: Dict[str, Any], config: Dict[str, Any], now: dt.da
     names = {_task_id(t): t["task_name"] for t in inventory}
     details = {k: _shown(k, names) for k in [*current, *suppressed, *prior, *held_recovered]}
     details.update(alert_details(inventory))
+    # A problem kept from an earlier e-mail (or seeded on a first run) shows its age; a new one is first seen now.
+    for key in current:
+        since = parse_iso_datetime((first_seen or {}).get(key))
+        if since and since < now:
+            details[key] = f"{details.get(key, key)} (open since {_local_stamp(since)})"
     # Local time, like the dashboard: a UTC time here did not match what the reader saw there.
-    lines = [f"Checked {len(inventory)} scheduled task(s) at {now.astimezone():%Y-%m-%d %H:%M %Z}."]
+    lines = [f"Checked {len(inventory)} scheduled task(s) at {_local_stamp(now)}."]
+    if first_run and current:
+        lines += ["", "Already open when alerts started: TaskDash has no record of an earlier alert on "
+                      "this host, so these problems may be older than this e-mail. Where a line shows "
+                      "a time, it is the task's last run, the earliest sign TaskDash has of the problem."]
     if incident:
         what, todo = _CAUSE_TEXT[incident["cause"]]
-        since = (f" since {incident['since'].astimezone():%Y-%m-%d %H:%M %Z}"
-                 if incident["since"] else "")
+        since = f" since {_local_stamp(incident['since'])}" if incident["since"] else ""
         parts = []
         for i, (c, n) in enumerate(sorted(incident["counts"].items(), key=lambda x: (-x[1], x[0] == ""))):
             phrase = (f"at {_CAUSE_TEXT[c][0]}" if c else "with no clear cause")
@@ -4880,7 +5306,10 @@ def _alert_message(collected: Dict[str, Any], config: Dict[str, Any], now: dt.da
                           + phrase)
             parts.append(f"{n} {phrase}")
         evidence = ", ".join(parts)
-        lines += ["", f"Likely shared cause: {incident['count']} tasks have failed{since}.",
+        # No majority cause: the heading must not claim one, or the next line contradicts it.
+        heading = (f"Likely shared cause: {incident['count']} tasks have failed{since}." if incident["cause"]
+                   else f"{incident['count']} tasks have failed{since}. They may share one cause.")
+        lines += ["", heading,
                   (f"Most of their logs point at {what}. {todo}" if incident["cause"]
                    else f"Their logs show {what}. {todo}"),
                   f"Log evidence: {evidence}."]
@@ -4897,9 +5326,11 @@ def _alert_message(collected: Dict[str, Any], config: Dict[str, Any], now: dt.da
         lines += ["", "No failed or overdue tasks."]
     if others:
         lines += ["", f"{len(others)} other task(s) need attention:", *(f"  {o}" for o in others)]
+    if reason == "heartbeat":
+        lines += _silent_peer_lines(collected)
 
     task_by_name = {_task_id(t): t for t in inventory}
-    include_tail = config.get("alerting", {}).get("include_log_tail", True) is not False
+    include_tail = config.get("alerting", {}).get("include_log_tail", config_default("alerting.include_log_tail")) is not False
     for key in current:
         if not include_tail or not key.startswith("FAILED: "):
             continue
@@ -4913,42 +5344,62 @@ def _alert_message(collected: Dict[str, Any], config: Dict[str, Any], now: dt.da
         lines += ["", "In maintenance (not alerted):"]
         lines += [details.get(k, k) for k in suppressed]
 
-    lines += ["", f"Dashboard: {alert_dashboard_link(config)}", ""]
+    if current and reason in ("realert", "heartbeat"):
+        lines += ["", _repeat_footer(reason, config)]
+    link = alert_dashboard_link(config)
+    lines.append("")
+    if collected.get("publish_note"):
+        lines += [collected["publish_note"], ""]
+    if link:
+        lines += [f"Dashboard: {link}", ""]
     # Same cleaning as send_email, so --preview-alert shows the text that goes out.
     return strip_control_chars(subject).replace("\n", " "), strip_control_chars("\n".join(lines))
 
 
+def _repeat_footer(reason: str, config: Dict[str, Any]) -> str:
+    """What a repeated e-mail tells the reader to do to stop the repeats."""
+    mute = "To mute one task, add it to alerting.maintenance_windows with \"end\": null."
+    if reason == "heartbeat":
+        return f"This is the daily check, so it lists problems that are still open. {mute}"
+    hours = safe_float(config.get("alerting", {}).get("realert_hours", config_default("alerting.realert_hours")))
+    return (f"TaskDash repeats this e-mail at most every {hours:g} hours while a problem stays open. "
+            f"{mute} To stop the repeats for every task, set alerting.realert_hours to 0.")
+
+
 def alert_dashboard_link(config: Dict[str, Any]) -> str:
-    """alerting.dashboard_url wins; otherwise the portal URL the collector signs in to."""
+    """alerting.dashboard_url wins; otherwise the portal URL the collector signs in to. Empty when
+    no dashboard is set up yet, so the e-mail has no link instead of one to a blank page."""
     explicit = normalize_text(config.get("alerting", {}).get("dashboard_url"))
     if explicit:
         return explicit
     agol = config.get("arcgis", {})
+    dashboard_id = normalize_text(agol.get("dashboard_id", ""))
+    if not dashboard_id:
+        return ""
     base = (normalize_text(agol.get("url")) or "https://www.arcgis.com").rstrip("/")
-    return f"{base}/apps/dashboards/{normalize_text(agol.get('dashboard_id', ''))}"
+    return f"{base}/apps/dashboards/{dashboard_id}"
 
 
 def _alert_timing_lines(previous: Dict[str, Any], current: List[str], now: dt.datetime,
                         alerting: Dict[str, Any]) -> List[str]:
     """Why the preview's decision came out as it did: cooldown per open problem, heartbeat."""
-    realert_hours = safe_float(alerting.get("realert_hours", 24))
+    realert_hours = safe_float(alerting.get("realert_hours", config_default("alerting.realert_hours")))
     last_alert = previous.get("problem_last_alert_utc") or {}
     lines = []
     for key in current:
         ts = parse_iso_datetime(last_alert.get(key))
         if ts is None:
             lines.append(f"  {key}: never alerted")
-        elif realert_hours is None:
-            lines.append(f"  {key}: last alerted {ts:%Y-%m-%d %H:%M} UTC (re-alert off)")
+        elif realert_hours is None or realert_hours <= 0:
+            lines.append(f"  {key}: last alerted {_local_stamp(ts)} (re-alert off)")
         else:
             due = ts + dt.timedelta(hours=realert_hours)
-            lines.append(f"  {key}: last alerted {ts:%Y-%m-%d %H:%M} UTC, re-alert due "
-                         f"{due:%Y-%m-%d %H:%M} UTC")
+            lines.append(f"  {key}: last alerted {_local_stamp(ts)}, re-alert due {_local_stamp(due)}")
     hour = alerting.get("heartbeat_hour")
     last = parse_iso_datetime(previous.get("last_heartbeat_utc"))
-    lines.append("Heartbeat: off (alerting.heartbeat_hour not set)" if hour is None else
-                 f"Heartbeat: at local hour {int(hour)}; last sent "
-                 f"{f'{last:%Y-%m-%d %H:%M} UTC' if last else 'never'}")
+    lines.append("Daily check: off (alerting.heartbeat_hour not set)" if hour is None else
+                 f"Daily check: at local hour {int(hour)}; last sent "
+                 f"{_local_stamp(last) if last else 'never'}")
     return lines
 
 
@@ -4967,14 +5418,14 @@ def preview_alert(collected: Dict[str, Any], config: Dict[str, Any], log_dir: Pa
                else "alerting.to is empty" if not recipients else "")
     if alert["reason"] == "digest":
         decision = (f"would NOT send yet: new problem(s) during an open incident wait for the digest "
-                    f"due {alert['digest_due']:%Y-%m-%d %H:%M} UTC (alerting.incident_digest_hours)")
+                    f"due {_local_stamp(alert['digest_due'])} (alerting.incident_digest_hours)")
     elif not alert["send"]:
         decision = "would NOT send: no new, changed, recovered or re-alert-due problem, no heartbeat due"
     elif blocked:
         decision = f"would NOT send: {blocked} (otherwise: send, reason '{alert['reason']}')"
     else:
         decision = f"WOULD SEND to {', '.join(recipients)} (reason '{alert['reason']}')"
-    lines = [f"TaskDash alert preview, {now:%Y-%m-%d %H:%M} UTC. Nothing was sent; "
+    lines = [f"TaskDash alert preview, {_local_stamp(now)}. Nothing was sent; "
              f"alert_state.json was not changed. SMTP settings were not checked.",
              f"Alert state: {state_path}" + ("" if state_path.exists() else " (none: never alerted)"),
              f"Decision: {decision}",

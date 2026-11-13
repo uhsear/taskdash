@@ -159,8 +159,8 @@ def test_fetch_keys_adds_the_bound_to_a_multi_field_read(monkeypatch):
     rows = [row()]
     publish.fetch_keys(object(), rows, KEYS, "OBJECTID")
     publish.fetch_keys(object(), rows, KEYS, "OBJECTID", extra_where="(observed_at_utc >= TIMESTAMP 'x')")
-    assert seen == ["host_name IN ('HOST-A')",
-                    "host_name IN ('HOST-A') AND (observed_at_utc >= TIMESTAMP 'x')"]
+    assert seen == ["host_name = 'HOST-A'",
+                    "host_name = 'HOST-A' AND (observed_at_utc >= TIMESTAMP 'x')"]
 
 
 class _Table:
@@ -245,7 +245,7 @@ def run_world(monkeypatch, tmp_path):
     monkeypatch.setattr(publish, "connect_agol", lambda cfg: object())
     monkeypatch.setattr(publish, "ensure_service", lambda gis, cfg, target: item)
     monkeypatch.setattr(publish, "get_tables", lambda i: {})
-    monkeypatch.setattr(publish, "check_schema_drift", lambda tables: None)
+    monkeypatch.setattr(publish, "check_schema_drift", lambda tables, *a: None)
     monkeypatch.setattr(publish, "check_source_sharing", lambda *a: None)
     monkeypatch.setattr(publish, "check_release_sharing", lambda *a: None)
     monkeypatch.setattr(publish, "collect_everything", lambda *a, **k: {
@@ -254,7 +254,7 @@ def run_world(monkeypatch, tmp_path):
     monkeypatch.setattr(publish, "maybe_send_alert", lambda *a: False)
     monkeypatch.setattr(publish, "_write_collector_run_row", lambda *a, **k: None)
 
-    def fake_publish(gis, item, collected, config, force=False, metrics_plan=None):
+    def fake_publish(gis, item, collected, config, force=False, metrics_plan=None, target="prod"):
         sent.append(metrics_plan)
         return {}
 
@@ -321,7 +321,7 @@ def test_refresh_metrics_apply_removes_the_state_so_the_next_publish_resends(mon
     table = _MetricsTable([_stored(1, "features_max_oid", "new.log")])
     monkeypatch.setattr(publish, "connect_agol", lambda config: None)
     monkeypatch.setattr(publish, "ensure_service", lambda gis, config, target: None)
-    monkeypatch.setattr(publish, "check_schema_drift", lambda tables: None)
+    monkeypatch.setattr(publish, "check_schema_drift", lambda tables, *a: None)
     monkeypatch.setattr(publish, "get_tables", lambda item: {publish.TABLE_METRICS: table,
                                                              publish.TABLE_INVENTORY: _MetricsTable([])})
     monkeypatch.setattr(publish, "mine_metrics",

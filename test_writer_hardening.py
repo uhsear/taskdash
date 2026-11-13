@@ -9,6 +9,7 @@ passes. Matches test_taskdash.py / test_metrics_hardening.py style.
 from __future__ import annotations
 
 import json
+import os
 
 import pytest
 
@@ -603,7 +604,7 @@ def test_run_publish_apply_refuses_a_table_missing_a_field(tmp_path, monkeypatch
                         lambda gis, cfg, tgt: type("I", (), {"title": "x", "id": tgt})())
     monkeypatch.setattr(publish, "get_tables", lambda item: {"TaskRuns": object()})
     monkeypatch.setattr(publish, "check_schema_drift",
-                        lambda tables: (_ for _ in ()).throw(SystemExit("Schema drift -- TaskRuns: run_key")))
+                        lambda tables, *a: (_ for _ in ()).throw(SystemExit("Schema drift -- TaskRuns: run_key")))
     # The drift refusal is deferred, so the run reaches collection; keep it off the real host.
     monkeypatch.setattr(publish, "collect_everything",
                         lambda *a, **k: {"host_name": "H", "inventory": [], "runs": [],
@@ -864,9 +865,32 @@ def test_run_under_lock_exits_nonzero_when_the_lock_is_stale(tmp_path, monkeypat
     monkeypatch.setattr(publish, "run_lock", fake_run_lock)
     messages = []
     monkeypatch.setattr(publish, "emit", lambda msg: messages.append(msg))
-    result = publish._run_under_lock(tmp_path, lambda: 0)
-    assert result == 1
-    assert any("stuck" in m.lower() for m in messages)
+    with pytest.raises(SystemExit) as exc:
+        publish._run_under_lock(tmp_path, lambda: 0)
+    assert "stuck" in str(exc.value).lower()
+    assert "taskdash.lock" in str(exc.value) and "Stop-ScheduledTask" in str(exc.value)
+
+
+def test_run_under_lock_names_the_holder_process_when_the_lock_is_stale(tmp_path, monkeypatch):
+    import datetime as _dt
+    stale_time = common.utc_now() - _dt.timedelta(hours=common.STALE_LOCK_HOURS + 1)
+
+    def fake_run_lock(log_dir, name="taskdash.lock"):
+        raise common.RunLockHeld("held", held_since=stale_time, pid=4321, lock_path=tmp_path / "taskdash.lock")
+
+    monkeypatch.setattr(publish, "run_lock", fake_run_lock)
+    monkeypatch.setattr(publish, "emit", lambda msg: None)
+    with pytest.raises(SystemExit, match="Stop-Process -Id 4321") as exc:
+        publish._run_under_lock(tmp_path, lambda: 0)
+    assert "A run is stuck holding the lock" in str(exc.value)
+
+
+def test_run_lock_held_carries_the_holders_pid_and_path(tmp_path):
+    with common.run_lock(tmp_path):
+        with pytest.raises(common.RunLockHeld) as exc:
+            with common.run_lock(tmp_path):
+                pass
+    assert exc.value.pid == os.getpid() and exc.value.lock_path == tmp_path / "taskdash.lock"
 
 
 def test_run_under_lock_exits_zero_for_a_fresh_lock(tmp_path, monkeypatch):

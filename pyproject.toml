@@ -9,17 +9,36 @@ description = "Windows scheduled-task monitor that publishes to ArcGIS Online ho
 readme = "README.md"
 # An SPDX expression needs setuptools 77 or later; LICENSE and NOTICE ship in the wheel by default.
 license = "Apache-2.0"
-# CI, the lock and the install guide all use 3.11; ArcGIS Pro's own env is 3.11 or newer.
+# 3.13 is the supported version: the lock, the installer and the guide use it. CI also tests 3.11 and
+# 3.12, which are not supported. The floor is 3.11 because ArcGIS Pro's own env is 3.11 or newer.
 requires-python = ">=3.11"
+# The public release repository is the one place users download from; the build repository is private.
+# Windows only: the collector reads Task Scheduler through PowerShell.
+classifiers = [
+    "Environment :: Console",
+    "Intended Audience :: System Administrators",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: System :: Monitoring",
+]
 # Ranges, not pins: Pro ships its own arcgis and a pin would fight it. requests comes with arcgis.
-dependencies = ["arcgis>=2.4,<3"]
+# pywin32 is listed because the sign-in hand-off and --as-task import it; arcgis brings it only today.
+dependencies = ["arcgis>=2.4,<3", "pywin32>=223; sys_platform == 'win32'"]
 
 [project.optional-dependencies]
-# Only read when smtp.user is set: the mail password comes from the Windows keyring.
+# Only read when smtp.user is set: the mail password comes from the Windows keyring. arcgis already
+# installs keyring, so this extra only keeps it in the lock if arcgis drops it.
 smtp = ["keyring>=23"]
 
+[project.urls]
+Homepage = "https://github.com/uhsear/taskdash-releases"
+Releases = "https://github.com/uhsear/taskdash-releases/releases"
+
 [project.scripts]
-taskdash = "taskdash_cli:main"
+taskdash = "taskdash_cli:run"
 
 [tool.setuptools]
 # Flat layout on purpose: a folder deploy and the wheel run the same files.
@@ -52,5 +71,9 @@ version = {attr = "taskdash_common.TASKDASH_VERSION"}
     "taskdash_task.xml",
     "install_task.ps1",
     "Install-TaskDash.ps1",
+    "SECURITY.md",
+    "CHANGELOG.md",
 ]
+# The guides link each other, and SECURITY.md and CHANGELOG.md as ../, so this layout keeps the links working.
+"share/taskdash/docs" = ["docs/*.md"]
 "share/taskdash/rules" = ["rules/default.json"]

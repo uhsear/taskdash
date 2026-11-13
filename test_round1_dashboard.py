@@ -110,7 +110,7 @@ def test_metric_change_help_names_its_columns_and_flags(build):
 def test_metric_summary_is_a_range_table_and_its_help_matches(build):
     summary = _by_name(build())["Metric Summary"]
     titles = [c["title"] for c in summary["columnSettings"]]
-    assert titles == ["Task", "Metric", "Lowest", "Average", "Highest", "Times logged"]
+    assert titles == ["Task", "Host", "Metric", "Lowest", "Average", "Highest", "Times logged"]
     help_text = " ".join(x for x in dash.HELP["Metric Summary"] if x)
     for word in ("lowest", "average", "highest"):
         assert word in help_text
@@ -139,7 +139,7 @@ def test_validator_refuses_a_field_the_arcade_source_does_not_return(build):
     definition = build()
     widgets = _by_name(definition)
     widgets["Task"]["events"][0]["actions"][0]["targets"].append(
-        dash.target(widgets["Metric Change"], join="task_full_name"))
+        dash.target(widgets["Metric Change"], join="task_path"))
     with pytest.raises(SystemExit, match="Arcade data source"):
         dash.validate_definition(definition)
 
@@ -248,14 +248,14 @@ def test_why_column_cuts_at_a_word_with_an_ellipsis(build):
 
 def test_one_term_for_setting_notes_and_no_repeated_row_label(build):
     definition = build()
-    # Shown text only: the widget name "Config Notes" is a stable key that other tests use.
+    # Shown text only: the widget name "Setting Notes" is a stable key that other tests use.
     shown = ("title", "text", "description", "expression", "topCaption", "label")
     blob = json.dumps([[w.get(k) for k in shown] + [w.get("noDataState"), w.get("columnSettings")]
                        for w in dash.all_items(definition)], ensure_ascii=False)
     assert "Config Note" not in blob and "config warning" not in blob.lower()
     widgets = _by_name(definition)
-    assert "noteLabel" not in widgets["Config Notes"]["expression"]
-    assert "Setting notes" in widgets["Config Notes"]["title"]
+    assert "noteLabel" not in widgets["Setting Notes"]["expression"]
+    assert "Setting notes" in widgets["Setting Notes"]["title"]
     titles = {c["fieldName"]: c["title"] for c in widgets["Task Health"]["columnSettings"]}
     # Setting notes lost its own Task Health column (round7 overview-task-names-cut-setting-
     # notes-column): it surfaces in the Why cell instead, so Task name has room to fit.
