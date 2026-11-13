@@ -1,0 +1,12 @@
+{
+  "_notes": "An example. Keep your real task descriptions in a copy of this file next to TaskDash.config.json, and replace the task names. TaskDash ignores a key that starts with an underscore.",
+  "tasks": {
+    "Parcel Update": {
+      "description": "Loads the new parcels every night.",
+      "overdue_grace_minutes": 90,
+      "acknowledge_config_warnings": ["StartWhenAvailable"],
+      "acknowledge_reason": "Catch-up is off on purpose. A late run would overlap the backup."
+    },
+    "example_job.py": "Copies the data folder to the backup share."
+  }
+}

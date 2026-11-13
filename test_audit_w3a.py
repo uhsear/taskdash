@@ -214,7 +214,9 @@ def _installer(install_dir, *args):
     account = os.environ.get("USERDOMAIN", "HOST") + chr(92) + os.environ.get("USERNAME", "user")
     return subprocess.run([POWERSHELL, "-NoProfile", "-NonInteractive", "-File", str(INSTALLER), "-InstallDir",
                            str(install_dir), "-TaskAccount", account, *args],
-                          capture_output=True, text=True, timeout=120)
+                          capture_output=True, text=True, timeout=120,
+                          # A pwsh 7 parent's PSModulePath stops Windows PowerShell loading Get-Acl.
+                          env={k: v for k, v in os.environ.items() if k.upper() != "PSMODULEPATH"})
 
 
 @needs_powershell

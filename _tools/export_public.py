@@ -31,7 +31,6 @@ import deny_scan  # noqa: E402
 # The org rules profile and SDE extension are deny-listed in source, so their names are assembled.
 EXCLUDED_FILES = {
     "rules/mar" + "ion.json",
-    "workflow_descriptions.json",  # the root copy only; tests/fixtures keeps its own
     "dashboard_taskdash.json",
     "TaskDash.config.json",
 }

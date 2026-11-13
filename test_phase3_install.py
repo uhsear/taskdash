@@ -342,9 +342,11 @@ FAKE_TRACKED = [
 def test_export_selection_drops_every_listed_path_and_keeps_the_rest():
     kept, dropped = export_public.select_files(FAKE_TRACKED)
     assert sorted(dropped) == sorted([
-        "rules/mar" + "ion.json", "workflow_descriptions.json", "dashboard_taskdash.json",
+        "rules/mar" + "ion.json", "dashboard_taskdash.json",
         "TaskDash.config.json", "archive/old/x.py",
         "Logs/run.txt", "conn." + "sd" + "e", "sub/conn." + "SD" + "E"])
+    # The root file is a generic example now; the site copy lives outside the repository.
+    assert "workflow_descriptions.json" in kept
     assert "tests/fixtures/workflow_descriptions.json" in kept
     assert "TaskDash.config.example.json" in kept
     assert "install_task.ps1" in kept
