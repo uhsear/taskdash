@@ -1,4 +1,4 @@
-"""Builds the export that goes to the private repository used for CI.
+"""Builds the export that goes to the public TaskDash repository.
 
 Driver: manual
 Source: the files git tracks at HEAD (uncommitted edits never leak in)
@@ -11,7 +11,7 @@ After writing, the output is scanned with deny_scan (generic list, plus the priv
 and with the publisher's secret scrubber. Hits print as file paths and counts, never the matched text.
 A deny-list hit exits 1; credential-pattern files are listed for review and do not change the exit code.
 This script never runs git commit or git push; pushing the output is a separate, manual step.
-docs/RELEASING.md lists the whole release process, including the copy to the public repository.
+docs/RELEASING.md lists the whole release process.
 """
 
 from __future__ import annotations
@@ -137,7 +137,7 @@ def secret_hits(out: Path) -> Optional[dict]:
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
-    parser = argparse.ArgumentParser(description="Export the committed repo for the private CI repository.",
+    parser = argparse.ArgumentParser(description="Export the committed repo for the public repository.",
                                      allow_abbrev=False)
     parser.add_argument("--out", required=True, help="Folder to write the export into.")
     parser.add_argument("--apply", action="store_true", help="Write the files (default is a check).")

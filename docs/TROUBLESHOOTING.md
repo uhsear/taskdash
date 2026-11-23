@@ -54,7 +54,7 @@ it.
 
 If the log has the line `TaskDash failed with an uncaught exception.`, TaskDash met an error that
 this guide does not list. The lines after it show where. Remove identifying values from them, as the rule in
-[Issues](../README.md#issues) says. Then send them to the TaskDash maintainer.
+[Issues](../README.md#issues) says. Then open an issue in the TaskDash repository with them.
 
 When you run a command in a window, it prints its message there. The `collect` command also
 writes the message to its log. The other commands write no log of their own. They are `setup`, `preflight`,
@@ -134,7 +134,7 @@ scrubber raised an error on one line, so TaskDash wrote this text instead of the
 writes a line that it could not scrub. The run continues.
 
 **Fix.** If the text repeats, check the rules files for a recent change to `secret_words`, then
-re-run. If it still repeats, send the time of the line to the maintainer. Do not send the task's
+re-run. If it still repeats, open an issue in the TaskDash repository with the time of the line. Do not send the task's
 command line.
 
 ## Sign-in and config
@@ -334,7 +334,9 @@ messages when the task is not the one it expects:
 - `-Replace found no task named '<name>'`: no task has that name. Pass the right `-TaskName`, or run
   without `-Replace` to register the task.
 - `Task '<name>' runs as '<account>', not '<account>'`: pass `-User` with the account that the task
-  runs as. A new account needs a new task.
+  runs as. A new account needs a new task. After a computer rename, `-Replace` accepts the old
+  computer name in front of the account name. `CORP\svc` and `PC\svc` are different accounts, so
+  `-Replace` refuses to swap one for the other.
 - `Task '<name>' logs on as '<type>', not '<type>'`: pass `-LogonType` with the type that the task
   uses.
 - `Task '<name>' has <n> action(s), or one that does not start a program`: `-Replace` keeps one
@@ -359,7 +361,7 @@ is missing from the group, run `net localgroup Administrators DOMAIN\svc-taskdas
 account name. A `WARNING` that the account is not a direct member means it may belong through a
 group. Confirm that, because the installer cannot read nested membership.
 
-Two more messages come from the new switches:
+These messages also come from `install_task.ps1`:
 
 - `-EnableEventLog needs the venv's taskdash.exe`: pass `-Python` with the full path of
   `taskdash.exe`, or install TaskDash into `<InstallDir>\venv`.
@@ -374,12 +376,6 @@ Two more messages come from the new switches:
   Nothing was registered or changed.
 - `A task named '<name>' already exists`: add `-Replace` to give it a new password, or delete it
   with `Unregister-ScheduledTask -TaskName '<name>'` first. See [ROTATE.md](ROTATE.md).
-- `-Replace found no task named '<name>'`, or `Task '<name>' runs as '<account>', not '<account>'`:
-  `-Replace` changes only the password of the task that exists, for the same account name. It accepts
-  another name in front of the account name only after a computer rename: the task's old name is
-  not this computer's name, and `-User` starts with this computer's name. `CORP\svc` and `PC\svc`
-  are different accounts, so `-Replace` refuses to swap one for the other. Pass the right
-  `-TaskName` and `-User`.
 - `Task '<name>' registered with logon type '<type>'`: delete the task and register it again. The
   installer never changes the logon type of a registered task.
 - After `-StartNow`, the last line prints the full path of `taskdash.exe`, because `taskdash` is not
@@ -450,10 +446,9 @@ already done prints `nothing to do`, so the script continues where it stopped. T
   parent folder from an elevated window, and leave write rights only to SYSTEM, Administrators and
   you. At the drive root, every user may add folders; the script stops only when ordinary users
   may also delete folders there or change the root's permissions.
-- `'<account>' is not an account that this computer knows`: check the `-TaskAccount` name.
 - `'<folder>' changed while this script created it`: another user made the folder first. Move the
   folder away, then run the command again.
-- `'py -3.11 -m venv' failed`, `pip could not install the packages of '<lock>'`, `pip could not
+- `'py -3.13 -m venv' failed`, `pip could not install the packages of '<lock>'`, `pip could not
   install '<wheel>'`, or `pip finished, but '<exe>' does not exist`: read the output above the
   message. A package that does not match its hash in the lock must not be installed. Check the
   connection to `pypi.org`. If the
@@ -663,7 +658,7 @@ the colon shows what it printed instead.
 
 **Fix.** Read the printed text. TaskDash starts PowerShell without a profile, so a profile script
 is not the cause. If you cannot find the cause, remove identifying values from the message, as the rule in
-[Issues](../README.md#issues) says. Then send it to the TaskDash maintainer.
+[Issues](../README.md#issues) says. Then open an issue in the TaskDash repository with it.
 
 ### An ArcGIS call failed after several tries
 
@@ -930,7 +925,7 @@ existing service.
 the check off.
 
 **Fix.** If you see this message, remove identifying values from it, as the rule in
-[Issues](../README.md#issues) says. Then send it to the TaskDash maintainer. Do not share the item
+[Issues](../README.md#issues) says. Then open an issue in the TaskDash repository with it. Do not share the item
 with everyone.
 
 ### An item is not private
@@ -1433,7 +1428,7 @@ These warnings explain why an alert could not be sent. The steps in
 ## Setup
 
 These messages come from `taskdash setup`. Setup checks each name before it writes anything, so
-the first five messages leave ArcGIS Online unchanged. For the steps that follow a failure after
+the first six messages leave ArcGIS Online unchanged. For the steps that follow a failure after
 setup began to write, see step 6 of [INSTALL.md](INSTALL.md).
 
 If this is a second computer for a dashboard that exists, do not run setup. The refusals about an
@@ -1840,8 +1835,8 @@ preflight still exits 0. The base Python is the one that made the virtual enviro
 is under `C:\Users`, it belongs to one user, and the task account usually cannot run it. Preflight
 changes nothing.
 
-1. Install Python 3.11 for all users. See the Python requirement in [INSTALL.md](INSTALL.md).
-2. Run `py -0p`. The path for 3.11 must be under `C:\Program Files`.
+1. Install 64-bit Python 3.13 for all users. See the Python requirement in [INSTALL.md](INSTALL.md).
+2. Run `py -0p`. The path for 3.13 must be under `C:\Program Files`.
 3. Build the virtual environment again with that Python, as step 1 of [INSTALL.md](INSTALL.md) shows.
 4. Run `taskdash preflight`. The `base python` line must be `[ok]`.
 
@@ -2221,16 +2216,16 @@ it holds `"server_name"` with its quotes. A dashboard with a fixed computer name
 computer.
 
 **Fix.** If you edited `dashboard_templates.json`, remove the name. Otherwise remove identifying
-values from the message, as the rule in [Issues](../README.md#issues) says, and send it to the
-TaskDash maintainer.
+values from the message, as the rule in [Issues](../README.md#issues) says, and open an issue in the
+TaskDash repository with it.
 
 The messages below come from a defect in the widget templates or the build code. Your ArcGIS setup
 does not cause them.
 
 **Fix for every message in this table.** If you edited `dashboard_templates.json`, reinstall
 TaskDash from the full wheel. That restores the shipped copy. Otherwise remove identifying values
-from the message, as the rule in [Issues](../README.md#issues) says, and send it to the TaskDash
-maintainer.
+from the message, as the rule in [Issues](../README.md#issues) says, and open an issue in the TaskDash
+repository with it.
 
 | Message | What it checks |
 |---|---|
@@ -2266,8 +2261,8 @@ The last message depends on your config.
 **Cause.** A `privacy` switch hides a field in the read-only view, and a widget needs that field.
 
 **Fix.** If you edited `dashboard_templates.json`, remove the read of that field. Otherwise remove
-identifying values from the message, as the rule in [Issues](../README.md#issues) says, and send it
-to the TaskDash maintainer. Turn the privacy switch off only if you accept that viewers
+identifying values from the message, as the rule in [Issues](../README.md#issues) says, and open an issue
+in the TaskDash repository with it. Turn the privacy switch off only if you accept that viewers
 see the field.
 
 ## Demo

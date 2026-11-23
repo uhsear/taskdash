@@ -90,7 +90,7 @@ def test_trend_axes_use_12_hour_times_like_the_rest_of_the_dashboard():
 def test_use_guide_states_the_refresh_intervals_the_dashboard_sets():
     use = " ".join((Path(dash.__file__).parent / "docs" / "USE.md").read_text(encoding="utf-8").split())
     assert dash.HEARTBEAT_REFRESH_MINUTES == 5 and dash.METRIC_CHANGE_REFRESH_MINUTES == 60
-    assert "the heartbeat tiles update every 5 minutes and **Metric change** updates every hour" in use
+    assert "the **Collector heartbeat** and **Lowest 7-day success** tiles update every 5 minutes and **Metric change** updates every hour" in use
 
 
 def test_use_guide_explains_the_mute_notes_in_the_why_column():

@@ -12,7 +12,6 @@ license = "Apache-2.0"
 # 3.13 is the supported version: the lock, the installer and the guide use it. CI also tests 3.11 and
 # 3.12, which are not supported. The floor is 3.11 because ArcGIS Pro's own env is 3.11 or newer.
 requires-python = ">=3.11"
-# The TaskDash repository holds the code and is the one place users download from.
 # Windows only: the collector reads Task Scheduler through PowerShell.
 classifiers = [
     "Environment :: Console",
@@ -33,6 +32,7 @@ dependencies = ["arcgis>=2.4,<3", "pywin32>=223; sys_platform == 'win32'"]
 # installs keyring, so this extra only keeps it in the lock if arcgis drops it.
 smtp = ["keyring>=23"]
 
+# The TaskDash repository holds the code and is the one place users download from.
 [project.urls]
 Homepage = "https://github.com/uhsear/taskdash"
 Releases = "https://github.com/uhsear/taskdash/releases"

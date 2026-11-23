@@ -146,8 +146,8 @@ removes older rows. It also removes an inventory row when its task is gone.
 The alert e-mail is off by default. It needs `alerting.enabled` set to `true`, at least one address
 in `alerting.to`, and a mail server in the `smtp` section of the config. It names the computer, the
 failed and overdue tasks, and the other tasks that need attention. When several tasks fail for one
-reason, it names the likely shared cause. It quotes the last 15 lines of a failed task's log and
-links to the dashboard. It removes secrets from the log lines it quotes. The daily check e-mail is
+reason, it names the likely shared cause. It quotes up to the last 15 lines of a failed task's log, at most about 2 KB.
+It also links to the dashboard. Set `alerting.include_log_tail` to `false` to leave the lines out. It removes secrets from the log lines it quotes. The daily check e-mail is
 sent only when `alerting.heartbeat_hour` is set. The example config sets it to 7.
 
 ## Release notes
@@ -166,7 +166,7 @@ upgrade, note that Python 3.13 is the supported version. See [UPGRADE.md](UPGRAD
 
 ### 1.1.0 (2026-10-27)
 
-The first public release. TaskDash no longer fails silently: a failed alert e-mail, a turned-off or
+TaskDash no longer fails silently: a failed alert e-mail, a turned-off or
 wrapped Task Scheduler log, an unreadable task and a slow first run each show in the run result. A
 new `taskdash test-alert` command checks the e-mail path. Secret scrubbing covers more forms and
 TaskDash's own log. `metrics.log_roots` can confine log reads. Each release carries Sigstore
@@ -211,8 +211,8 @@ See [CHANGELOG.md](../CHANGELOG.md) for the full history.
 
 ## Known limits
 
-- One computer per install is recommended. Several computers can publish to one service, because
-  every row holds the computer name. This layout is not tested.
+- One computer per install. Several computers can publish to one service, because every row holds
+  the computer name. See "Add another computer" in [INSTALL.md](INSTALL.md).
 - The dashboard shows run times in the time zone of the viewer's device. The schedules use the
   clock of the computer that runs the tasks.
 - TaskDash is tested on ArcGIS Online only. ArcGIS Enterprise is not tested yet.

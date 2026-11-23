@@ -18,7 +18,7 @@ at the computer. Nothing connects in.
 | Endpoint | Use | When |
 |---|---|---|
 | `arcgis.url` (default `https://www.arcgis.com`) and the hosted service on `*.arcgis.com` | Sign-in, items, groups, tables. The `arcgis` package calls the portal's `/sharing/rest` API and the service's `FeatureServer` REST API. | Every run |
-| The same table addresses, without a token | A check that anonymous users cannot read the tables | `taskdash preflight`, `taskdash collect --check-anonymous` |
+| The same table addresses, without a token | A check that anonymous users cannot read the tables | `taskdash preflight`, `taskdash collect --check-anonymous`, and the end of `taskdash setup --apply` |
 | `smtp.host` on `smtp.port` | Alert e-mail. STARTTLS is on by default, and SSL for port 465. TaskDash checks the server certificate. With both off, the mail is plain text: preflight warns, and it fails if a mail login would send its password that way. The deprecated `alerting.mail_config_path` file gets no certificate check. | Only if alerts are on |
 | `alerting.healthcheck_url` | A `GET` to the address, then with `/start` and `/fail` added. No data is sent. | Only if set |
 | `pypi.org`, `files.pythonhosted.org` | `pip` downloads packages | Install and upgrade only |

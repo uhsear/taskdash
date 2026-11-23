@@ -69,6 +69,9 @@ Release files are public at <https://github.com/uhsear/taskdash/releases/latest>
 a problem or ask for a change, open an issue in this repository. For a vulnerability,
 do not open an issue. Follow [SECURITY.md](SECURITY.md).
 
+In the issue, give the TaskDash version from `taskdash --version`, the steps that show the problem
+and the failing line from `taskdash status` or `taskdash preflight`.
+
 Follow this rule for every report. Before you send a message or a log line, remove host names,
 account names, paths and other values that identify your site. Never send a captured fixture file
 or the config file. Never include secrets.

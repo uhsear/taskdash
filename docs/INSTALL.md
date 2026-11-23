@@ -28,7 +28,9 @@ account elevates the window, `$env:USERPROFILE` names that account's folder. The
 `$env:USERPROFILE\Downloads` in the commands with the full path of the folder that holds the files.
 Replace `<version>` with the wheel's version and `DOMAIN\svc-taskdash` with the task account. The
 script makes the virtual environment with Python 3.13. Add `-PythonVersion 3.12` only to use another
-installed version, which is not supported. Run the check first. It changes nothing:
+installed version, which is not supported. The script makes a `venv` environment. For a cloned
+ArcGIS Pro environment, use "Use a cloned ArcGIS Pro environment instead" below. Run the check first.
+It changes nothing:
 
 ```powershell
 powershell.exe -ExecutionPolicy Bypass -File "$env:USERPROFILE\Downloads\Install-TaskDash.ps1" -InstallDir C:\TaskDash -Wheel "$env:USERPROFILE\Downloads\taskdash-<version>-py3-none-any.whl" -TaskAccount DOMAIN\svc-taskdash
@@ -69,7 +71,8 @@ check who built the files, verify the Sigstore bundles, as the Requirements desc
 
 If your organization has its own ArcGIS Online address, press Enter at the sign-in prompt for the
 URL. `taskdash signin` then finds your organization's address and writes it into the config. Do not
-make `C:\TaskDash` or its config by hand first: the installer refuses a folder that it did not lock.
+make `C:\TaskDash` or its config by hand first: the installer refuses a folder that a
+non-administrator owns or can write to.
 
 Run the same `-Apply` command again after a failure, or on a working install. Each step that is
 already done prints `nothing to do`. Without `-Upgrade`, the script does not change an installed
@@ -141,7 +144,8 @@ describe the same work by hand.
     the file. For example, release `v1.1.0` carries the identity
     `https://github.com/uhsear/taskdash/.github/workflows/release.yml@refs/tags/v1.1.0`. The command
     also checks that GitHub Actions issued the signing certificate.
-    Any other output means you must not install the file. Ask the TaskDash maintainer.
+    Any other output means you must not install the file. Report it privately, as
+    [SECURITY.md](../SECURITY.md) describes.
 
 TaskDash is tested on one computer with 29 tasks that run at most hourly. A weekly automated test
 also runs the offline passes on 500 synthetic tasks and checks that they finish in 15 minutes.
@@ -663,8 +667,10 @@ One dashboard can show several computers. Each computer runs its own collector t
 the same service. Do not run `taskdash setup` on the second computer. Setup makes a second service,
 a second view, a second dashboard and a second group, and it refuses when it finds the first ones.
 
-Do these steps on the second computer. The quick install runs setup when `arcgis.item_id` is empty,
-so use the numbered steps of this guide.
+Do these steps on the second computer. The quick install runs setup only while `arcgis.item_id` is
+empty. You can also run it after you create and lock `C:\TaskDash` and copy in the first computer's
+config, as step 3 of "Move TaskDash to another computer" in [UPGRADE.md](UPGRADE.md) does.
+Otherwise, use the numbered steps.
 
 1. Do steps 1, 3, 4 and 5. In step 3, sign in as the same ArcGIS account that ran setup on the first
    computer. That account owns the items.

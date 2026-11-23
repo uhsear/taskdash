@@ -21,10 +21,16 @@ cloned ArcGIS Pro environment instead" in [INSTALL.md](INSTALL.md) describes.
 
 ### Upgrade with the installer
 
-If you installed TaskDash with `Install-TaskDash.ps1`, the same script can upgrade it. It does
-steps 3 to 11 below for you, and step 12 only if you ask. Read the release notes first, as step 1
-says. Download the new wheel, `requirements.lock` and `SHA256SUMS.txt` into one folder. Then, in an
-administrator window, run the check first. It changes nothing:
+If you installed TaskDash with `Install-TaskDash.ps1`, the same script can upgrade it. The
+installer upgrades only an install in `C:\TaskDash\venv`. For a cloned ArcGIS Pro environment, use
+"Upgrade by hand". The script does steps 3, 4, 5 (the hash check), 6, 8, 9, 10 and 11 below for
+you, and step 12 only if you ask. It does not do step 7. Before you start, run
+`& $td preflight --config-diff` in the administrator window. The command only reads the config.
+Read the release notes first, as step 1 says. Download the new `Install-TaskDash.ps1`, the wheel,
+`requirements.lock` and `SHA256SUMS.txt` from the release page into one folder. Use the script from
+the new release: a copy from an earlier install has no `-Upgrade`. Check the script against its line
+in `SHA256SUMS.txt`, as INSTALL.md describes. Then, in an administrator window, run the check first.
+It changes nothing:
 
 ```powershell
 powershell.exe -ExecutionPolicy Bypass -File "$env:USERPROFILE\Downloads\Install-TaskDash.ps1" -InstallDir C:\TaskDash -Wheel "$env:USERPROFILE\Downloads\taskdash-<version>-py3-none-any.whl" -TaskAccount DOMAIN\svc-taskdash -Upgrade

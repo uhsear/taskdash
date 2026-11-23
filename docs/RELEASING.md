@@ -22,7 +22,9 @@ removed. That copy step is gone: the release workflow publishes to the public re
 3. Move the `[Unreleased]` entries of `CHANGELOG.md` under the new version and date them.
    `CHANGELOG.md` is the one full set of release notes. The summary in `docs/INTRODUCTION.md` links
    to it. The release body holds `.github/release-notes.md` and the `CHANGELOG.md` section of the
-   version, so write that section for readers. Open it with an **Upgrade notes** block when the
+   version, so write that section for readers. For a candidate such as `1.2.0rc1`, still use the
+   heading `## [1.2.0]`. The workflow strips the `rc` suffix and fails when that section is missing.
+   Add a summary entry with the release date under **Release notes** in `docs/INTRODUCTION.md`. Open it with an **Upgrade notes** block when the
    release has upgrade steps: the schema change, the commands to run and the behaviour changes.
 4. Run the full suite and fix every failure:
 
@@ -42,8 +44,9 @@ removed. That copy step is gone: the release workflow publishes to the public re
 
 2. Run it again with `--apply` and an empty output folder. Add `--private-list` with the path of
    your private deny list. The script then scans the output, and a deny-list hit makes it exit 1.
-3. Read the credential-pattern lines the script prints. They are a list to review, not a gate.
-4. Copy the output into a clone of `uhsear/taskdash`, commit it and push it. The script never
+3. Read the credential-pattern lines that the script prints in step 2. They are a list to review, not a gate.
+4. Delete every tracked file in the clone except `.git`. Copy the output into the clone. Run
+   `git status` to review the added and removed files. Then commit and push. The script never
    runs `git commit` or `git push`.
 
 ## 3. Tag and build
@@ -85,5 +88,4 @@ Do this from a clean folder, with the files you download from the release page.
 
 ## 5. After the release
 
-1. Update the "not yet released" lines in `CHANGELOG.md` and `docs/INTRODUCTION.md` to the release date.
-2. Open a new `[Unreleased]` section in `CHANGELOG.md`.
+1. Open a new `[Unreleased]` section in `CHANGELOG.md`.

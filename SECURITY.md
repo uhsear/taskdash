@@ -2,8 +2,8 @@
 
 ## Report a vulnerability
 
-Report a vulnerability privately. Do not open an issue, because issues are visible to everyone with
-access to the repository.
+Report a vulnerability privately. Do not open an issue, because every issue in this public repository is
+visible to everyone.
 
 The channel is the TaskDash repository, <https://github.com/uhsear/taskdash>. It holds the code
 and the releases.

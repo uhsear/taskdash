@@ -56,8 +56,8 @@ Each widget has an information icon. It opens a short help text. The text tells 
 shows and why it matters. For most widgets, it also tells you what to do.
 
 The dashboard shows run times in the time zone of your device. It shows schedules by the clock of
-the computer. While the page is open, the heartbeat tiles update every 5 minutes and **Metric change**
-updates every hour. The other widgets do not update. To see newer data in them, reload the page.
+the computer. While the page is open, the **Collector heartbeat** and **Lowest 7-day success** tiles update every 5 minutes and
+**Metric change** updates every hour. The other widgets do not update. To see newer data in them, reload the page.
 
 A short **About Overview** panel on the **Overview** tab says what the tiles count. The full
 **About TaskDash** panel is on the **Collector & Changes** tab.
