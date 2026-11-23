@@ -98,7 +98,7 @@ do the same work by hand.
    exit codes 0 to 7 mean success. A code of 8 or more means a copy failed.
 
 5. Download the new wheel and `requirements.lock` into `Downloads` from
-   <https://github.com/uhsear/taskdash-releases/releases/latest>. Check the SHA-256 value of each
+   <https://github.com/uhsear/taskdash/releases/latest>. Check the SHA-256 value of each
    against `SHA256SUMS.txt` on the release page. Do not install a file that does not match.
 
    ```powershell

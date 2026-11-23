@@ -5,12 +5,12 @@
 Report a vulnerability privately. Do not open an issue, because issues are visible to everyone with
 access to the repository.
 
-The channel is the public release repository, <https://github.com/uhsear/taskdash-releases>. The
-code repository is not open to readers of the release page, so do not look for a channel there.
+The channel is the TaskDash repository, <https://github.com/uhsear/taskdash>. It holds the code
+and the releases.
 
-1. Private vulnerability reporting is on for the release repository. Open its **Security** tab,
+1. Private vulnerability reporting is on for the repository. Open its **Security** tab,
    select **Report a vulnerability** and describe the problem there.
-2. If the button is missing, contact the owner of the release repository, `uhsear`, through GitHub and ask for
+2. If the button is missing, contact the owner of the repository, `uhsear`, through GitHub and ask for
    a private channel. Do not put the details in the first message.
 
 Include the TaskDash version (`taskdash --version`), the steps that show the problem and what an
@@ -101,8 +101,7 @@ The release workflow signs the wheel and `SHA256SUMS.txt` with Sigstore, without
 uses the identity that GitHub gives the sign job. Each release lists a `.sigstore.json` bundle for
 each signed file. `docs/INSTALL.md` shows how to verify a bundle.
 
-The signing identity is the private repository that builds the release. The maintainer copies the
-signed files to the public release page by hand, so the identity names that repository. For the tag
+The signing identity is the release workflow of the repository that builds and publishes the release. For the tag
 `<tag>`, the identity is `https://github.com/uhsear/taskdash/.github/workflows/release.yml@refs/tags/<tag>`. Check a file with
 `python -m sigstore verify github --cert-identity <identity> --bundle <file>.sigstore.json <file>`.
 Release `v1.1.0` carries exactly this identity for `v1.1.0`.

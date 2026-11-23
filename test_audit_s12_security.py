@@ -85,10 +85,11 @@ def test_the_mail_defaults_the_sheet_names_are_the_defaults_in_the_code(monkeypa
 
 # ------------------------------------------------------------------ TD-198
 
-def test_every_signing_doc_says_the_signer_is_the_private_build_repository():
+def test_every_signing_doc_says_the_signer_is_the_release_workflow_of_the_public_repository():
     for parts in (("docs", "INSTALL.md"), ("docs", "APPROVAL.md"), ("SECURITY.md",)):
         text = _read(*parts)
-        assert re.search(r"private (build )?repository", text) and "by hand" in text, parts
+        assert "release workflow" in text, parts
+        assert not re.search(r"private (build )?repository|copies the signed files", text), parts
 
 
 # ------------------------------------------------------------------ TD-200
@@ -106,7 +107,7 @@ def test_the_release_checklist_covers_every_step_and_names_the_real_files():
     text = _read("docs", "RELEASING.md")
     for needle in ("TASKDASH_VERSION", "CHANGELOG.md", "_tools/export_public.py", "--apply", "--private-list",
                    "v1.2.0-rc1", "1.2.0rc1", "uhsear/taskdash-releases", "SHA256SUMS.txt", "sigstore.json",
-                   "Install-TaskDash.ps1", "Get-FileHash", "does not export to the public repository"):
+                   "Install-TaskDash.ps1", "Get-FileHash", "That copy step is"):
         assert needle in text, needle
     # Every file it names exists, so a rename breaks this test instead of the checklist.
     for name in re.findall(r"`((?:_tools|docs|\.github/workflows)/[\w./-]+\.(?:py|md|yml))`", text):
@@ -122,7 +123,7 @@ def test_the_workflow_header_and_the_export_script_point_at_the_checklist():
 
 def test_the_package_names_its_release_page_and_that_it_is_for_windows():
     project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]
-    assert project["urls"]["Homepage"] == "https://github.com/uhsear/taskdash-releases"
+    assert project["urls"]["Homepage"] == "https://github.com/uhsear/taskdash"
     assert project["urls"]["Releases"].startswith(project["urls"]["Homepage"])
     classifiers = project["classifiers"]
     assert "Operating System :: Microsoft :: Windows" in classifiers

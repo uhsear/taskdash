@@ -5,16 +5,15 @@ of the public release page. Work through the steps in order, and stop at the fir
 
 ## How the release moves
 
-A release passes through two repositories:
+The public repository `uhsear/taskdash` holds the code and the releases:
 
-1. The **private build repository** runs the workflows in `.github/workflows`. A `v*` tag there
-   runs `release.yml`. That workflow tests, builds, signs and publishes a private release.
-2. The **public release repository**, `uhsear/taskdash-releases`, is where users download. The
-   workflow does not write to it, because that would need a token for the second repository. The
-   maintainer copies the files by hand.
+1. `_tools/export_public.py` writes the committed files to a folder. It leaves out private files
+   and scans the output against the deny list. Only that folder is pushed to the repository.
+2. A `v*` tag in the repository runs `release.yml`. That workflow tests, builds, signs and
+   publishes the release on the repository's release page, where users download it.
 
-`_tools/export_public.py` does not export to the public repository. Its name is older than the
-split. It writes the committed files to a folder for the private build repository.
+Releases up to `v1.1.0` were also copied by hand to `uhsear/taskdash-releases`. That copy step is
+gone: the release workflow now publishes to the public repository itself.
 
 ## 1. Prepare the version
 
@@ -33,7 +32,7 @@ split. It writes the committed files to a folder for the private build repositor
 
 5. Commit the changes to the main branch.
 
-## 2. Export to the build repository
+## 2. Export to the repository
 
 1. Run the export as a check. It lists what it would write and what it excludes:
 
@@ -44,12 +43,12 @@ split. It writes the committed files to a folder for the private build repositor
 2. Run it again with `--apply` and an empty output folder. Add `--private-list` with the path of
    your private deny list. The script then scans the output, and a deny-list hit makes it exit 1.
 3. Read the credential-pattern lines the script prints. They are a list to review, not a gate.
-4. Copy the output into a clone of the build repository, commit it and push it. The script never
+4. Copy the output into a clone of `uhsear/taskdash`, commit it and push it. The script never
    runs `git commit` or `git push`.
 
 ## 3. Tag and build
 
-1. Tag the commit in the build repository. For a release candidate, write the tag as `v1.2.0-rc1`.
+1. Tag the commit in the repository. For a release candidate, write the tag as `v1.2.0-rc1`.
    The workflow turns it into the version `1.2.0rc1`, and publishes a pre-release.
 
    ```powershell
@@ -60,22 +59,11 @@ split. It writes the committed files to a folder for the private build repositor
 2. Wait for the `release` workflow. Its jobs are `test`, `matrix`, `wheel`, `build`, `sign` and
    `publish`. `publish` starts only after the full CI matrix passes.
 3. If the check of the tag against the package version fails, fix `TASKDASH_VERSION` or the tag. Delete
-   the tag in the build repository, then tag again.
+   the tag in the repository, then tag again.
 
-## 4. Copy the release to the public repository
+## 4. Verify the release
 
-1. Download every file of the private release into an empty folder: the wheel, `requirements.lock`,
-   the `.cdx.json` SBOM, `Install-TaskDash.ps1`, the `taskdash-docs-<version>.zip` of the guides,
-   `SHA256SUMS.txt` and the `.sigstore.json` bundles.
-2. Create a release with the same tag in `uhsear/taskdash-releases`. Attach every file from the
-   folder, unchanged. Mark a candidate as a pre-release.
-3. Give the release the title of the private release. Its body can link to `CHANGELOG.md` and
-   `docs/UPGRADE.md`, so the notes stay in one place.
-
-## 5. Verify the public copy
-
-Do this from a clean folder, with the files you download from the public release page. Do not use
-the copies from step 4.
+Do this from a clean folder, with the files you download from the release page.
 
 1. Compare each file with `SHA256SUMS.txt`:
 
@@ -83,8 +71,9 @@ the copies from step 4.
    Get-FileHash .\taskdash-*.whl -Algorithm SHA256
    ```
 
-2. Check the signature of the wheel and of `SHA256SUMS.txt`, as `docs/INSTALL.md` describes. Each
-   command must print `OK:`. The identity names the private build repository, not the public one.
+2. Check the signature of the wheel and of `SHA256SUMS.txt` with their `.sigstore.json` bundles, as
+   `docs/INSTALL.md` describes. Each
+   command must print `OK:`.
 3. Run the installer in check mode with the downloaded wheel. It must report that the SHA-256 matches
    `SHA256SUMS.txt`, and it must create nothing:
 
@@ -92,10 +81,9 @@ the copies from step 4.
    .\Install-TaskDash.ps1 -InstallDir C:\TaskDash -Wheel .\taskdash-<version>-py3-none-any.whl -TaskAccount DOMAIN\svc-taskdash
    ```
 
-4. If any check fails, delete the public release and do not announce it. Find the cause in the
-   build repository first.
+4. If any check fails, delete the release and do not announce it. Find the cause first.
 
-## 6. After the release
+## 5. After the release
 
 1. Update the "not yet released" lines in `CHANGELOG.md` and `docs/INTRODUCTION.md` to the release date.
 2. Open a new `[Unreleased]` section in `CHANGELOG.md`.

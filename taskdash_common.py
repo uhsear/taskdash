@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 # Shown in the dashboard's About panel and the wheel name; release.yml checks it against the tag.
-TASKDASH_VERSION = "1.2.0rc3"
+TASKDASH_VERSION = "1.2.0rc4"
 # Bump when TABLE_SPECS or TABLE_INDEXES change. A service stamped with a newer number was
 # migrated by a newer TaskDash, which this one may write wrongly.
 SCHEMA_VERSION = 2

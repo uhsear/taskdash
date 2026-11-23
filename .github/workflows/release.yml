@@ -1,14 +1,11 @@
 # Builds the wheel for a v* tag and attaches it to a GitHub Release. The release also carries a
 # hash-pinned requirements.lock, a CycloneDX SBOM, the one-window installer Install-TaskDash.ps1,
 # a zip of the guides (taskdash-docs-<version>.zip), and SHA256SUMS.txt that lists the wheel and
-# those four files. The guides are a release file because the code repository is private: a reader of
-# the public release page has no other way to open INSTALL.md before the install. The release notes
-# are .github/release-notes.md plus the CHANGELOG.md section of the version, not --generate-notes,
-# which would copy private commit titles.
-# The repository is private, so the release is visible only to people with access to it.
-# After the private release exists, the maintainer copies the release files to the public
-# repository uhsear/taskdash-releases by hand. This workflow does not do the copy: it would need
-# a token for the other repository, and none is stored here. docs/RELEASING.md lists every step.
+# those four files. The guides are a release file so a reader can open INSTALL.md before the install,
+# without the source tree. The release notes are .github/release-notes.md plus the CHANGELOG.md
+# section of the version, not --generate-notes, which would list commit titles instead of notes.
+# The repository is public, so this release is the public release. Earlier releases were copied by
+# hand to uhsear/taskdash-releases; that copy step is gone. docs/RELEASING.md lists every step.
 # A tag with a hyphen (v1.0.0-rc1) makes a pre-release, and its wheel version is 1.0.0rc1 (PEP 440).
 # Only the publish job can write. It runs after the full test suite, the CI matrix of matrix.yml,
 # the build and the signing all pass.

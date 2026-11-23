@@ -271,6 +271,9 @@ Behaviour changes to check in your own scripts:
 
 ### Changed
 
+- Releases and the code are now in one public repository, <https://github.com/uhsear/taskdash>.
+  Download new releases from its release page and report problems there. `uhsear/taskdash-releases`
+  keeps the releases up to `v1.1.0` and gets no new ones. The signer identity does not change.
 - `load_config` now rejects a number outside its range, and the message names the key and the
   range. A count such as `upload.chunk_size` must be 1 or more. `alerting.heartbeat_hour` must be
   0 to 23. `scheduler.collector_interval_minutes` and `scheduler.heartbeat_ignore_after_days` must
@@ -592,7 +595,7 @@ Behaviour changes to check in your own scripts:
   only the pinned build tool, and the build job checks those hashes after the unpinned tools run.
 - `pywin32` is now a declared dependency on Windows. The sign-in hand-off and `--as-task` import it.
 - `.gitignore` now covers `taskdash_handoff.bin`, atomic-write temp files and build output.
-- `SECURITY.md` names the public release repository as the reporting channel.
+- `SECURITY.md` names the public TaskDash repository as the reporting channel.
 - The install guide locks the install folder: Administrators own it, and the daily account gets
   Read & Execute. A user who can write to the folder controls the administrator task account, so
   `taskdash preflight` now fails on a writer or owner who is not an administrator.

@@ -18,7 +18,7 @@ saved sign-in, and TaskDash fails with "A specified logon session does not exist
 ## Quick install
 
 If you meet the Requirements below, two commands do steps 1 to 8 for you. From the release page
-(<https://github.com/uhsear/taskdash-releases/releases/latest>), download these four files into your
+(<https://github.com/uhsear/taskdash/releases/latest>), download these four files into your
 `Downloads` folder: `Install-TaskDash.ps1`, the wheel, `requirements.lock`, and `SHA256SUMS.txt`. The
 script checks the wheel and the lock against `SHA256SUMS.txt`. To check the script too, compare the
 output of `Get-FileHash` on it with its line in `SHA256SUMS.txt`. Open PowerShell as administrator.
@@ -119,7 +119,7 @@ describe the same work by hand.
   the local Administrators group on this computer. It needs a password, because the task stores it.
   This guide calls it `DOMAIN\svc-taskdash`. Use your own account name everywhere you see it. For a
   local account, write `COMPUTERNAME\name`, for example `TASKHOST1\svc-taskdash`.
-- **The TaskDash wheel:** from <https://github.com/uhsear/taskdash-releases/releases/latest>, download the
+- **The TaskDash wheel:** from <https://github.com/uhsear/taskdash/releases/latest>, download the
   file `taskdash-<version>-py3-none-any.whl` into your `Downloads` folder. Keep only one TaskDash
   wheel in that folder. If this computer cannot reach GitHub, download the file on another computer
   and copy it into `Downloads`. The release page is public, so you need no GitHub account.
@@ -138,9 +138,7 @@ describe the same work by hand.
     ```
 
     The command prints `OK: <file>` when the release workflow of the TaskDash repository signed
-    the file. That is the private repository that builds the release. The maintainer copies the
-    signed files to the public release page by hand, so the identity names the private repository.
-    For example, release `v1.1.0` carries the identity
+    the file. For example, release `v1.1.0` carries the identity
     `https://github.com/uhsear/taskdash/.github/workflows/release.yml@refs/tags/v1.1.0`. The command
     also checks that GitHub Actions issued the signing certificate.
     Any other output means you must not install the file. Ask the TaskDash maintainer.

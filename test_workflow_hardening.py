@@ -182,13 +182,14 @@ def test_install_guide_documents_the_sigstore_verification_of_the_release_files(
         assert needle in guide, needle
 
 
-def test_docs_point_downloads_at_the_public_release_repository():
+def test_docs_point_downloads_at_the_public_repository():
     root = WORKFLOWS.parent.parent
     guide = (root / "docs" / "INSTALL.md").read_text(encoding="utf-8")
-    assert "https://github.com/uhsear/taskdash-releases/releases/latest" in guide
+    assert "https://github.com/uhsear/taskdash/releases/latest" in guide
     for path in [root / "README.md", *(root / "docs").glob("*.md")]:
         text = path.read_text(encoding="utf-8")
-        assert "uhsear/taskdash/releases" not in text, path.name
+        # RELEASING.md names the old copy repository once, as history; no guide sends readers there.
+        assert "taskdash-releases/releases" not in text, path.name
         assert "repository is private" not in text, path.name
         assert "ask the TaskDash maintainer for" not in text, path.name
         assert "Readers are invited" not in text, path.name
@@ -199,9 +200,9 @@ def test_security_policy_says_the_signing_identity_is_public():
     assert "transparency log" in policy and "Sigstore" in policy
 
 
-def test_release_header_says_the_public_copy_is_manual():
+def test_release_header_says_the_release_is_public_and_the_copy_step_is_gone():
     header = _text("release.yml").split("\nname:", 1)[0]
-    assert "uhsear/taskdash-releases" in header and "maintainer" in header
+    assert "The repository is public" in header and "copy step is gone" in header
 
 
 def test_test_dependencies_pin_the_arcgis_major_version():
@@ -215,7 +216,7 @@ def test_gitleaks_archive_is_verified_against_its_checksums_before_extraction():
 
 
 def test_the_guides_are_a_checksummed_release_asset_and_the_notes_come_from_a_file():
-    # The code repository is private, so the release page is the only place a reader finds INSTALL.md.
+    # The guides zip lets a reader open INSTALL.md from the release page, without the source tree.
     jobs = _jobs(_text("release.yml"))
     build = jobs["build"]
     assert re.search(r"Compress-Archive -Path docs, README.md, SECURITY.md, CHANGELOG.md -DestinationPath \"dist\\taskdash-docs-\$version.zip\"", build)
@@ -237,7 +238,7 @@ def test_the_guides_are_a_checksummed_release_asset_and_the_notes_come_from_a_fi
         assert needle in notes, needle
 
 
-def test_security_policy_names_the_public_release_repository_as_the_channel():
+def test_security_policy_names_the_public_repository_as_the_channel():
     policy = (WORKFLOWS.parent.parent / "SECURITY.md").read_text(encoding="utf-8")
-    assert "https://github.com/uhsear/taskdash-releases" in policy
+    assert "https://github.com/uhsear/taskdash" in policy
     assert "Report a vulnerability" in policy

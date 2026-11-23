@@ -1,8 +1,8 @@
 # Install TaskDash
 
 TaskDash watches the scheduled tasks on one Windows computer and publishes their health to ArcGIS
-Online. These files are everything you need. The code repository is private, so the guides are here
-too.
+Online. These files are everything you need. The guides are here too, so you can read them before
+the install.
 
 1. Download `taskdash-docs-<version>.zip`, unzip it, and read `docs\INSTALL.md`. Give
    `docs\APPROVAL.md` to your IT or security team first if they must approve the install.

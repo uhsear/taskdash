@@ -65,8 +65,8 @@ also runs the offline passes on 500 synthetic tasks. ArcGIS Enterprise is not te
 
 ## Issues
 
-Release files are public at <https://github.com/uhsear/taskdash-releases/releases/latest>. To report
-a problem or ask for a change, contact the repository owner through GitHub. For a vulnerability,
+Release files are public at <https://github.com/uhsear/taskdash/releases/latest>. To report
+a problem or ask for a change, open an issue in this repository. For a vulnerability,
 do not open an issue. Follow [SECURITY.md](SECURITY.md).
 
 Follow this rule for every report. Before you send a message or a log line, remove host names,

@@ -106,7 +106,6 @@ Each release lists the wheel, `SHA256SUMS.txt`, a hash-pinned `requirements.lock
 `Install-TaskDash.ps1`, a zip of the guides (`taskdash-docs-<version>.zip`) and Sigstore bundles
 for the wheel and for `SHA256SUMS.txt`. Compare the hash and check the signature
 as INSTALL.md describes in its Requirements, and use the lock file as in "Optional: locked
-install". The signature names the private build repository, because the maintainer copies the
-files to the public release page by hand. The signer identity is
+install". The signature names the release workflow of the TaskDash repository. The signer identity is
 `https://github.com/uhsear/taskdash/.github/workflows/release.yml@refs/tags/<tag>`. Check a file with
 `python -m sigstore verify github --cert-identity <identity> --bundle <file>.sigstore.json <file>`. To report a vulnerability, follow [SECURITY.md](../SECURITY.md).

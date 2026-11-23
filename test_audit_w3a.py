@@ -148,10 +148,10 @@ def test_the_signer_identity_is_pinned_in_every_signing_doc_and_names_the_real_w
         assert "--cert-identity" in text and ".sigstore.json" in text, parts
     assert SIGNER_IDENTITY + "v1.1.0" in _flat("docs", "INSTALL.md")
     assert (ROOT / ".github" / "workflows" / "release.yml").is_file()
-    # The identity names the private build repository, not the public release repository.
+    # One public repository builds, signs and publishes, so the identity and the homepage name it.
     assert "taskdash-releases" not in SIGNER_IDENTITY
     homepage = tomllib.loads(_text("pyproject.toml"))["project"]["urls"]["Homepage"]
-    assert homepage.endswith("/taskdash-releases")
+    assert SIGNER_IDENTITY.startswith(homepage + "/")
 
 
 # ------------------------------------------------------------------ TD-200
@@ -169,10 +169,10 @@ def test_the_guides_list_every_privilege_the_preflight_checks_and_recommend_a_de
 
 # ------------------------------------------------------------------ TD-001
 
-def test_security_policy_says_private_reporting_is_on_for_the_release_repository():
+def test_security_policy_says_private_reporting_is_on_for_the_repository():
     text = _flat("SECURITY.md")
-    assert "Private vulnerability reporting is on for the release repository" in text
-    assert "https://github.com/uhsear/taskdash-releases" in text
+    assert "Private vulnerability reporting is on for the repository" in text
+    assert "https://github.com/uhsear/taskdash" in text
 
 
 # ------------------------------------------------------------------ TD-098, TD-099
