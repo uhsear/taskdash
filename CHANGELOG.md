@@ -6,7 +6,7 @@ All notable changes to TaskDash are listed here. The format follows
 
 ## [Unreleased]
 
-## [1.2.0] - not yet released
+## [1.2.0] - 2026-11-23
 
 ### Upgrade notes
 
@@ -272,8 +272,8 @@ Behaviour changes to check in your own scripts:
 ### Changed
 
 - Releases and the code are now in one public repository, <https://github.com/uhsear/taskdash>.
-  Download new releases from its release page and report problems there. `uhsear/taskdash-releases`
-  keeps the releases up to `v1.1.0` and gets no new ones. The signer identity does not change.
+  Download releases from its release page and report problems there. It also holds every earlier
+  release. `uhsear/taskdash-releases` is removed. The signer identity does not change.
 - `load_config` now rejects a number outside its range, and the message names the key and the
   range. A count such as `upload.chunk_size` must be 1 or more. `alerting.heartbeat_hour` must be
   0 to 23. `scheduler.collector_interval_minutes` and `scheduler.heartbeat_ignore_after_days` must

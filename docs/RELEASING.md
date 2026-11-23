@@ -12,8 +12,8 @@ The public repository `uhsear/taskdash` holds the code and the releases:
 2. A `v*` tag in the repository runs `release.yml`. That workflow tests, builds, signs and
    publishes the release on the repository's release page, where users download it.
 
-Releases up to `v1.1.0` were also copied by hand to `uhsear/taskdash-releases`. That copy step is
-gone: the release workflow now publishes to the public repository itself.
+Releases up to `v1.1.0` were also copied by hand to `uhsear/taskdash-releases`, which is now
+removed. That copy step is gone: the release workflow publishes to the public repository itself.
 
 ## 1. Prepare the version
 

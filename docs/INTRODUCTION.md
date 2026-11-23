@@ -152,7 +152,7 @@ sent only when `alerting.heartbeat_hour` is set. The example config sets it to 7
 
 ## Release notes
 
-### 1.2.0 (not yet released)
+### 1.2.0 (2026-11-23)
 
 Easier install and upkeep, and less work per hourly run. `Install-TaskDash.ps1` installs in one
 window, and `taskdash signin` and `taskdash preflight --as-task` set up and check the task account.
